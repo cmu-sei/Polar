@@ -266,10 +266,15 @@ impl Custody {
     }
 
     /// The plan `polar-init` gives, once the custodian's certificate is installed: only what that certificate names,
-    /// for the workload it is the custodian of, and once.
+    /// for the workload it is the custodian of, and once. The same plan given again changes nothing and is answered as
+    /// taken: polar-init run again in the same pod gives it again (docs/architecture/key-custody.md, "A retry in place").
     fn bootstrap(&mut self, plan: Plan) -> Reply {
-        if self.plan.is_some() {
-            return Reply::Refused(Refusal::Sealed);
+        if let Some(given) = &self.plan {
+            return if *given == plan {
+                Reply::Installed
+            } else {
+                Reply::Refused(Refusal::Sealed)
+            };
         }
         let Some(Held {
             identity: custodian,
@@ -325,12 +330,17 @@ impl Custody {
         }
     }
 
-    /// The custodian could not fetch what it was asked to, and will not: `polar-init` is told, and the pod starts
-    /// again.
+    /// The custodian could not fetch what it was asked to, and will not: `polar-init` is told, and the daemon ends, so
+    /// that the kubelet starts it again empty (docs/architecture/key-custody.md, "A retry in place").
     pub fn set_failed(&mut self, why: String) {
         if !self.ready {
             self.failed = Some(why);
         }
+    }
+
+    /// Why the custodian could not fetch what it was asked to, if it could not.
+    pub fn failure(&self) -> Option<String> {
+        self.failed.clone()
     }
 
     /// A new key for one of the workload's slots, and its CSR, for the custodian to ask its certificate with.
@@ -1271,9 +1281,24 @@ mod custodian_tests {
             custody.handle(INSTALLER, plan(true, None, false), time_now()),
             Reply::Installed
         );
+        // Given again, the same plan changes nothing: polar-init run again in the same pod finds it given
+        // (docs/architecture/key-custody.md, "A retry in place"). Any other is refused: what was planned stands.
         assert_eq!(
             custody.handle(INSTALLER, plan(true, None, false), time_now()),
+            Reply::Installed
+        );
+        assert_eq!(
+            custody.handle(INSTALLER, plan(false, None, false), time_now()),
             Reply::Refused(Refusal::Sealed)
+        );
+        assert_eq!(
+            custody.plan(),
+            Some(Plan {
+                identity: IDENTITY.to_string(),
+                client: true,
+                server: None,
+                escrow: false,
+            })
         );
         // And the workload's slots are the custodian's to fill now, not polar-init's.
         let reply = custody.handle(
@@ -1317,12 +1342,16 @@ mod custodian_tests {
         // A failure is said, and stays said.
         let (mut failing, _) = with_custodian(&ca, &[CustodyPermission::Client]);
         failing.handle(INSTALLER, plan(true, None, false), time_now());
+        assert_eq!(failing.failure(), None);
         failing.set_failed("refused".to_string());
         failing.set_ready();
         assert_eq!(
             failing.handle_read(INSTALLER, Request::Ready),
             Reply::Refused(Refusal::BootstrapFailed("refused".to_string()))
         );
+        // The daemon reads it to end (docs/architecture/key-custody.md, "A retry in place").
+        assert_eq!(failing.failure(), Some("refused".to_string()));
+        assert_eq!(custody.failure(), None, "a ready custodian has not failed");
     }
 
     #[test]

@@ -203,12 +203,38 @@ pub fn judge_certificate(
     )
 }
 
+/// Whether a certificate the custody daemon already holds in a slot can still be used: judged as [`judge_certificate`]
+/// judges one, but for its key, which the daemon checked was the slot's when it installed it, and which no one else can
+/// see. polar-init run again in the same pod judges this way what its run before left sealed in the daemon
+/// (docs/architecture/key-custody.md, "A retry in place"). `Ok` is when it expires.
+pub fn judge_held(
+    cert_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        Key::Held,
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
 /// Where the certificate's key is to be found, for the judgement to check the certificate is for it.
 enum Key<'a> {
     /// `key.pem`, the key itself.
     File(&'a [u8]),
     /// The CSR the certificate was issued for, whose key another holds.
     Csr(&'a [u8]),
+    /// The custody daemon's, which checked the certificate is for it when it installed it.
+    Held,
 }
 
 /// The one judgement every caller makes. `ca_name` names the CA in the reasons.
@@ -315,6 +341,7 @@ fn judge(
                 return Err("the certificate is not for the key the CSR carries".to_string());
             }
         }
+        Key::Held => {}
     }
 
     Ok(not_after.to_string())

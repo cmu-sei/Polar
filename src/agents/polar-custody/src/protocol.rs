@@ -56,7 +56,8 @@ pub enum Request {
     Sign { slot: Slot, message: Vec<u8> },
     /// What the custodian is to fetch for `identity`, the workload, once its own certificate is installed: its client
     /// certificate, its server certificate with these names, its escrow key. Only what the custodian's certificate
-    /// names. `polar-init`'s, once; the slots it names are the custodian's to fill from then on.
+    /// names. `polar-init`'s, once (the same plan again, from its run again in the same pod, is taken and changes
+    /// nothing); the slots it names are the custodian's to fill from then on.
     Bootstrap {
         identity: String,
         client: bool,

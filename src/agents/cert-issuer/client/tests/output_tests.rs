@@ -534,6 +534,52 @@ mod custody {
         issued(ca, &other)
     }
 
+    // docs/architecture/key-custody.md, "A retry in place": what a run before left in the daemon, whose key the daemon
+    // checked when it installed it, is judged for the rest as any other is.
+    #[test]
+    fn a_certificate_the_daemon_holds_is_judged_for_all_but_its_key() {
+        use cert_client::output::judge_held;
+        let (ours, theirs) = (ca(), ca());
+        let held = |cert: &str, ca: &Ca, names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            judge_held(
+                cert.as_bytes(),
+                ca.pem.as_bytes(),
+                IDENTITY,
+                &names,
+                Usage::Client,
+                SystemTime::now(),
+            )
+        };
+        let cert = issued(&ours, &csr(&[IDENTITY]));
+        assert!(held(&cert, &ours, &[]).is_ok());
+        let why = held(&cert, &theirs, &[]).unwrap_err();
+        assert!(why.contains("not signed by"), "{why}");
+        let why = held(&cert, &ours, &["neo4j"]).unwrap_err();
+        assert!(why.contains("does not name 'neo4j'"), "{why}");
+        let why = judge_held(
+            cert.as_bytes(),
+            ours.pem.as_bytes(),
+            IDENTITY,
+            &[],
+            Usage::Server,
+            SystemTime::now(),
+        )
+        .unwrap_err();
+        assert!(why.contains("not for Server use"), "{why}");
+        let later = SystemTime::now() + std::time::Duration::from_secs(2 * 3600);
+        let why = judge_held(
+            cert.as_bytes(),
+            ours.pem.as_bytes(),
+            IDENTITY,
+            &[],
+            Usage::Client,
+            later,
+        )
+        .unwrap_err();
+        assert!(why.contains("not valid now"), "{why}");
+    }
+
     #[test]
     fn a_csr_that_is_not_one_is_refused() {
         let ca = ca();

@@ -42,6 +42,7 @@ use tracing::{error, info, warn};
 
 /// The exit code once a certificate it held is revoked and its keys are destroyed.
 const REVOKED: i32 = 3;
+const CUSTODIAN_FAILED: i32 = 4;
 
 struct Settings {
     socket: String,
@@ -201,6 +202,17 @@ async fn main() {
         error!("cannot watch for this pod's revocation: {e}");
         std::process::exit(1);
     }
+    // A custodian that failed holds what is spent: the kubelet starts the daemon again empty, for polar-init's next run
+    // in this pod (docs/architecture/key-custody.md, "A retry in place").
+    tokio::spawn(polar_custody_daemon::end_once_failed(
+        custody.clone(),
+        polar_custody_daemon::FAILURE_LOOK_EVERY,
+        polar_custody_daemon::FAILED_GRACE,
+        |why| {
+            error!(%why, "the custodian could not fetch what it was asked to: exiting, to start again empty");
+            std::process::exit(CUSTODIAN_FAILED);
+        },
+    ));
     info!(socket = %settings.socket, installer = settings.callers.installer_uid, workload = ?settings.callers.workload_uids, broker = %settings.broker, publisher = %settings.publisher, "custody daemon serving");
     if let Err(e) = serve(listener, custody, Arc::new(settings.callers)).await {
         error!("the socket failed: {e}");

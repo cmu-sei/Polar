@@ -29,8 +29,8 @@
 //! are made in the custody, and the certificate the credentials agent issues is judged and installed as `polar-init`'s
 //! would be. The escrow key is retrieved, sealed to an ephemeral this machine opens alone; if none is escrowed, one is
 //! made in the custody, its certificate issued, and the key sealed to the credentials agent's key as the daemon pinned
-//! it, and stored. A refusal is final: the custody is told, and `polar-init` with it, so the pod starts again. A reply
-//! that never comes is asked for again.
+//! it, and stored. A refusal is final: the custody is told, and `polar-init` with it, and the daemon ends so that it
+//! starts again empty (`crate::end_once_failed`). A reply that never comes is asked for again.
 
 use credentials_agent_common::agent_escrow_issuance::{
     AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
@@ -94,7 +94,7 @@ pub enum Progress {
     Wait,
     /// Everything is fetched: the custody says so.
     Done,
-    /// It cannot be fetched: the custody says so, and `polar-init` stops the pod.
+    /// It cannot be fetched: the custody says so, `polar-init` stops, and the daemon ends to start again empty.
     Failed(String),
 }
 

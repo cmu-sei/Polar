@@ -69,7 +69,7 @@ use cert_issuer_common::{
 use clap::Parser;
 use credentials_agent_common::issuance::WorkloadCertType;
 use polar_custody::client::{ClientError, CustodyClient};
-use polar_custody::protocol::{FrameError, Slot};
+use polar_custody::protocol::{FrameError, Refusal, Slot};
 use polar_health::DepCertEndpoint;
 
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -374,8 +374,14 @@ async fn main() {
                             .to_string(),
                     );
                 }
-                if let Err(why) =
-                    custodian_from_cert_issuer(&client, &sa_token, &dns_identity, daemon).await
+                if let Err(why) = custodian_from_cert_issuer(
+                    &client,
+                    &sa_token,
+                    &dns_identity,
+                    pinned_ca.as_deref().map(str::as_bytes),
+                    daemon,
+                )
+                .await
                 {
                     stop(why);
                 }
@@ -429,6 +435,7 @@ async fn main() {
                     &dns_identity,
                     &plan,
                     &offers,
+                    &pinned_ca,
                     daemon,
                 )
                 .await
@@ -736,6 +743,60 @@ async fn of_the_daemon<T: Send + 'static>(
     }
 }
 
+/// What a run of polar-init before this one, in the same pod, left in the daemon's `slot` (docs/architecture/key-custody.md,
+/// "A retry in place"). The daemon is a native sidecar, which the kubelet does not restart when an init container
+/// fails, and a slot is sealed once a certificate is installed in it, so polar-init run again finds what that run
+/// installed. `None` is a slot to fill as on a first run; `Some` is the certificate it holds, still good for `identity`,
+/// its `names` and its `usage` under the pinned CA, to go on from; `Err` is a sealed slot holding one this pod cannot
+/// use, which only a new pod gets past.
+async fn held_before(
+    daemon: &Arc<CustodyClient>,
+    slot: Slot,
+    identity: &str,
+    names: &[String],
+    usage: output::Usage,
+    pinned_ca: Option<&[u8]>,
+    delay: Duration,
+) -> Result<Option<String>, String> {
+    let held = of_the_daemon(
+        daemon,
+        "say what it holds",
+        delay,
+        move |daemon| match daemon.certificate(slot) {
+            Ok(chain) => Ok(chain.into_iter().next()),
+            Err(ClientError::Refused(Refusal::NoKey | Refusal::NoCertificate)) => Ok(None),
+            Err(e) => Err(e),
+        },
+    )
+    .await?;
+    let Some(leaf) = held else {
+        return Ok(None);
+    };
+    let unusable = |why: String| {
+        format!(
+            "the custody daemon's {slot:?} slot is sealed with a certificate this pod cannot use ({why}); only a new \
+             pod gets past it"
+        )
+    };
+    let pinned_ca =
+        pinned_ca.ok_or_else(|| unusable("there is no pinned CA to judge it by".to_string()))?;
+    let expires = output::judge_held(
+        leaf.as_bytes(),
+        pinned_ca,
+        identity,
+        names,
+        usage,
+        std::time::SystemTime::now(),
+    )
+    .map_err(unusable)?;
+    tracing::info!(
+        ?slot,
+        %expires,
+        "the slot holds the certificate a run before this one installed in this pod: going on from it"
+    );
+    Ok(Some(leaf))
+}
+
 /// The daemon's CSR for `req`, for a key it makes and keeps in the slot of the certificate's type.
 async fn custody_csr(
     daemon: &Arc<CustodyClient>,
@@ -770,6 +831,17 @@ async fn install_and_write(
         daemon.install(slot, chain.clone())
     })
     .await?;
+    write_custody_certificate(req, dns_identity, cert_pem, ca_pem, delay).await
+}
+
+/// The certificate and the CA written for the workload, and no key, the key being the daemon's.
+async fn write_custody_certificate(
+    req: &CertRequest,
+    dns_identity: &str,
+    cert_pem: &str,
+    ca_pem: &str,
+    delay: Duration,
+) -> Result<(), String> {
     loop {
         match output::write_certificate(std::path::Path::new(&req.cert_dir), cert_pem, ca_pem) {
             Ok(()) => {
@@ -808,6 +880,23 @@ async fn issue_custody_cert_from_cert_issuer(
         req.cert_dir,
         req.extra_sans,
     );
+    let usage = usage_of(&req.cert_type)
+        .ok_or_else(|| format!("a {:?} cert is not judged here", req.cert_type))?;
+    if let Some(leaf) = held_before(
+        daemon,
+        slot_of(&req.cert_type),
+        dns_identity,
+        &req.extra_sans,
+        usage,
+        pinned_ca,
+        delay,
+    )
+    .await?
+    {
+        // Judged against the pinned CA, which is what is written for the workload.
+        let ca = pinned_ca.map(String::from_utf8_lossy).unwrap_or_default();
+        return write_custody_certificate(req, dns_identity, &leaf, &ca, delay).await;
+    }
     let csr = custody_csr(daemon, req, dns_identity, delay).await?;
     let response = obtain_from_cert_issuer(client, sa_token, &csr, req, delay).await?;
     if let Some(pinned_ca) = pinned_ca {
@@ -1172,22 +1261,25 @@ async fn custodian_csr(
     .await
 }
 
-/// The custodian's certificate installed (the daemon judges it: its key, its name, the pinned CA), and the plan given.
+/// The custodian's certificate installed (the daemon judges it: its key, its name, the pinned CA), unless a run before
+/// this one in the same pod installed it, and the plan given (the same plan again changes nothing).
 async fn install_custodian(
     daemon: &Arc<CustodyClient>,
     dns_identity: &str,
-    certificate_pem: &str,
+    certificate_pem: Option<&str>,
     plan: &CustodianPlan,
     delay: Duration,
 ) -> Result<(), String> {
-    let chain = vec![certificate_pem.to_string()];
-    of_the_daemon(
-        daemon,
-        "install the custodian's certificate",
-        delay,
-        move |daemon| daemon.install(Slot::Custodian, chain.clone()),
-    )
-    .await?;
+    if let Some(certificate_pem) = certificate_pem {
+        let chain = vec![certificate_pem.to_string()];
+        of_the_daemon(
+            daemon,
+            "install the custodian's certificate",
+            delay,
+            move |daemon| daemon.install(Slot::Custodian, chain.clone()),
+        )
+        .await?;
+    }
     let (identity, given) = (dns_identity.to_string(), plan.clone());
     of_the_daemon(daemon, "take the custodian's plan", delay, move |daemon| {
         daemon.bootstrap(&identity, given.client, given.server.clone(), given.escrow)
@@ -1207,10 +1299,14 @@ async fn custodian_via_observer(
     dns_identity: &str,
     plan: &CustodianPlan,
     offers: &credentials_agent_common::session_offer::OfferCheck,
+    pinned_ca: &str,
     daemon: &Arc<CustodyClient>,
 ) -> Result<(), String> {
     use polar_crypto::workload_certificates::request_certificate_with_csr;
     let delay = Duration::from_secs(POLL_INTERVAL_SECS);
+    if held_custodian(daemon, dns_identity, Some(pinned_ca.as_bytes()), delay).await? {
+        return install_custodian(daemon, dns_identity, None, plan, delay).await;
+    }
     let names = custody_names(plan);
     tracing::info!(
         "requesting the custodian's certificate from the credentials agent (names: {names:?})"
@@ -1227,7 +1323,36 @@ async fn custodian_via_observer(
         )
     })
     .await?;
-    install_custodian(daemon, dns_identity, &issued.certificate_pem, plan, delay).await
+    install_custodian(
+        daemon,
+        dns_identity,
+        Some(&issued.certificate_pem),
+        plan,
+        delay,
+    )
+    .await
+}
+
+/// Whether the custodian's slot holds the certificate a run before this one installed in this pod, still good (see
+/// [`held_before`]).
+async fn held_custodian(
+    daemon: &Arc<CustodyClient>,
+    dns_identity: &str,
+    pinned_ca: Option<&[u8]>,
+    delay: Duration,
+) -> Result<bool, String> {
+    let custodian = cert_issuer_common::custody::custodian_identity(dns_identity);
+    held_before(
+        daemon,
+        Slot::Custodian,
+        &custodian,
+        &[],
+        output::Usage::Client,
+        pinned_ca,
+        delay,
+    )
+    .await
+    .map(|held| held.is_some())
 }
 
 /// A bootstrap service's custodian, from cert-issuer on the token alone: it carries nothing, and fetches nothing.
@@ -1235,9 +1360,18 @@ async fn custodian_from_cert_issuer(
     client: &handshake::HandshakeClient,
     sa_token: &str,
     dns_identity: &str,
+    pinned_ca: Option<&[u8]>,
     daemon: &Arc<CustodyClient>,
 ) -> Result<(), String> {
     let delay = Duration::from_secs(POLL_INTERVAL_SECS);
+    let plan = CustodianPlan {
+        client: false,
+        server: None,
+        escrow: false,
+    };
+    if held_custodian(daemon, dns_identity, pinned_ca, delay).await? {
+        return install_custodian(daemon, dns_identity, None, &plan, delay).await;
+    }
     let csr = custodian_csr(daemon, dns_identity, delay).await?;
     let request = CertRequest {
         cert_type: CertType::Custody,
@@ -1246,15 +1380,10 @@ async fn custodian_from_cert_issuer(
         extra_sans: Vec::new(),
     };
     let response = obtain_from_cert_issuer(client, sa_token, &csr, &request, delay).await?;
-    let plan = CustodianPlan {
-        client: false,
-        server: None,
-        escrow: false,
-    };
     install_custodian(
         daemon,
         dns_identity,
-        &response.certificate_pem,
+        Some(&response.certificate_pem),
         &plan,
         delay,
     )
@@ -2163,9 +2292,17 @@ mod tests {
             let dir = tempfile::TempDir::new().unwrap();
             std::fs::write(dir.path().join("key.pem"), "a key from before").unwrap();
 
-            custodian_via_observer(&observer, "token", ME, &client_plan(), &offers, &daemon)
-                .await
-                .unwrap();
+            custodian_via_observer(
+                &observer,
+                "token",
+                ME,
+                &client_plan(),
+                &offers,
+                &pinned,
+                &daemon,
+            )
+            .await
+            .unwrap();
             what_the_custodian_fetched(
                 &daemon,
                 &[a_custody_request_into(&dir)],
@@ -2204,6 +2341,179 @@ mod tests {
             assert_eq!(held(&daemon).await.unwrap(), vec![cert]);
         }
 
+        /// The same CA, a second handle on it.
+        fn again(ca: &TestCa) -> TestCa {
+            TestCa {
+                params: ca.params.clone(),
+                key: rcgen::KeyPair::from_pem(&ca.key.serialize_pem()).unwrap(),
+                pem: ca.pem.clone(),
+            }
+        }
+
+        /// docs/architecture/key-custody.md, "A retry in place": polar-init run again in the same pod keeps its daemon
+        /// (a native sidecar is not restarted when an init container fails), so it finds the custodian's slot sealed by
+        /// the run before. That run bought the custodian's certificate, gave the plan and stopped at its deadline, the
+        /// custodian still fetching; this one goes on from what the daemon holds, buys nothing more with the token, and
+        /// writes what the custodian fetched.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn polar_init_run_again_in_the_same_pod_goes_on_from_what_its_first_run_sealed() {
+            let ours = test_ca();
+            let pinned = ours.pem.clone();
+            let offers = offers_under(&ours);
+            let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+            let sockets = tempfile::TempDir::new().unwrap();
+            let (socket, custody) = serve_daemon_holding(sockets.path(), &ours.pem, true);
+            let daemon = daemon_at(&socket);
+            let server =
+                an_observer_signing_with(again(&ours), "NOT A CA".to_string(), offer).await;
+            let observer = credentials_agent_client::ObserverClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            let requests = [a_custody_request_into(&dir)];
+
+            // The first run: the custodian's slot sealed and the plan given, then its deadline.
+            custodian_via_observer(
+                &observer,
+                "token",
+                ME,
+                &client_plan(),
+                &offers,
+                &pinned,
+                &daemon,
+            )
+            .await
+            .unwrap();
+            let why = what_the_custodian_fetched(
+                &daemon,
+                &requests,
+                &pinned,
+                MILLISECOND,
+                Duration::from_millis(300),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("did not finish within"), "{why}");
+
+            // The second, in the same pod, the custodian fetching meanwhile.
+            play_the_custodian(custody, &ours, None);
+            custodian_via_observer(
+                &observer,
+                "token",
+                ME,
+                &client_plan(),
+                &offers,
+                &pinned,
+                &daemon,
+            )
+            .await
+            .unwrap();
+            what_the_custodian_fetched(
+                &daemon,
+                &requests,
+                &pinned,
+                MILLISECOND,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+
+            let bought = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == "/workload/issue")
+                .count();
+            assert_eq!(bought, 1, "the token bought one custodian's certificate");
+            let cert = std::fs::read_to_string(dir.path().join("cert.pem")).unwrap();
+            assert_eq!(held(&daemon).await.unwrap(), vec![cert]);
+        }
+
+        /// The same for a bootstrap service, whose certificates polar-init carries from cert-issuer into the daemon's
+        /// slots itself: run again in the same pod, it finds them sealed and writes what they hold.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_bootstrap_service_s_polar_init_run_again_in_the_same_pod_writes_what_its_slots_hold()
+         {
+            let ca = test_ca();
+            let pinned = ca.pem.clone();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ca.pem, true));
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/issue"))
+                .respond_with(CertIssuerSigns(ca))
+                .mount(&server)
+                .await;
+            let client = handshake::HandshakeClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            for run in 0..2 {
+                issue_custody_cert_from_cert_issuer(
+                    &client,
+                    "token",
+                    ME,
+                    &a_custody_request_into(&dir),
+                    Some(pinned.as_bytes()),
+                    &daemon,
+                    MILLISECOND,
+                )
+                .await
+                .unwrap_or_else(|why| panic!("run {run}: {why}"));
+                custodian_from_cert_issuer(&client, "token", ME, Some(pinned.as_bytes()), &daemon)
+                    .await
+                    .unwrap_or_else(|why| panic!("run {run}: {why}"));
+            }
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                2,
+                "its certificate and its custodian's, once each"
+            );
+            let cert = std::fs::read_to_string(dir.path().join("cert.pem")).unwrap();
+            assert_eq!(held(&daemon).await.unwrap(), vec![cert]);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
+                pinned
+            );
+        }
+
+        /// A slot sealed with a certificate this pod can no longer use (here, signed by another CA than the one now
+        /// pinned) is said, and stops polar-init: only a new pod gets past it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_sealed_slot_this_pod_cannot_use_stops_polar_init_and_says_why() {
+            let (ca, other) = (test_ca(), test_ca());
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ca.pem, true));
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/issue"))
+                .respond_with(CertIssuerSigns(again(&ca)))
+                .mount(&server)
+                .await;
+            let client = handshake::HandshakeClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            issue_custody_cert_from_cert_issuer(
+                &client,
+                "token",
+                ME,
+                &a_custody_request_into(&dir),
+                Some(ca.pem.as_bytes()),
+                &daemon,
+                MILLISECOND,
+            )
+            .await
+            .unwrap();
+            let why = issue_custody_cert_from_cert_issuer(
+                &client,
+                "token",
+                ME,
+                &a_custody_request_into(&dir),
+                Some(other.pem.as_bytes()),
+                &daemon,
+                MILLISECOND,
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("sealed") && why.contains("new pod"), "{why}");
+        }
+
         #[tokio::test(flavor = "multi_thread")]
         async fn a_custodian_s_certificate_another_ca_signed_is_not_installed_and_nothing_is_planned()
          {
@@ -2220,6 +2530,7 @@ mod tests {
                 ME,
                 &client_plan(),
                 &offers_under(&ours),
+                &ours.pem,
                 &daemon,
             )
             .await
@@ -2244,9 +2555,17 @@ mod tests {
             let offers = offers_under(&ours);
             let server = an_observer_signing_with(ours, String::new(), offer).await;
             let observer = credentials_agent_client::ObserverClient::new(server.uri());
-            custodian_via_observer(&observer, "token", ME, &client_plan(), &offers, &daemon)
-                .await
-                .unwrap();
+            custodian_via_observer(
+                &observer,
+                "token",
+                ME,
+                &client_plan(),
+                &offers,
+                &pinned,
+                &daemon,
+            )
+            .await
+            .unwrap();
             let dir = tempfile::TempDir::new().unwrap();
             let why = what_the_custodian_fetched(
                 &daemon,
@@ -2320,7 +2639,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let client = handshake::HandshakeClient::new(server.uri());
-            custodian_from_cert_issuer(&client, "token", ME, &daemon)
+            custodian_from_cert_issuer(&client, "token", ME, None, &daemon)
                 .await
                 .unwrap();
             let asked: serde_json::Value =
