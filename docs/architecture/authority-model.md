@@ -840,8 +840,11 @@ Built test-first, a commit a step (`5886e43d` to `764cb62f`); not yet seen on a 
 - *Many takes effect only where the credentials agent issues the workload*; where a target still has cert-issuer issue it
   (`local`), it renders as one instance, since only the credentials agent writes the instance. A bootstrap service may
   not be many.
-- *The pod's name is optional in a certificate*, the UID required: an issuer without `instance_name_claim` gives the UID
-  alone.
+- *The pod's name is required beside the UID* (DECIDED 2026-11-01, the maintainer, replacing the build's optional name;
+  not yet built): a UUID alone is never what a person is given to read (a person reads names, never bare UUIDs, the
+  2026-10-22 decision), and an instance known by its UID alone is illegible in a log, an outcome or a provenance event.
+  The credentials agent refuses a multi-instance workload's certificate whose token carries no pod name, saying why, so
+  an issuer without `instance_name_claim` shows at its first pod, not later in a thinner trail.
 - *"Being issued" lasts the issuing custodian's window* (five minutes); after it, an escrow certificate with nothing
   stored is refused as before (an orphan now recoverable by revoking it).
 - *A harness plan of several producers on a single-instance producer is refused* by `load-harness.nu`, naming why.

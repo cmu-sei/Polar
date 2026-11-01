@@ -822,6 +822,10 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
       no stored key is abandoned, and the credentials agent revokes it (`Superseded`, in the ledger) and issues a new one,
       still serialized. Revoking it loses nothing: the certificate lookup can hand it out once it is recorded, but
       whatever was encrypted to it in that gap is unreadable already, since no one holds its key.
+    - [ ] DECIDED 2026-11-01 (the maintainer): a multi-instance certificate requires the pod's name beside its UID
+      (`authority-model.md`, "Multi-instance workloads", the decisions marked for review): legibility first, a UUID alone
+      is never what a person reads; and a misconfigured issuer then fails at its first pod. Small; built with the retry
+      fix, which works in the same issuance code (`instance_sans_for`, `credentials-agent/consume/src/issuance.rs:136`).
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
