@@ -89,6 +89,26 @@ pub struct ConsumerSupervisorState {
     shutting_down: bool,
 }
 
+/// How long the graph controller gets to finish at a shutdown.
+const GRAPH_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stops the graph controller at a shutdown once it has written every op already in its mailbox (a drain), bounded
+/// by `timeout`; one that has not stopped by then is logged and left, as the process is about to exit. A stop
+/// (`stop_and_wait`) would be served before the ops still queued, and lose them at every rejuvenation.
+async fn stop_graph_controller(controller: GraphController, timeout: Duration) {
+    match controller.drain_and_wait(Some(timeout)).await {
+        Ok(()) => {
+            info!("CONSUMER_SUPERVISOR: graph controller wrote what was queued and stopped");
+        }
+        Err(e) => {
+            error!(
+                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
+                 within {timeout:?}, continuing: {e:?}"
+            );
+        }
+    }
+}
+
 /// Decodes what an observer published: the payload of the event is the
 /// serialized JiraData. Anything that does not decode is logged and
 /// dropped, never fatal.
@@ -260,23 +280,7 @@ impl Actor for ConsumerSupervisor {
                 }
 
                 if let Some(controller) = state.graph_controller.take() {
-                    match controller
-                        .stop_and_wait(
-                            Some("supervisor shutting down".into()),
-                            Some(Duration::from_secs(30)),
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly");
-                        }
-                        Err(e) => {
-                            error!(
-                                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
-                                 within 30s, continuing: {e:?}"
-                            );
-                        }
-                    }
+                    stop_graph_controller(controller, GRAPH_STOP_TIMEOUT).await;
                 }
 
                 let _ = state
@@ -406,6 +410,66 @@ mod tests {
     #[test]
     fn a_payload_that_does_not_decode_is_dropped_not_fatal() {
         assert!(decode_payload(&[0u8; 3]).is_none());
+    }
+
+    /// Stands in for the graph controller: it takes a while over each op, and counts the ops it wrote.
+    struct SlowGraph {
+        written: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Actor for SlowGraph {
+        type Msg = polar::graph::controller::GraphControllerMsg;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            if let polar::graph::controller::GraphControllerMsg::Op(_) = message {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                self.written
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    /// At a rejuvenation the writes still queued for the graph are written before the graph controller stops: none
+    /// is dropped.
+    #[tokio::test]
+    async fn the_graph_controller_writes_what_is_queued_before_it_stops() {
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (graph, _) = Actor::spawn(
+            None,
+            SlowGraph {
+                written: written.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        for _ in 0..40 {
+            graph
+                .cast(polar::graph::controller::GraphControllerMsg::Op(
+                    polar::graph::controller::GraphOp::Transaction { ops: vec![] },
+                ))
+                .unwrap();
+        }
+
+        stop_graph_controller(graph, Duration::from_secs(10)).await;
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 40);
     }
 
     #[test]
