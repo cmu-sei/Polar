@@ -68,6 +68,12 @@ pub enum InstanceError {
     TwoPods,
     #[error("the certificate names a pod with no pod UID")]
     PodWithoutUid,
+    /// A multi-instance workload's certificate names its pod by name beside its UID, and the token for this pod named
+    /// none (docs/architecture/authority-model.md, "Multi-instance workloads": a UUID alone is never what a person reads).
+    #[error(
+        "the token for pod {0} names no pod: a multi-instance workload's certificate names its pod by name beside its UID"
+    )]
+    NoPodName(String),
     /// The certificate could not be read (kept as text, so the error stays `Clone` and `Eq`).
     #[error("{0}")]
     Unreadable(String),

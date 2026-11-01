@@ -841,10 +841,14 @@ Built test-first, a commit a step (`5886e43d` to `764cb62f`); not yet seen on a 
   (`local`), it renders as one instance, since only the credentials agent writes the instance. A bootstrap service may
   not be many.
 - *The pod's name is required beside the UID* (DECIDED 2026-11-01, the maintainer, replacing the build's optional name;
-  not yet built): a UUID alone is never what a person is given to read (a person reads names, never bare UUIDs, the
-  2026-10-22 decision), and an instance known by its UID alone is illegible in a log, an outcome or a provenance event.
-  The credentials agent refuses a multi-instance workload's certificate whose token carries no pod name, saying why, so
-  an issuer without `instance_name_claim` shows at its first pod, not later in a thinner trail.
+  built the same day: `instance_sans_for`, `credentials-agent/consume/src/issuance.rs`, refusing `NoPodName` on the
+  token's path and the custodian's alike, `TokenInvalid` and `RequestNotPermitted` on the wire): a UUID alone is never
+  what a person is given to read (a person reads names, never bare UUIDs, the 2026-10-22 decision), and an instance
+  known by its UID alone is illegible in a log, an outcome or a provenance event. The credentials agent refuses a
+  multi-instance workload's certificate whose token carries no pod name, saying why, so an issuer without
+  `instance_name_claim` shows at its first pod, not later in a thinner trail. cert-issuer, which reads instance names
+  from requests, still takes a UID alone (`instance_names_refusal`); the credentials agent is where the catalog's
+  `instances` is known (decided here, for review).
 - *"Being issued" lasts the issuing custodian's window* (five minutes); after it, an escrow certificate with nothing
   stored is abandoned and issued over (DECIDED 2026-11-01, the maintainer; built: `key-custody.md`, "An escrow
   certificate asked again, or abandoned"), where before it was refused, recoverable only by an administrator revoking it.

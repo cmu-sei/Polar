@@ -132,7 +132,8 @@ pub(crate) fn extra_sans_for(
 /// `pod` name, when the authority model says the workload is multi-instance and the certificate is one a session is
 /// made with (its client certificate, and its custodian's); none otherwise, so a single-instance workload's certificates
 /// are as they were (docs/architecture/authority-model.md, "Multi-instance workloads"). Refused when the pod's UID or
-/// name is not one a certificate can carry.
+/// name is not one a certificate can carry, or when there is no name: the name is required beside the UID, since a
+/// UUID alone is never what a person reads (the maintainer, 2026-11-01).
 pub(crate) fn instance_sans_for(
     model: Option<&credentials_agent_model::Model>,
     workload: &str,
@@ -146,7 +147,13 @@ pub(crate) fn instance_sans_for(
     if !many || cert_type == WorkloadCertType::Server {
         return Ok(Vec::new());
     }
-    cert_issuer_common::instance::Instance::new(uid, pod).map(|instance| instance.san_strings())
+    let Some(pod) = pod else {
+        return Err(cert_issuer_common::instance::InstanceError::NoPodName(
+            uid.to_string(),
+        ));
+    };
+    cert_issuer_common::instance::Instance::new(uid, Some(pod))
+        .map(|instance| instance.san_strings())
 }
 
 pub(crate) fn signing_type(cert_type: WorkloadCertType) -> CertType {
@@ -829,6 +836,101 @@ pub(crate) mod tests {
             ))
             .await;
         assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+    }
+
+    /// docs/architecture/authority-model.md, "Multi-instance workloads" (the maintainer, 2026-11-01): a multi-instance
+    /// workload's certificate names its pod by name beside its UID, required: a UUID alone is never what a person reads.
+    /// A token that names no pod is refused, saying why; a single-instance workload's certificates, and any server
+    /// certificate, name no instance, as before.
+    #[test]
+    fn a_multi_instance_workload_s_certificate_requires_its_pod_s_name() {
+        use cert_issuer_common::instance::InstanceError;
+        let many = model_with_kube_consumer_many();
+        let one = model_with_kube_consumer();
+        let identity = "kube-consumer.polar.serviceaccount.cluster.local";
+        let uid = "8d3c0e4a-2f1b-4c7e-9a55-1f2e3d4c5b6a";
+        for cert_type in [WorkloadCertType::Client, WorkloadCertType::Custody] {
+            assert_eq!(
+                instance_sans_for(
+                    many.as_deref(),
+                    identity,
+                    cert_type,
+                    uid,
+                    Some("kube-consumer-0")
+                ),
+                Ok(vec![
+                    format!("i:uid:{uid}"),
+                    "i:pod:kube-consumer-0".to_string()
+                ])
+            );
+            let refused = instance_sans_for(many.as_deref(), identity, cert_type, uid, None);
+            assert_eq!(refused, Err(InstanceError::NoPodName(uid.to_string())));
+            assert!(
+                refused.unwrap_err().to_string().contains("names no pod"),
+                "it says why"
+            );
+            assert_eq!(
+                instance_sans_for(one.as_deref(), identity, cert_type, uid, None),
+                Ok(Vec::new())
+            );
+        }
+        assert_eq!(
+            instance_sans_for(
+                many.as_deref(),
+                identity,
+                WorkloadCertType::Server,
+                uid,
+                None
+            ),
+            Ok(Vec::new())
+        );
+    }
+
+    // The same, through the handler: the token names no pod, and cert-issuer is never asked.
+    #[tokio::test]
+    async fn a_multi_instance_workload_s_token_that_names_no_pod_is_refused_before_cert_issuer_is_asked()
+     {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:kube-consumer".to_string(),
+                    instance_binding: Some("kube-consumer-uid".to_string()),
+                    jti: None,
+                    instance_name: None,
+                    normalized_identity: Some(
+                        "kube-consumer.polar.serviceaccount.cluster.local".to_string(),
+                    ),
+                },
+            ))
+            .mount(&server)
+            .await;
+        let handler = IssuanceHandler {
+            authority_model: model_with_kube_consumer_many(),
+            ..handler_for(&server, spawn_test_ledger().await).await
+        };
+        let reply = handler
+            .handle(request_for(WorkloadCertType::Client, &[]))
+            .await;
+        assert!(
+            matches!(
+                reply,
+                IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TokenInvalid
+                }
+            ),
+            "{reply:?}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path() != "/issue"),
+            "cert-issuer is never asked to sign"
+        );
     }
 
     #[test]
