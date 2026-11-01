@@ -43,7 +43,7 @@ pub mod judge;
 pub mod requests;
 pub mod rules;
 
-pub use facts::{CertificateNames, Model, Pair, Person, Workload};
+pub use facts::{CertificateNames, Instances, Model, Pair, Person, Workload};
 pub use judge::{
     Allowed, Broken, Effect, Evaluation, Goal, GoalOutcome, Invariant, Judgement, Loss,
     allowed_under, compare, evaluate, judge,

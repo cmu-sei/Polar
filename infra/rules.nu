@@ -86,7 +86,9 @@ export def in_place_problems [docs: list]: nothing -> list<string> {
         let name = $d.metadata.name
         let pod = $d.spec.template.spec
         mut p = []
-        if ($d.spec.replicas? | default 1) != 1 {
+        # A multi-instance workload's pods are instances of one identity, each its own certificate and session
+        # (docs/architecture/authority-model.md, "Multi-instance workloads"): it may run several.
+        if ($d.spec.replicas? | default 1) != 1 and not (is_multi_instance $d) {
             $p = ($p | append $"Deployment ($name) has ($d.spec.replicas) replicas: one pod of an identity at a time")
         }
         if ($d.spec.strategy?.type? | default "RollingUpdate") != "Recreate" {
@@ -106,6 +108,45 @@ export def in_place_problems [docs: list]: nothing -> list<string> {
         $p
     }
     | flatten
+}
+
+# The annotation the render puts on the object of a workload whose entry says `instances: "many"` (resolve.nu, and the
+# templates' functions.workloadOf), which the rules here read.
+export const INSTANCES_ANNOTATION = "polar.dev/instances"
+
+# Whether a rendered object is a multi-instance workload's: many pods of one identity at once, each an instance
+# (docs/architecture/authority-model.md, "Multi-instance workloads").
+export def is_multi_instance [d: record]: nothing -> bool {
+    ($d.metadata?.annotations? | default {} | get -o $INSTANCES_ANNOTATION) == "many"
+}
+
+# What is wrong with a Job whose pod runs polar-init and that runs more than one pod at once (`parallelism`): only a
+# multi-instance workload's may, since any other workload's pods are one instance of one identity, and would supersede
+# each other at the broker and in the credentials agent's ledger.
+export def parallelism_problems [docs: list]: nothing -> list<string> {
+    $docs
+    | where {|d| ($d.kind? | default "") == "Job" }
+    | where {|d| ($d.spec?.template?.spec?.initContainers? | default [] | any {|c| $c.name == "polar-init" }) }
+    | where {|d| ($d.spec?.parallelism? | default 1) != 1 and not (is_multi_instance $d) }
+    | each {|d| $"Job ($d.metadata.name) has parallelism ($d.spec.parallelism) and its workload is not multi-instance: its pods would be one instance, superseding each other" }
+}
+
+# What is wrong with a workload's `instances` (docs/architecture/authority-model.md, "Multi-instance workloads"): it is
+# "one" (the default, when absent) or "many", and many only for a workload the credentials agent issues, since it alone
+# writes the instance into a certificate (a bootstrap service's, or one still issued by cert-issuer, would be one
+# certificate whose pods supersede each other).
+export def instances_problems [who: string, spec: record]: nothing -> list<string> {
+    let instances = ($spec.instances? | default "one")
+    if not ($instances in ["one" "many"]) {
+        return [$"($who): instances is \"one\" or \"many\", not ($instances | to nuon)"]
+    }
+    let bootstrap = ($spec.bootstrap? | default false)
+    let issuer = ($spec.issuer? | default "nobody")
+    if $instances == "many" and ($bootstrap or $issuer != "credentials-agent") {
+        let what = (if $bootstrap { $"($issuer), as a bootstrap service" } else { $issuer })
+        return [$"($who): a multi-instance workload is issued by the credentials agent, which writes each pod's instance into its certificates; this one is issued by ($what)"]
+    }
+    []
 }
 
 # The pod spec of a rendered object, or null when it has none: a Pod's own, a workload's template, a CronJob's.
@@ -297,6 +338,8 @@ export def model_facts [records: list, domain: string]: nothing -> record {
             identity: $"($r.who).($r.namespace).serviceaccount.($domain)"
             issuer: $r.issuer
             bootstrap: $r.bootstrap
+            # How many pods of it run at once: issuance writes each one's instance into its certificates when many.
+            instances: ($r.instances? | default "one")
             groups: ($r.groups? | default [] | uniq | sort)
             topics: ($r.topics? | default [] | sort-by name access)
         }

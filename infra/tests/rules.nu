@@ -157,6 +157,58 @@ def main [] {
             }
         }
 
+        # docs/architecture/authority-model.md, "Multi-instance workloads": a workload whose entry says `instances: "many"`
+        # runs many pods at once, each an instance of the one identity; the render marks its object so.
+        "a multi-instance Deployment may run more than one pod, and is held to every other rule": {
+            let rule = { action: "RestartAllContainers", exitCodes: { operator: "NotIn", values: [] } }
+            let many = {
+                kind: "Deployment"
+                metadata: { name: "build-job", annotations: { $INSTANCES_ANNOTATION: "many" } }
+                spec: {
+                    replicas: 3
+                    strategy: { type: "Recreate" }
+                    template: { spec: {
+                        initContainers: [{ name: "polar-init" }]
+                        containers: [{ name: "build-job", restartPolicy: "Always", restartPolicyRules: [$rule] }]
+                    } }
+                }
+            }
+            assert equal (in_place_problems [$many]) []
+            # Only the replica rule is lifted: a rolling update is still refused.
+            let rolling = (in_place_problems [($many | update spec.strategy { type: "RollingUpdate" })])
+            assert equal ($rolling | length) 1
+            assert (has $rolling "Recreate") $"($rolling)"
+            # An object marked anything else is one instance.
+            let one = (in_place_problems [($many | update metadata.annotations { $INSTANCES_ANNOTATION: "one" })])
+            assert (has $one "replicas") $"($one)"
+        }
+
+        "a run's Job runs one pod at a time unless its workload is multi-instance": {
+            let job = {|parallelism, annotations| { kind: "Job", metadata: { name: "harness-producer", annotations: $annotations }, spec: { parallelism: $parallelism, podReplacementPolicy: "Failed", template: { spec: { initContainers: [{ name: "polar-init" }], containers: [{ name: "harness-producer" }] } } } } }
+            assert equal (parallelism_problems [(do $job 1 {})]) []
+            assert equal (parallelism_problems [(do $job 4 { $INSTANCES_ANNOTATION: "many" })]) []
+            let p = (parallelism_problems [(do $job 4 {})])
+            assert equal ($p | length) 1
+            assert (has $p "harness-producer") $"($p)"
+            assert (has $p "parallelism") $"($p)"
+            # A Job without polar-init is not one of these.
+            let plain = ((do $job 4 {}) | update spec.template.spec.initContainers [])
+            assert equal (parallelism_problems [$plain]) []
+        }
+
+        "a workload's instances is one or many, and many only for a workload the credentials agent issues": {
+            assert equal (instances_problems "kube-observer" { instances: "one", issuer: "credentials-agent", bootstrap: false }) []
+            assert equal (instances_problems "harness-producer" { instances: "many", issuer: "credentials-agent", bootstrap: false }) []
+            assert equal (instances_problems "x" { issuer: "cert-issuer", bootstrap: true }) [] "absent is one"
+            let bad = (instances_problems "x" { instances: "several", issuer: "credentials-agent", bootstrap: false })
+            assert equal ($bad | length) 1
+            assert (has $bad "\"one\" or \"many\"") $"($bad)"
+            # Only the credentials agent writes the instance into a certificate: a bootstrap service, or a workload still
+            # issued by cert-issuer, would be one certificate whose pods supersede each other.
+            assert (has (instances_problems "cassini" { instances: "many", issuer: "cert-issuer", bootstrap: true }) "credentials agent")
+            assert (has (instances_problems "x" { instances: "many", issuer: "cert-issuer", bootstrap: false }) "credentials agent")
+        }
+
         "a Job that replaces pods only after they are gone passes": {
             let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
             assert equal (job_replacement_problems $docs) []
@@ -375,6 +427,11 @@ def main [] {
             assert equal ($kube.topics | where name == "kubernetes.cluster.consumer" | first | get causes) [{ kind: "outside", name: "the Kubernetes API" }]
             let observer = ($m.workloads | where workload == "credentials-agent-observer" | first)
             assert equal [$observer.issuer $observer.bootstrap] ["cert-issuer" true]
+            # How many pods of it run at once: one unless its entry says many (authority-model.md, "Multi-instance
+            # workloads"), which issuance reads to write the instance into its certificates.
+            assert equal [$kube.instances $observer.instances] ["one" "one"]
+            let many = (model_facts ($r | update 0 { merge { instances: "many" } }) "cluster.local")
+            assert equal ($many.workloads | where workload == "kube-observer" | first | get instances) "many"
             # One identity per workload: the token's subject is nowhere in it (authority-model.md, "Decisions").
             assert (not ($m | to json | str contains "system:serviceaccount")) "a token subject in the model"
         }

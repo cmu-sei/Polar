@@ -170,6 +170,33 @@ def main [] {
             assert equal ($init.terminationMessagePolicy? | default null) $policy "ace's polar-init"
         }
 
+        # docs/architecture/authority-model.md, "Multi-instance workloads": the template marks a multi-instance workload's
+        # object, which the rules read, and leaves every other unmarked; a Deployment and a run's Job alike.
+        "a multi-instance workload's object is marked, and any other is not": {
+            use ../rules.nu [INSTANCES_ANNOTATION, is_multi_instance]
+            let workload = {|instances, job|
+                let expr = $"let k = ($INFRA)/schema/kubernetes.dhall sha256:2086df2178fdb83a08bd4ca89c951f12e4ce16d3cc1441005fcda943a028bb8c
+                    in \(($INFRA)/schema/functions.dhall\).workloadOf
+                      { name = \"build-job\", namespace = \"polar\", job = ($job)
+                      , instances = < one | many >.($instances)
+                      , pod = k.PodSpec::{ containers = [ k.Container::{ name = \"build-job\" } ] } }"
+                let r = ($expr | ^dhall-to-yaml --quoted | complete)
+                if $r.exit_code != 0 { error make { msg: $r.stderr } }
+                $r.stdout | from yaml
+            }
+            let none = "None { backoff_limit : Natural, ttl_after_finished_secs : Natural }"
+            let job = "Some { backoff_limit = 1, ttl_after_finished_secs = 60 }"
+            for case in [[$none "Deployment"] [$job "Job"]] {
+                let many = (do $workload "many" $case.0)
+                assert equal $many.kind $case.1
+                assert (is_multi_instance $many) $"($case.1) many"
+                assert equal ($many.metadata.annotations | get $INSTANCES_ANNOTATION) "many"
+                let one = (do $workload "one" $case.0)
+                assert (not (is_multi_instance $one)) $"($case.1) one"
+                assert ($one.metadata.annotations | get -o $INSTANCES_ANNOTATION | is-empty) "one is unmarked"
+            }
+        }
+
         # docs/architecture/deployments.md, step 4: ace, a pod with polar-init, restarts in place, one pod at a time.
         "the ACE job is a Deployment that restarts in place": {
             use ../rules.nu [in_place_problems]

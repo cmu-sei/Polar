@@ -159,6 +159,7 @@ let render =
                 { name = v.name
                 , namespace = Constants.PolarNamespace
                 , job = None functions.Job
+                , instances = functions.Instances.one
                 , pod = podSpec
                 }
 

@@ -259,15 +259,35 @@ let memoryOf =
 -- replaces; or a Deployment of one, `Recreate` (never two pods of one identity), whose pod restarts in place.
 let Job = { backoff_limit : Natural, ttl_after_finished_secs : Natural }
 
+let Instances = < one | many >
+
+-- A multi-instance workload (`instances` "many": authority-model.md, "Multi-instance workloads") is marked so on its
+-- object, `polar.dev/instances: many`, which infra/rules.nu reads (INSTANCES_ANNOTATION): its pods are instances of one
+-- identity, so it may run more than one. Any other is left unmarked.
 let workloadOf =
-      \(w : { name : Text, namespace : Text, job : Optional Job, pod : kubernetes.PodSpec.Type }) ->
+      \ ( w
+        : { name : Text
+          , namespace : Text
+          , job : Optional Job
+          , instances : Instances
+          , pod : kubernetes.PodSpec.Type
+          }
+        ) ->
         let labels = [ { mapKey = "name", mapValue = w.name } ]
+
+        let instances =
+              merge
+                { one = [] : List { mapKey : Text, mapValue : Text }
+                , many = [ { mapKey = "polar.dev/instances", mapValue = "many" } ]
+                }
+                w.instances
 
         let metadata =
               kubernetes.ObjectMeta::{
               , name = Some w.name
               , namespace = Some w.namespace
-              , annotations = Some [ Constants.RejectSidecarAnnotation ]
+              , annotations = Some
+                  ([ Constants.RejectSidecarAnnotation ] # instances)
               }
 
         let template =
@@ -336,6 +356,7 @@ in  { makeGraphEnv
     , Memory
     , memoryOf
     , Job
+    , Instances
     , workloadOf
     , restartOf
     , makeOpaqueSecret

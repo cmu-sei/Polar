@@ -56,6 +56,9 @@ let Spec =
       , restart_policy : Text
       -- A run's Job (the `run` kind), or none: a Deployment of one that restarts in place.
       , job : Optional { backoff_limit : Natural, ttl_after_finished_secs : Natural }
+      -- "one", or "many": many pods of the one identity at once, each an instance (authority-model.md, "Multi-instance
+      -- workloads"), whose object is marked so.
+      , instances : < one | many >
       , probe : A.Probe
       , termination_grace_secs : Natural
       , fs_group : Optional Natural

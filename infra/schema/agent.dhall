@@ -310,6 +310,11 @@ let render =
               }
 
         in  functions.workloadOf
-              { name = v.name, namespace = v.namespace, job = v.job, pod = podSpec }
+              { name = v.name
+              , namespace = v.namespace
+              , job = v.job
+              , instances = v.instances
+              , pod = podSpec
+              }
 
 in  render

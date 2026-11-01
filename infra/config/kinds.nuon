@@ -38,6 +38,12 @@
     # step 4); `job` is null. The `run` kind sets it, for what runs to completion as a Job.
     job: null
 
+    # How many pods of the workload run at once: "one", or "many", each an instance of its one identity, with its own
+    # certificate and session (docs/architecture/authority-model.md, "Multi-instance workloads"). Many is only for what
+    # the credentials agent issues; a Deployment of it may have more than one replica, and a run's Job more than one pod
+    # in parallel.
+    instances: "one"
+
     probe: { initial_delay_secs: 150, period_secs: 30, failure_threshold: 2, timeout_secs: 5 }
 
     # Read by HealthCheckActor and the polar-healthcheck probe. These become the agent's

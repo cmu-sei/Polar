@@ -301,6 +301,7 @@ def issuance_record [w: record, target: string, kinds: record] {
         service_account: ($s.service_account? | default $w.name)
         issuer: $s.issuer
         bootstrap: $s.bootstrap
+        instances: ($s.instances? | default "one")
         topics: $scaffold.topics?
         groups: $scaffold.groups?
     }
@@ -640,6 +641,12 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     if ($escrow | is-not-empty) {
         error make { msg: $"($name): ($escrow | str join '; ')" }
     }
+    # Many pods at once, each an instance of the one identity (docs/architecture/authority-model.md, "Multi-instance
+    # workloads"): only for what the credentials agent issues, which writes each pod's instance into its certificates.
+    let instances_wrong = (instances_problems $name $spec)
+    if ($instances_wrong | is-not-empty) {
+        error make { msg: ($instances_wrong | str join '; ') }
+    }
 
     {
         name: $name
@@ -661,6 +668,8 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         # Kept by the pod and restarted in place (a Deployment), or a Job's, which the Job controller replaces.
         restart_policy: (if $in_place { "Always" } else { "Never" })
         job: ($spec.job? | default null)
+        # "one" or "many": the template marks a multi-instance workload's object (rules.nu, INSTANCES_ANNOTATION).
+        instances: $spec.instances
         probe: $spec.probe
         termination_grace_secs: $grace
         fs_group: ($spec.fs_group? | default null)
@@ -889,6 +898,7 @@ def actual_of [file: string] {
         automount_sa_token: ($pod | get -o automountServiceAccountToken)
         restart_policy: $pod.restartPolicy
         job: (if $doc.kind == "Job" { { backoff_limit: $doc.spec.backoffLimit, ttl_after_finished_secs: $doc.spec.ttlSecondsAfterFinished } } else { null })
+        instances: (if (is_multi_instance $doc) { "many" } else { "one" })
         termination_grace_secs: ($pod | get -o terminationGracePeriodSeconds)
         env: ($c.env | each {|e|
             {
@@ -921,6 +931,7 @@ def expected_of [r: record] {
         automount_sa_token: $r.automount_sa_token
         restart_policy: $r.restart_policy
         job: $r.job
+        instances: $r.instances
         termination_grace_secs: $r.termination_grace_secs
         env: ($r.env | each {|e| { name: $e.name, value: $e.value, secret: $e.secret, key: $e.key } })
         volumes: ($r.volumes | each {|v| { name: $v.name, secret: $v.secret, audience: $v.audience } })
@@ -1031,7 +1042,7 @@ def "main explain" [
     print $"  needs: ($r.needs | str join ', ')"
     print ""
     print "  values:"
-    for k in [namespace image pull_policy polar_init_image issuer bootstrap cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy job termination_grace_secs] {
+    for k in [namespace image pull_policy polar_init_image issuer bootstrap cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy job instances termination_grace_secs] {
         let v = ($r | get $k)
         let o = ($r._origin | get -o $k | default "derived")
         print $"    ($k | fill -w 24)  (one_line $v)   [($o)]"

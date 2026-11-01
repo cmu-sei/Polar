@@ -52,10 +52,25 @@ pub struct Workload {
     pub identity: String,
     pub issuer: String,
     pub bootstrap: bool,
+    /// How many of its pods run at once (docs/architecture/authority-model.md, "Multi-instance workloads"). Absent in a
+    /// model written before it existed, which reads as one.
+    #[serde(default)]
+    pub instances: Instances,
     #[serde(default)]
     pub groups: Vec<String>,
     #[serde(default)]
     pub topics: Vec<TopicEntry>,
+}
+
+/// How many pods of a workload run at once: one, or many, each an instance of the one identity with its own certificate
+/// and session, its instance written into its certificates by issuance (docs/architecture/authority-model.md,
+/// "Multi-instance workloads").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Instances {
+    #[default]
+    One,
+    Many,
 }
 
 impl Model {
@@ -90,6 +105,14 @@ impl Model {
             }
         }
         Ok(model)
+    }
+
+    /// How many pods of the workload known by `identity` run at once: one for an identity the model does not know.
+    pub fn instances_of(&self, identity: &str) -> Instances {
+        self.workloads
+            .iter()
+            .find(|w| w.identity == identity)
+            .map_or(Instances::One, |w| w.instances)
     }
 
     /// The workload named `name`.

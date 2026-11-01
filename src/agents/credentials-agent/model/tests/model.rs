@@ -497,3 +497,38 @@ fn only_a_workload_the_credentials_agent_issues_and_that_is_no_bootstrap_service
     assert_eq!(m.issued_by_the_credentials_agent(&id("direct")), None);
     assert_eq!(m.issued_by_the_credentials_agent(&id("booted")), None);
 }
+
+/// How many pods of a workload run at once, as the render writes it (`infra/rules.nu`, `model_facts`;
+/// docs/architecture/authority-model.md, "Multi-instance workloads"): one unless it says many, and one for an identity the
+/// model does not know. Issuance reads it to write each pod's instance into its certificates.
+#[test]
+fn a_workload_is_one_instance_unless_the_model_says_many() {
+    use credentials_agent_model::Instances;
+    let workload = |name: &str, instances: Option<&str>| {
+        let mut w = serde_json::json!({
+            "workload": name, "identity": id(name), "issuer": "credentials-agent", "bootstrap": false
+        });
+        if let Some(instances) = instances {
+            w["instances"] = serde_json::json!(instances);
+        }
+        w
+    };
+    let m = Model::parse(
+        &serde_json::json!({"format": 1, "workloads": [
+            workload("many", Some("many")),
+            workload("one", Some("one")),
+            workload("unsaid", None),
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(m.instances_of(&id("many")), Instances::Many);
+    assert_eq!(m.instances_of(&id("one")), Instances::One);
+    assert_eq!(m.instances_of(&id("unsaid")), Instances::One);
+    assert_eq!(m.instances_of(&id("nobody")), Instances::One);
+    let several = Model::parse(
+        &serde_json::json!({"format": 1, "workloads": [workload("x", Some("several"))]})
+            .to_string(),
+    );
+    assert!(several.is_err(), "{several:?}");
+}
