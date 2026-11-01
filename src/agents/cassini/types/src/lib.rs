@@ -112,6 +112,27 @@ pub struct MessageId {
     pub seq: u64,
 }
 
+/// The instance a connection's verified certificate names, when its workload is multi-instance
+/// (docs/architecture/authority-model.md, "Multi-instance workloads"): its pod's UID, the key, and its pod's name, for
+/// people (`cert_issuer_common::instance`, `i:uid:` and `i:pod:`). Read by the broker from the certificate, as the
+/// identity is, never client-supplied. A single-instance workload's connection has none.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Serialize,
+    Deserialize,
+    Archive,
+)]
+pub struct Instance {
+    pub uid: String,
+    pub pod: Option<String>,
+}
+
 /// The publisher's own identity, attached to a published message so a
 /// subscriber can know who sent it -- extracted by the broker from
 /// the publisher's verified mTLS client certificate at connection
@@ -182,6 +203,9 @@ pub enum BrokerMessage {
         /// ClientMessage::RegistrationRequest never carries this at
         /// all, since the client has no way to send it.
         peer_identity: Option<String>,
+        /// The instance the same certificate names, if any (a multi-instance workload's): supersession and resumption
+        /// are by identity and instance (docs/architecture/authority-model.md, "Multi-instance workloads").
+        peer_instance: Option<Instance>,
     },
     /// Reassign a session to a new client listener (used during reconnection)
     ReassignClient {
@@ -507,6 +531,7 @@ impl BrokerMessage {
         msg: ClientMessage,
         client_id: String,
         peer_identity: Option<String>,
+        peer_instance: Option<Instance>,
     ) -> Self {
         match msg {
             // Its protocol is judged by the Listener's reader before it is converted.
@@ -519,6 +544,7 @@ impl BrokerMessage {
                 client_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
                 peer_identity,
+                peer_instance,
             },
             ClientMessage::PublishRequest {
                 topic,

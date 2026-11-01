@@ -154,6 +154,30 @@ impl Pki {
         (cert, self.path(&format!("{file}.key")), serial)
     }
 
+    /// A new client certificate for `identity` naming the pod `uid` (named `pod`) as its instance, as a multi-instance
+    /// workload's pod holds (docs/architecture/authority-model.md, "Multi-instance workloads"): a new key each time, as
+    /// a pod restarted in place has. Its certificate and key paths.
+    pub fn instance_client(&self, identity: &str, uid: &str, pod: &str) -> (PathBuf, PathBuf) {
+        let key = KeyPair::generate().expect("a key");
+        let mut params = CertificateParams::new(vec![identity.to_string()]).expect("parameters");
+        for name in [format!("i:uid:{uid}"), format!("i:pod:{pod}")] {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(name.try_into().expect("a URI name")));
+        }
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .expect("a signed certificate");
+        let file = format!("instance-{}", uuid::Uuid::new_v4());
+        std::fs::write(self.path(&format!("{file}.pem")), cert.pem()).unwrap();
+        std::fs::write(self.path(&format!("{file}.key")), key.serialize_pem()).unwrap();
+        (
+            self.path(&format!("{file}.pem")),
+            self.path(&format!("{file}.key")),
+        )
+    }
+
     /// What cert-issuer gives the credentials agent for its authority key (`CertType::Signing`): `identity` as the DNS
     /// name, `digitalSignature` and `id-kp-documentSigning`, over `public_key_pem`, under this CA.
     pub fn certify_authority(&self, identity: &str, public_key_pem: &str) -> String {
@@ -754,6 +778,33 @@ impl TestClient {
         registration_id: Option<String>,
     ) -> Self {
         let client = Self::start_connecting(broker, identity, registration_id).await;
+        client
+            .wait_for("a registration", Duration::from_secs(10), |c| {
+                c.registration_id().is_some()
+            })
+            .await;
+        client
+    }
+
+    /// Connects as the pod `uid` of the multi-instance workload `identity`, with a new key and certificate
+    /// (`Pki::instance_client`), asking to resume `registration_id`, and waits until the broker has registered it.
+    pub async fn connect_as_instance(
+        broker: &TestBroker,
+        identity: &str,
+        uid: &str,
+        registration_id: Option<String>,
+    ) -> Self {
+        let (cert, key) = broker
+            .pki
+            .instance_client(identity, uid, &format!("{uid}-pod"));
+        let config = TCPClientConfig::from_values(
+            broker.addr.clone(),
+            "localhost".to_string(),
+            broker.pki.ca().to_string_lossy().into_owned(),
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        );
+        let client = Self::spawn(config, registration_id).await;
         client
             .wait_for("a registration", Duration::from_secs(10), |c| {
                 c.registration_id().is_some()

@@ -427,7 +427,8 @@ fn test_broker_message_from_client_message() {
         protocol: cassini_types::PROTOCOL_VERSION,
     };
 
-    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
+    let broker_msg =
+        BrokerMessage::from_client_message(client_msg, "client1".to_string(), None, None);
 
     match broker_msg {
         BrokerMessage::RegistrationRequest {
@@ -455,7 +456,8 @@ fn test_broker_message_from_client_message_unsupported() {
         seq: 2,
     };
 
-    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
+    let broker_msg =
+        BrokerMessage::from_client_message(client_msg, "client1".to_string(), None, None);
 
     match &broker_msg {
         BrokerMessage::PublishRequest {

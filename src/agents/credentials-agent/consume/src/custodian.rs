@@ -374,6 +374,7 @@ pub(crate) mod tests {
             revoked_by: None,
             revoked_at: None,
             reported: false,
+            instance: None,
         }
     }
 

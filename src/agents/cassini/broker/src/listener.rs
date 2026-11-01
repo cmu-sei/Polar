@@ -487,6 +487,35 @@ fn extract_peer_floor(stream: &TlsStream<TcpStream>) -> Result<Arc<Floor>, Strin
         .map_err(|e| format!("the connection's certificate cannot be read: {e}"))
 }
 
+/// The instance the connecting client's verified certificate names (a multi-instance workload's pod: its UID and name,
+/// `cert_issuer_common::instance`), read once after the handshake as the identity is; none for a single-instance
+/// workload's. A certificate whose instance names do not read as one instance gives the reason, and the connection is
+/// refused every publish and subscribe with it, as an unreadable floor is.
+fn extract_peer_instance(
+    stream: &TlsStream<TcpStream>,
+) -> Result<Option<cassini_types::Instance>, String> {
+    let (_, connection) = stream.get_ref();
+    let Some(leaf) = connection
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+    else {
+        return Ok(None);
+    };
+    peer_instance_of(leaf.as_ref())
+}
+
+/// The instance the DER certificate `der` names, as [`extract_peer_instance`] reads it. Pure.
+pub fn peer_instance_of(der: &[u8]) -> Result<Option<cassini_types::Instance>, String> {
+    cert_issuer_common::instance::extract_instance_der(der)
+        .map(|instance| {
+            instance.map(|i| cassini_types::Instance {
+                uid: i.uid,
+                pod: i.pod,
+            })
+        })
+        .map_err(|e| format!("the connection's certificate names no one instance: {e}"))
+}
+
 /// A publish as its reader admitted it: its payload carrying the frame's charge, and the frame's window credit with
 /// it until its topic accepts it.
 fn charged(message: BrokerMessage, (credit, charge): (WindowCharge, Charge)) -> BrokerMessage {
@@ -699,7 +728,10 @@ impl Actor for ListenerManager {
                                 // TlsStream.
                                 let peer_identity = extract_peer_identity(&stream);
                                 let peer_serial = extract_peer_serial(&stream);
-                                let floor = extract_peer_floor(&stream);
+                                let (peer_instance, floor) = match extract_peer_instance(&stream) {
+                                    Ok(instance) => (instance, extract_peer_floor(&stream)),
+                                    Err(why) => (None, Err(why)),
+                                };
                                 if let Err(why) = &floor {
                                     warn!(%why, "every publish and subscribe on this connection will be refused");
                                 }
@@ -716,6 +748,7 @@ impl Actor for ListenerManager {
                                         .expect("ListenerManager must have a supervisor (the broker)")
                                         .into(),
                                     peer_identity,
+                                    peer_instance,
                                     peer_serial,
                                     floor,
                                     authority,
@@ -1044,6 +1077,8 @@ struct ListenerState {
     task_handle: Option<JoinHandle<()>>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    /// The instance this connection's certificate names, if its workload is multi-instance.
+    peer_instance: Option<cassini_types::Instance>,
     /// The serial of this connection's certificate, checked against the revoked set.
     peer_serial: Option<String>,
     /// What this connection's certificate admits where no policy speaks, or why it cannot be read.
@@ -1073,6 +1108,7 @@ struct ListenerArguments {
     registration_id: Option<String>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    peer_instance: Option<cassini_types::Instance>,
     peer_serial: Option<String>,
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
@@ -1225,6 +1261,7 @@ impl Actor for Listener {
             task_handle: None,
             broker: args.broker,
             peer_identity: args.peer_identity,
+            peer_instance: args.peer_instance,
             peer_serial: args.peer_serial,
             floor: args.floor,
             decisions: args.authority.cache(),
@@ -1263,6 +1300,7 @@ impl Actor for Listener {
 
         let client_id = state.client_id.clone();
         let peer_identity = state.peer_identity.clone();
+        let peer_instance = state.peer_instance.clone();
         let reader = state.reader.take().ok_or_else(|| {
             ActorProcessingErr::from(std::io::Error::other("Reader already taken"))
         })?;
@@ -1419,6 +1457,7 @@ impl Actor for Listener {
                         deserialized,
                         client_id.clone(),
                         peer_identity.clone(),
+                        peer_instance.clone(),
                     );
                     if is_publish {
                         let admission = match admitted.take() {
@@ -1484,6 +1523,7 @@ impl Actor for Listener {
                                                         ack,
                                                         client_id.clone(),
                                                         peer_identity.clone(),
+                                                        peer_instance.clone(),
                                                     );
                                                     if let Err(e) = myself.send_message(ack) {
                                                         warn!(error = %e, "Failed forwarding an acknowledgement to listener actor");
@@ -1616,6 +1656,7 @@ impl Actor for Listener {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                ..
             } => {
                 if Self::is_revoked(state) {
                     warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "a revoked certificate asked to register: refused, and closed");
@@ -1833,6 +1874,7 @@ impl Listener {
                 client_id: client_id.clone(),
                 trace_ctx: Some(span.context()),
                 peer_identity,
+                peer_instance: state.peer_instance.clone(),
             }) {
                 let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
                 error!("{err_msg}");

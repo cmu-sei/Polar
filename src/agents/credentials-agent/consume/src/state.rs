@@ -60,6 +60,9 @@ pub struct CertificateRecord {
     pub revoked: bool,
     pub revoked_reason: Option<RevocationReason>,
     pub revoked_by: Option<String>,
+    /// The pod UID its certificate names as its instance, when its workload is multi-instance: a reissue supersedes only
+    /// a certificate of the same instance (docs/architecture/authority-model.md, "Multi-instance workloads").
+    pub instance: Option<String>,
     pub revoked_at: Option<i64>,
     /// Learned from cert-issuer's record, not issued by the credentials agent itself: a bootstrap service's, or one
     /// it asked for and lost (docs/architecture/cert-issuer-isolation.md, "Step 2").
@@ -262,14 +265,29 @@ impl CredentialsState {
         // A reissue for the same identity supersedes any
         // prior, still-valid certificate of the same type for it
         // -- regardless of instance_binding, since a pod restart
-        // gets a fresh one. A client certificate and a server
+        // gets a fresh one -- and, for a multi-instance workload, of the
+        // same instance: the pod its certificate names (a pod restarted in
+        // place, the same UID, still supersedes its own; two pods do not;
+        // cert_issuer_common::instance::same_instance). A certificate whose
+        // instance names do not read is taken as naming none. A client certificate and a server
         // certificate are different things, and neither
         // retires the other. Marked revoked in place, not
         // removed, so the record survives. Done before
         // inserting the new entry, so this can't mark the new
         // one itself.
+        let instance = cert_issuer_common::instance::extract_instance(certificate_pem)
+            .ok()
+            .flatten()
+            .map(|instance| instance.uid);
         for record in self.valid_certificates.values_mut() {
-            if record.identity == identity && record.cert_type == cert_type && !record.revoked {
+            if record.identity == identity
+                && record.cert_type == cert_type
+                && !record.revoked
+                && cert_issuer_common::instance::same_instance(
+                    instance.as_deref(),
+                    record.instance.as_deref(),
+                )
+            {
                 record.revoked = true;
                 record.revoked_reason = Some(RevocationReason::Superseded);
                 record.revoked_by = Some("system".to_string());
@@ -307,6 +325,7 @@ impl CredentialsState {
                 revoked_by: None,
                 revoked_at: None,
                 reported,
+                instance,
             },
         );
         self.serial_index.insert(serial.to_string(), key);
@@ -1445,6 +1464,103 @@ pub(crate) mod tests {
         assert!(state.has_valid_certificate("x", "old", Server));
         let superseded = state.apply(&issued_as("x", "new", "new-server", Server));
         assert_eq!(superseded, vec!["old-server".to_string()]);
+    }
+
+    // ---- a multi-instance workload (docs/architecture/authority-model.md, "Multi-instance workloads") ---------
+
+    /// A client certificate of `identity` naming the pod `uid` as its instance, or none.
+    pub(crate) fn certificate_naming(identity: &str, uid: Option<&str>) -> String {
+        let mut params = rcgen::CertificateParams::new(vec![identity.to_string()]).unwrap();
+        if let Some(uid) = uid {
+            for name in [format!("i:uid:{uid}"), format!("i:pod:{uid}-pod")] {
+                params
+                    .subject_alt_names
+                    .push(rcgen::SanType::URI(name.try_into().unwrap()));
+            }
+        }
+        params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+    }
+
+    pub(crate) fn issued_naming(
+        identity: &str,
+        uid: &str,
+        serial: &str,
+        named: bool,
+    ) -> CredentialsEvent {
+        CredentialsEvent::IssuanceCompleted {
+            identity: identity.to_string(),
+            instance_binding: uid.to_string(),
+            serial: serial.to_string(),
+            timestamp: 2000,
+            cert_type: Client,
+            grant_key: None,
+            certificate_pem: certificate_naming(identity, named.then_some(uid)),
+        }
+    }
+
+    #[test]
+    fn two_pods_of_a_multi_instance_workload_hold_two_certificates_and_a_restart_supersedes_its_own()
+     {
+        let mut state = CredentialsState::new();
+        assert!(
+            state
+                .apply(&issued_naming("b", "pod-a", "a-1", true))
+                .is_empty()
+        );
+        assert!(
+            state
+                .apply(&issued_naming("b", "pod-b", "b-1", true))
+                .is_empty(),
+            "the second pod supersedes nothing"
+        );
+        assert!(state.has_valid_certificate("b", "pod-a", Client));
+        assert!(state.has_valid_certificate("b", "pod-b", Client));
+        // Pod a restarted in place: the same UID, a new certificate, which supersedes its own and only its own.
+        assert_eq!(
+            state.apply(&issued_naming("b", "pod-a", "a-2", true)),
+            vec!["a-1".to_string()]
+        );
+        assert!(state.has_valid_certificate("b", "pod-b", Client));
+        assert!(state.revoked_serials().contains(&"a-1".to_string()));
+        assert!(!state.revoked_serials().contains(&"b-1".to_string()));
+        // A single-instance workload's reissue supersedes, whatever the pod, as before.
+        state.apply(&issued_naming("one", "pod-a", "o-1", false));
+        assert_eq!(
+            state.apply(&issued_naming("one", "pod-b", "o-2", false)),
+            vec!["o-1".to_string()]
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// For any sequence of issuances to the pods of one multi-instance workload: every pod issued holds exactly one
+        /// valid client certificate, its latest, and what is revoked is exactly each pod's earlier ones.
+        #[test]
+        fn each_pod_of_a_multi_instance_workload_holds_its_latest_certificate_and_only_that(
+            pods in proptest::collection::vec(0u8..4, 1..12),
+        ) {
+            let mut state = CredentialsState::new();
+            let mut latest = std::collections::BTreeMap::new();
+            let mut earlier = std::collections::BTreeSet::new();
+            for (n, pod) in pods.iter().enumerate() {
+                let uid = format!("pod-{pod}");
+                let serial = format!("s{n}");
+                state.apply(&issued_naming("b", &uid, &serial, true));
+                if let Some(old) = latest.insert(uid, serial) {
+                    earlier.insert(old);
+                }
+            }
+            for (uid, serial) in &latest {
+                proptest::prop_assert!(state.has_valid_certificate("b", uid, Client));
+                proptest::prop_assert!(!state.revoked_serials().contains(serial), "{}", serial);
+            }
+            let revoked: std::collections::BTreeSet<String> = state.revoked_serials().into_iter().collect();
+            proptest::prop_assert_eq!(revoked, earlier);
+        }
     }
 
     #[test]

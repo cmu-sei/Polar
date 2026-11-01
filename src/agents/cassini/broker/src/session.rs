@@ -55,6 +55,9 @@ struct Session {
     detached_at: Option<tokio::time::Instant>,
     /// The verified identity of the client that registered this session.
     identity: Option<String>,
+    /// The pod UID its certificate names, when its workload is multi-instance: sessions supersede each other by identity
+    /// and instance (docs/architecture/authority-model.md, "Multi-instance workloads").
+    instance: Option<String>,
     /// A new session of the same identity has taken over: this one cannot be resumed, and is
     /// only waiting for its subscribers to hold, then stops.
     superseded: bool,
@@ -65,6 +68,7 @@ struct Session {
 struct HeldSession {
     registration_id: String,
     identity: String,
+    instance: Option<String>,
     since: tokio::time::Instant,
     /// Every subscriber of the session confirmed it is holding.
     ready: bool,
@@ -88,8 +92,8 @@ pub struct SessionManagerState {
     /// Sessions ended before their retention window, with why and when: a client that comes back asking for one is
     /// told (`ClientMessage::SessionEnded`) before it is given a new session. Kept for the retention window.
     ended_early: HashMap<String, (String, tokio::time::Instant)>,
-    /// Questions about an identity with a takeover still in progress, answered when it is done.
-    parked: Vec<(String, ractor::RpcReplyPort<Vec<String>>)>,
+    /// Questions about an identity (and instance) with a takeover still in progress, answered when it is done.
+    parked: Vec<(String, Option<String>, ractor::RpcReplyPort<Vec<String>>)>,
     is_shutting_down: bool,
     drain_phase_active: bool,
     drain_completion_notified: bool,
@@ -196,6 +200,7 @@ impl Actor for SessionManager {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                peer_instance,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -204,6 +209,7 @@ impl Actor for SessionManager {
                     client_id,
                     trace_ctx,
                     peer_identity,
+                    peer_instance.map(|instance| instance.uid),
                 )
                 .await?;
             }
@@ -334,16 +340,18 @@ impl Actor for SessionManager {
                 registration_id,
                 reply_to,
             } => {
-                let identity = state
-                    .sessions
-                    .get(&registration_id)
-                    .and_then(|session| session.identity.clone());
-                match identity {
+                let asking = state.sessions.get(&registration_id).and_then(|session| {
+                    session
+                        .identity
+                        .clone()
+                        .map(|identity| (identity, session.instance.clone()))
+                });
+                match asking {
                     None => {
                         let _ = reply_to.send(Vec::new());
                     }
-                    Some(identity) => {
-                        state.parked.push((identity, reply_to));
+                    Some((identity, instance)) => {
+                        state.parked.push((identity, instance, reply_to));
                         Self::answer_parked(state);
                     }
                 }
@@ -445,6 +453,7 @@ impl SessionManager {
     fn supersede_older(
         state: &mut SessionManagerState,
         identity: &str,
+        instance: Option<&str>,
         new_id: &str,
         new_client_id: &str,
     ) {
@@ -454,7 +463,10 @@ impl SessionManager {
             .filter(|(id, session)| {
                 id.as_str() != new_id
                     && !session.superseded
-                    && session.identity.as_deref() == Some(identity)
+                    && supersedes(
+                        (identity, instance),
+                        (session.identity.as_deref(), session.instance.as_deref()),
+                    )
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -473,6 +485,7 @@ impl SessionManager {
             state.held.push(HeldSession {
                 registration_id: registration_id.clone(),
                 identity: identity.to_string(),
+                instance: instance.map(str::to_string),
                 since: tokio::time::Instant::now(),
                 ready: false,
             });
@@ -507,18 +520,21 @@ impl SessionManager {
     /// Answers each parked question whose identity has no takeover still in progress.
     fn answer_parked(state: &mut SessionManagerState) {
         let parked = std::mem::take(&mut state.parked);
-        for (identity, reply_to) in parked {
-            let in_progress = state
-                .held
-                .iter()
-                .any(|held| held.identity == identity && !held.ready);
+        for (identity, instance, reply_to) in parked {
+            let theirs = |held: &&HeldSession| {
+                supersedes(
+                    (identity.as_str(), instance.as_deref()),
+                    (Some(held.identity.as_str()), held.instance.as_deref()),
+                )
+            };
+            let in_progress = state.held.iter().filter(theirs).any(|held| !held.ready);
             if in_progress {
-                state.parked.push((identity, reply_to));
+                state.parked.push((identity, instance, reply_to));
             } else {
                 let ids = state
                     .held
                     .iter()
-                    .filter(|held| held.identity == identity)
+                    .filter(theirs)
                     .map(|held| held.registration_id.clone())
                     .collect();
                 let _ = reply_to.send(ids);
@@ -670,6 +686,7 @@ impl SessionManager {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
+        peer_instance: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
@@ -703,7 +720,10 @@ impl SessionManager {
             if let Some(existing_id) = &registration_id {
                 if let Some(session) = state.sessions.get(existing_id)
                     && !session.superseded
-                    && !may_resume(session.identity.as_deref(), peer_identity.as_deref())
+                    && !may_resume_as(
+                        (session.identity.as_deref(), session.instance.as_deref()),
+                        (peer_identity.as_deref(), peer_instance.as_deref()),
+                    )
                 {
                     warn!(
                         registration_id = %existing_id,
@@ -714,7 +734,10 @@ impl SessionManager {
                 }
                 if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
                     !session.superseded
-                        && may_resume(session.identity.as_deref(), peer_identity.as_deref())
+                        && may_resume_as(
+                            (session.identity.as_deref(), session.instance.as_deref()),
+                            (peer_identity.as_deref(), peer_instance.as_deref()),
+                        )
                 }) {
                     info!(registration_id = %existing_id, "reusing existing session");
                     session.detached_at = None;
@@ -750,6 +773,7 @@ impl SessionManager {
                                 client_id,
                                 trace_ctx: Some(span.context()),
                                 peer_identity: None,
+                                peer_instance: None,
                             });
                         } else {
                             warn!(
@@ -792,6 +816,7 @@ impl SessionManager {
                             pending_publishes: 0,
                             detached_at: None,
                             identity: peer_identity.clone(),
+                            instance: peer_instance.clone(),
                             superseded: false,
                         },
                     );
@@ -805,7 +830,13 @@ impl SessionManager {
                     if let Some(identity) = &peer_identity
                         && !is_the_loser
                     {
-                        Self::supersede_older(state, identity, &new_id, &client_id);
+                        Self::supersede_older(
+                            state,
+                            identity,
+                            peer_instance.as_deref(),
+                            &new_id,
+                            &client_id,
+                        );
                     }
                     // Pass broker ref to the session agent
                     let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
@@ -1824,4 +1855,23 @@ impl SessionAgent {
 /// identity, and never when either is unknown (a certificate with no DNS name has no identity to match). Pure.
 pub fn may_resume(session: Option<&str>, connection: Option<&str>) -> bool {
     matches!((session, connection), (Some(s), Some(c)) if s == c)
+}
+
+/// [`may_resume`], by identity and instance: a connection of one pod of a multi-instance workload never resumes another
+/// pod's session (docs/architecture/authority-model.md, "Multi-instance workloads"). Each side is `(identity, pod UID)`.
+/// Pure.
+pub fn may_resume_as(
+    session: (Option<&str>, Option<&str>),
+    connection: (Option<&str>, Option<&str>),
+) -> bool {
+    may_resume(session.0, connection.0)
+        && cert_issuer_common::instance::same_instance(session.1, connection.1)
+}
+
+/// Whether a new session of `(identity, instance)` supersedes an older one of `older` (its identity, if it has one, and
+/// its instance): the same identity and the same instance (`cert_issuer_common::instance::same_instance`). A
+/// single-instance workload's new session supersedes every older one of its identity; a pod restarted in place (the
+/// same UID) supersedes its own; two pods of a multi-instance workload never supersede each other. Pure.
+pub fn supersedes(newer: (&str, Option<&str>), older: (Option<&str>, Option<&str>)) -> bool {
+    older.0 == Some(newer.0) && cert_issuer_common::instance::same_instance(newer.1, older.1)
 }

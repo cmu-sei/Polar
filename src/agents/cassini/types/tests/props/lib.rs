@@ -125,7 +125,7 @@ proptest! {
         let sent = ClientMessage::RegistrationRequest { registration_id: registration_id.clone(), trace_ctx: None, protocol: cassini_types::PROTOCOL_VERSION };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sent).unwrap();
         let received = rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap();
-        match BrokerMessage::from_client_message(received, "c".to_string(), None) {
+        match BrokerMessage::from_client_message(received, "c".to_string(), None, None) {
             BrokerMessage::RegistrationRequest { registration_id: got, .. } => {
                 prop_assert_eq!(got, registration_id);
             }
@@ -161,7 +161,7 @@ proptest! {
             epoch,
             seq,
         };
-        match BrokerMessage::from_client_message(wire(&sent), "c".to_string(), Some("me".into())) {
+        match BrokerMessage::from_client_message(wire(&sent), "c".to_string(), Some("me".into()), None) {
             BrokerMessage::PublishRequest { id, topic: t, payload: p, published_by, .. } => {
                 prop_assert_eq!(id, MessageId { epoch, seq });
                 prop_assert_eq!(t, topic.clone());
@@ -231,7 +231,7 @@ proptest! {
             _ => prop_assert!(false, "not a delivery"),
         }
         let ack = wire(&ClientMessage::PublishResponseAck { delivery_id });
-        match BrokerMessage::from_client_message(ack, "c".to_string(), None) {
+        match BrokerMessage::from_client_message(ack, "c".to_string(), None, None) {
             BrokerMessage::PublishResponseAck { delivery_id: d } => prop_assert_eq!(d, delivery_id),
             _ => prop_assert!(false, "not an acknowledgement of a delivery"),
         }
