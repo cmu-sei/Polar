@@ -52,7 +52,7 @@ use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
 use topics.nu [served, judge, oversized]
-use graph.nu [unowned_reads, state_schema, needs_workload]
+use graph.nu [unowned_reads, state_schema, health_agents, needs_workload]
 use egress.nu
 const CONFIG = ($INFRA | path join "config")
 
@@ -1173,6 +1173,26 @@ def "main state-schema" [--target: string = $DEFAULT_TARGET] {
     })
     if $from.made { rm -rf $from.dir }
     print (state_schema $records $domain | to json --raw)
+}
+
+# The body of the state agent's writer's first `agents` section for this target, as JSON (infra/seed.nu, up.nu
+# `step_seed`): every agent the target runs that reads a document (the workloads its family serves, topics.nu `served`),
+# by its identity. From the catalog alone: no scaffold is asked. Only its first version is seeded; later ones are an
+# author's (docs/architecture/soft-state.md, "As built: pulled health").
+def "main health-agents" [--target: string = $DEFAULT_TARGET] {
+    let kinds = (open ($CONFIG | path join "kinds.nuon"))
+    let domain = (load_cluster $target).domain
+    let served = (served (all_workloads $target) | split row "," | where {|n| $n != "" })
+    let records = (all_workloads $target | where {|w| $w.name in $served } | each {|w|
+        let s = (spec_of $w.name $target $kinds).spec
+        {
+            who: $w.name
+            kind: ($w.kind? | default "agent")
+            namespace: $s.namespace
+            service_account: ($s.service_account? | default $w.name)
+        }
+    })
+    print (health_agents $records $domain | to json --raw)
 }
 
 # The entries of cert-issuer's floor for this target, as JSON (render.nu hands them to the cert-issuer chart).

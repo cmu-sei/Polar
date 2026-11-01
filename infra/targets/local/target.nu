@@ -84,6 +84,8 @@ def main [] {
             "git-repo-controller.yaml"
             "soft-state-observer-resources.yaml"
             "soft-state-observer.yaml"
+            "soft-state-processor-resources.yaml"
+            "soft-state-processor.yaml"
             "jira-observer-resources.yaml"
             "jira-observer.yaml"
             "jira-processor-resources.yaml"

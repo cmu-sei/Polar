@@ -727,15 +727,16 @@ def step_seed [target: string, config: record, username: string, mail: string, a
 
     let existing = (^git -C $repo ls-files | lines)
     let todo = (seed missing (seed documents) $existing)
-    # The state agent's first schema is made from the agents' scaffolds, which the render has collected already (cached
-    # under each image's digest), so this asks the cluster for nothing new.
-    let schema = (if ($todo | any {|d| seed from_scaffolds $d }) {
-        ^$nu.current-exe ($root | path join "infra/resolve.nu") state-schema --target $target | from json
-    } else { null })
     let sign = (tools command "polar-sign")
     for d in $todo {
         note $"signing ($d.section) for ($d.agent), version ($d.version)"
-        let signed = (seed body_json $d $root $schema
+        # A computed body is the resolver's: the state agent's first schema from the agents' scaffolds, which the render
+        # has collected already (cached under each image's digest), and its writer's first agents from the catalog, so
+        # this asks the cluster for nothing new.
+        let body = (if (seed computed $d) {
+            ^$nu.current-exe ($root | path join "infra/resolve.nu") $d.resolve --target $target | from json
+        } else { null })
+        let signed = (seed body_json $d $root $body
             | ^($sign | first) ...($sign | skip 1) runtime --agent $d.agent --section $d.section --version $d.version --body-file - --user $username)
         if $env.LAST_EXIT_CODE != 0 { fail "polar-sign runtime failed" }
         let target_file = ($repo | path join $d.path)

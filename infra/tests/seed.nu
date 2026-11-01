@@ -68,7 +68,7 @@ def main [] {
                 for d in $docs {
                     assert ($d.path | str ends-with ".dhall")
                     assert equal $d.version 1
-                    if not (from_scaffolds $d) {
+                    if not (computed $d) {
                         assert (((root) | path join $d.file) | path exists) $"($d.file) is missing"
                     }
                 }
@@ -94,6 +94,31 @@ def main [] {
                 let r = (try { body_json $d (root); "made" } catch {|e| $e.msg })
                 assert ($r | str contains "none was given") $r
                 assert (not (from_scaffolds (documents | where section == "policy" | first)))
+            }
+        }
+        {
+            name: "the writer's first agents are seeded from the catalog by the resolver, signed for c:update-runtime, and are the body as given"
+            body: {
+                let d = (documents | where section == "agents" | first)
+                assert equal $d.agent "soft-state-processor"
+                assert equal $d.capability "c:update-runtime"
+                assert (computed $d)
+                assert (not (from_scaffolds $d))
+                let agents = { workloads: [{ workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local" }] }
+                assert equal (body_json $d (root) $agents | from json) $agents
+                let r = (try { body_json $d (root); "made" } catch {|e| $e.msg })
+                assert ($r | str contains "made from the catalog, and none was given") $r
+            }
+        }
+        {
+            name: "every computed body names a resolver command that exists, and no file"
+            body: {
+                let resolver = (open --raw ((root) | path join "infra/resolve.nu"))
+                for d in (documents | where {|d| computed $d }) {
+                    assert ($resolver | str contains $"def \"main ($d.resolve)\"") $"resolve.nu has no ($d.resolve)"
+                    assert (($d.file? | default null) == null) $d.path
+                }
+                assert (not (computed (documents | where section == "policy" | first)))
             }
         }
         {

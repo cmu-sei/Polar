@@ -21,8 +21,8 @@
 
 # src/agents/soft-state/package.nix
 #
-# The state agent (docs/architecture/soft-state.md): its reader, soft-state-observer. The writer half waits for a
-# first writer.
+# The state agent (docs/architecture/soft-state.md): its reader, soft-state-observer, and its writer,
+# soft-state-processor, which asks every agent about its health and writes what it hears.
 { pkgs
 , craneLib
 , crateArgs
@@ -40,6 +40,12 @@ let
     src = workspaceFileset ./soft-state/observe;
   });
 
+  processor = craneLib.buildPackage (crateArgs // {
+    pname = "soft-state-processor";
+    cargoExtraArgs = "--bin soft-state-processor --locked";
+    src = workspaceFileset ./soft-state/process;
+  });
+
   healthcheckInputs = inputs // {
     polar-healthcheck = {
       packages.${system}.default = healthcheckDrv;
@@ -52,8 +58,16 @@ let
     configNixPath    = ./container-observer.nix;
     extraDerivations = [ observer ];
   };
+
+  processorContainer = nix-container-lib.lib.${system}.mkContainer {
+    inherit system pkgs;
+    inputs = healthcheckInputs;
+    configNixPath    = ./container-processor.nix;
+    extraDerivations = [ processor ];
+  };
 in
 {
-  inherit observer;
+  inherit observer processor;
   observerImage = observerContainer.image;
+  processorImage = processorContainer.image;
 }

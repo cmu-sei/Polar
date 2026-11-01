@@ -88,6 +88,7 @@ members = [
     "secret-harness",
     "soft-state/common",
     "soft-state/observe",
+    "soft-state/process",
 ]
 
 [workspace.package]

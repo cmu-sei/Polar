@@ -66,6 +66,24 @@ export def state_schema [records: list, domain: string]: nothing -> record {
     { workloads: $workloads }
 }
 
+# The body of the state agent's writer's `agents` runtime section (soft-state/process/src/expected.rs): every agent of
+# `records` ({ who, kind, namespace, service_account }), by its one identity `<workload>.<namespace>.serviceaccount.
+# <domain>`, sorted by name. Only the `agent` kind: a run (the load harness) ends by design, and asked when it has would
+# be unresponsive. A workload whose service account is not its name would have another identity than its name says, and
+# is an error, as for the schema.
+export def health_agents [records: list, domain: string]: nothing -> record {
+    let agents = ($records | where {|r| ($r.kind? | default "agent") == "agent" })
+    let misnamed = ($agents | where {|r| $r.service_account != $r.who })
+    if ($misnamed | is-not-empty) {
+        let named = ($misnamed | each {|r| $"($r.who) \(service account ($r.service_account)\)" } | str join ", ")
+        error make { msg: $"its service account is not its name, so its identity would name another workload: ($named)" }
+    }
+    let workloads = ($agents | each {|r|
+        { workload: $r.who, identity: $"($r.who).($r.namespace).serviceaccount.($domain)" }
+    } | sort-by workload)
+    { workloads: $workloads }
+}
+
 # What is wrong with workload `who`'s needs in a target running `running`: each capability of `caps` whose dependency is
 # a workload (soft-state's is the state agent) that the target does not run.
 export def needs_workload [who: string, needs: list, caps: record, running: list]: nothing -> list {

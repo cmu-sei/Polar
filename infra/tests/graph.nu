@@ -24,7 +24,7 @@
 #   nu infra/tests/graph.nu
 
 use std/assert
-use ../graph.nu [unowned_reads, state_schema, needs_workload]
+use ../graph.nu [unowned_reads, state_schema, health_agents, needs_workload]
 
 def g [label: string, access: string] { { label: $label, access: $access, purpose: "for a test" } }
 
@@ -75,6 +75,26 @@ def main [] {
             body: {
                 let r = (try { state_schema [(record_of "jira-observer" [(g "JiraIssue" "reads")] "other")] "cluster.local"; "made" } catch {|e| $e.msg })
                 assert ($r | str contains "jira-observer (service account other)") $r
+            }
+        }
+        {
+            name: "the writer's first agents are the target's agents by identity, sorted, and no run"
+            body: {
+                let agent = {|who: string, kind: string| { who: $who, kind: $kind, namespace: "polar", service_account: $who } }
+                let agents = (health_agents [
+                    (do $agent "kube-observer" "agent")
+                    (do $agent "harness-producer" "run")
+                    (do $agent "jira-observer" "agent")
+                ] "cluster.local")
+                assert equal $agents {
+                    workloads: [
+                        { workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local" }
+                        { workload: "kube-observer", identity: "kube-observer.polar.serviceaccount.cluster.local" }
+                    ]
+                }
+                assert equal (health_agents [] "cluster.local") { workloads: [] }
+                let r = (try { health_agents [{ who: "a", kind: "agent", namespace: "polar", service_account: "b" }] "x"; "made" } catch {|e| $e.msg })
+                assert ($r | str contains "a (service account b)") $r
             }
         }
         {

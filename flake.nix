@@ -263,6 +263,7 @@
 
           # ── The state agent ──────────────────────────────────────────────────
           softStateObserverImage = polarPkgs.softState.observerImage;
+          softStateProcessorImage = polarPkgs.softState.processorImage;
 
           # ── Credentials agent ────────────────────────────────────────────────
           credentialsAgentConsumerImage = polarPkgs.credentialsAgent.consumerImage;

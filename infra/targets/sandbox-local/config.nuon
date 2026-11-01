@@ -120,6 +120,9 @@
     # The state agent's reader (docs/architecture/soft-state.md), which presents its one client certificate to Neo4j
     # too (graph-read).
     soft-state-observer: { issuer: "credentials-agent" }
+    # The state agent's writer (pulled health, docs/architecture/soft-state.md), which presents its one client
+    # certificate to Neo4j too (graph-write).
+    soft-state-processor: { issuer: "credentials-agent" }
     jira-observer: {
       issuer: "credentials-agent"
       env: [

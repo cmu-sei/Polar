@@ -22,8 +22,9 @@
 # infra/config/workloads/soft-state.nuon
 #
 # The state agent (docs/architecture/soft-state.md): its reader, which answers other agents' requests for soft state
-# from the graph. Its floor (who may read which label) is written into its document from every workload's scaffold
-# (SOFT_STATE_FLOOR, resolve.nu), and its reply family is expanded over the readers (POLAR_STATE_READERS).
+# from the graph, and its writer, which asks every agent about its health and writes what it hears. The reader's floor
+# (who may read which label) and the writer's set of agents asked are signed runtime sections, seeded by infra/seed.nu;
+# each one's family is expanded over the served workloads (POLAR_SERVED_WORKLOADS).
 [
   {
     name: "soft-state-observer"
@@ -31,6 +32,15 @@
     # It holds the graph password, which stays on the writers' pool, beside Neo4j (docs/architecture/placement.md).
     pool: "writers"
     image: "soft-state-observer"
+    config: "document"
+  }
+
+  {
+    name: "soft-state-processor"
+    kind: "agent"
+    # A graph writer, beside the other writers and Neo4j (docs/architecture/placement.md).
+    pool: "writers"
+    image: "soft-state-processor"
     config: "document"
   }
 ]

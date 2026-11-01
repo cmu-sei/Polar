@@ -35,10 +35,11 @@ export const REPO = "polar-schedules"
 export const GIT_HOST = "polar-git-server.polar.svc.cluster.local"
 export const GIT_PORT = "8443"
 
-# The documents a cluster starts with. A body comes from a file (`file`, its text in the one `field`) or from the agents'
-# scaffolds (`from: "scaffolds"`: the state agent's first `schema`, docs/architecture/soft-state.md, which up.nu asks
-# `resolve.nu state-schema` for). `version` is 1 because this is only ever the first: a path that already exists is
-# left alone, and a later change is an author's, at a higher version.
+# The documents a cluster starts with. A body comes from a file (`file`, its text in the one `field`) or is computed by
+# the resolver from the catalog (`resolve`, the `resolve.nu` command up.nu asks for it; `from` says what it is made of):
+# the state agent's first `schema` from the agents' scaffolds, and its writer's first `agents` from the catalog's
+# workloads (docs/architecture/soft-state.md). `version` is 1 because this is only ever the first: a path that already
+# exists is left alone, and a later change is an author's, at a higher version.
 export def documents [] {
     [
         {
@@ -57,6 +58,16 @@ export def documents [] {
             version: 1
             capability: "c:update-runtime"
             from: "scaffolds"
+            resolve: "state-schema"
+        }
+        {
+            path: "permanent/soft-state-processor-agents.dhall"
+            agent: "soft-state-processor"
+            section: "agents"
+            version: 1
+            capability: "c:update-runtime"
+            from: "catalog"
+            resolve: "health-agents"
         }
     ]
 }
@@ -66,11 +77,16 @@ export def from_scaffolds [doc: record] {
     ($doc.from? | default "file") == "scaffolds"
 }
 
-# The body of a section, as the JSON `polar-sign runtime` takes: the file's text, exactly, in its field; or, for a body
-# made from the scaffolds, `schema` (the record `resolve.nu state-schema` printed), as it is.
+# Whether a document's body is computed by the resolver (from the scaffolds or the catalog), and not read from a file.
+export def computed [doc: record] {
+    ($doc.from? | default "file") != "file"
+}
+
+# The body of a section, as the JSON `polar-sign runtime` takes: the file's text, exactly, in its field; or, for a
+# computed body, `schema` (the record its `resolve.nu` command printed), as it is.
 export def body_json [doc: record, root: string, schema?: record] {
-    if (from_scaffolds $doc) {
-        if $schema == null { error make { msg: $"($doc.section) for ($doc.agent) is made from the scaffolds, and none was given" } }
+    if (computed $doc) {
+        if $schema == null { error make { msg: $"($doc.section) for ($doc.agent) is made from the ($doc.from), and none was given" } }
         $schema | to json --raw
     } else {
         { ($doc.field): (open --raw ($root | path join $doc.file)) } | to json --raw
