@@ -120,6 +120,7 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
         payload: vec![1, 2, 3],
         trace_ctx: None,
         published_by: None,
+        published_instance: None,
     })?;
 
     // Give the actor time to process the message
@@ -185,6 +186,7 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
         payload: vec![1],
         trace_ctx: None,
         published_by: None,
+        published_instance: None,
     })?;
 
     forwarder_ref.send_message(CassiniClientEvent::PublishAcknowledged {
@@ -241,6 +243,7 @@ async fn test_client_event_forwarder_filters_events() -> Result<(), ActorProcess
         payload: vec![1],
         trace_ctx: None,
         published_by: None,
+        published_instance: None,
     })?;
 
     // Send a PublishAcknowledged event (should pass through)

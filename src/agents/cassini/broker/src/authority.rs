@@ -99,6 +99,7 @@ impl BrokerAuthority {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                published_instance: None,
                 // The broker's own publish is acknowledged to no one, so its number names nothing.
                 id: cassini_types::MessageId { epoch: 0, seq: 0 },
                 window: cassini_types::Hold::none(),

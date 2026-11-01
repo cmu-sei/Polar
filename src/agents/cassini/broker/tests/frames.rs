@@ -126,6 +126,31 @@ async fn a_client_of_another_protocol_version_is_refused_by_name() {
     .await;
 }
 
+/// A client of protocol version 1, built before the instance was stamped beside `published_by`, is refused by name: a
+/// delivery it read would be another layout (docs/architecture/authority-model.md, "Multi-instance workloads").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_of_protocol_version_1_is_refused_by_name() {
+    assert_eq!(cassini_types::PROTOCOL_VERSION, 2);
+    with_broker(|broker| async move {
+        let mut raw = RawConnection::open(&broker, "older.test", None).await;
+        raw.send(&cassini_types::ClientMessage::RegistrationRequest {
+            registration_id: None,
+            trace_ctx: None,
+            protocol: 1,
+        })
+        .await;
+        let refused = refusal(&mut raw).await.expect("refused");
+        assert_eq!(refused.code, cassini_types::RefusalCode::ProtocolMismatch);
+        assert!(
+            refused.reason.contains("version 2") && refused.reason.contains("version 1"),
+            "{}",
+            refused.reason
+        );
+        assert!(raw.closed_within(Duration::from_secs(5)).await);
+    })
+    .await;
+}
+
 /// A connection whose first frame does not decode (a client older than protocol versions sends a registration this
 /// broker cannot read) is told so, in a refusal such a client can decode, and closed, rather than left waiting.
 #[tokio::test(flavor = "multi_thread")]

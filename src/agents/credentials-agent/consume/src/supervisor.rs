@@ -439,13 +439,18 @@ impl ConsumerSupervisor {
     /// site's comment for why. Deserializes and forwards to
     /// StoreSecretActor, bundled with the broker-verified
     /// published_by this dispatch path exists specifically to carry.
-    fn dispatch_store_secret_request(payload: Vec<u8>, published_by: Option<String>) {
+    fn dispatch_store_secret_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
         match rkyv::from_bytes::<Envelope<StoreSecretRequest>, rkyv::rancor::Error>(&payload) {
             Ok(envelope) => {
                 if let Some(actor) = where_is(STORE_SECRET_ACTOR_NAME.to_string()) {
                     if let Err(e) = actor.send_message(StoreSecretDispatch {
                         envelope,
                         published_by,
+                        published_instance,
                     }) {
                         warn!("Failed to forward store-secret request to actor: {e}");
                     }
@@ -485,7 +490,11 @@ impl ConsumerSupervisor {
 
     /// An agent escrow-issuance request, forwarded with the broker-verified published_by: only the workload's
     /// custodian is answered (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
-    fn dispatch_agent_escrow_issuance_request(payload: Vec<u8>, published_by: Option<String>) {
+    fn dispatch_agent_escrow_issuance_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
         match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(
             &payload,
         ) {
@@ -495,6 +504,7 @@ impl ConsumerSupervisor {
                         crate::agent_escrow_issuance_actor::AgentEscrowIssuanceDispatch {
                             envelope,
                             published_by,
+                            published_instance,
                         },
                     ) {
                         warn!("Failed to forward agent escrow-issuance request to actor: {e}");
@@ -508,7 +518,11 @@ impl ConsumerSupervisor {
 
     /// A custodian's request for one of its workload's certificates, forwarded with the broker-verified published_by,
     /// which is the custodian.
-    fn dispatch_custodian_issuance_request(payload: Vec<u8>, published_by: Option<String>) {
+    fn dispatch_custodian_issuance_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
         use credentials_agent_common::custodian::CustodianIssuanceRequest;
         match rkyv::from_bytes::<Envelope<CustodianIssuanceRequest>, rkyv::rancor::Error>(&payload)
         {
@@ -518,6 +532,7 @@ impl ConsumerSupervisor {
                         crate::custodian_issuance_actor::CustodianIssuanceDispatch {
                             envelope,
                             published_by,
+                            published_instance,
                         },
                     ) {
                         warn!("Failed to forward a custodian's issuance request to actor: {e}");
@@ -537,6 +552,7 @@ impl ConsumerSupervisor {
     fn dispatch_agent_escrow_keypair_bootstrap_request(
         payload: Vec<u8>,
         published_by: Option<String>,
+        published_instance: Option<String>,
     ) {
         match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairRequest>, rkyv::rancor::Error>(
             &payload,
@@ -547,6 +563,7 @@ impl ConsumerSupervisor {
                     if let Err(e) = actor.send_message(AgentEscrowKeypairBootstrapDispatch {
                         envelope,
                         published_by,
+                        published_instance,
                     }) {
                         warn!(
                             "Failed to forward agent escrow-keypair bootstrap request to actor: {e}"
@@ -613,6 +630,7 @@ impl ConsumerSupervisor {
                         payload: incoming.payload,
                         trace_ctx: incoming.trace_ctx,
                         published_by: incoming.published_by,
+                        published_instance: incoming.published_instance,
                     };
                     if let Err(e) =
                         supervisor.send_message(ConsumerSupervisorMessage::ClientEvent { event })
@@ -649,6 +667,7 @@ impl ConsumerSupervisor {
         topic: String,
         payload: Vec<u8>,
         published_by: Option<String>,
+        published_instance: Option<String>,
     ) {
         if draining {
             warn!(
@@ -662,6 +681,7 @@ impl ConsumerSupervisor {
             topic,
             payload,
             published_by,
+            published_instance,
         }) {
             warn!("CONSUMER_SUPERVISOR: the request gate did not take a request: {e}");
         }
@@ -723,22 +743,43 @@ impl ConsumerSupervisor {
     /// cannot (it is cross-cutting and cannot gain a parameter for one
     /// agent's need): stored_by, requested_by and the like must be verified by
     /// the broker, never self-reported.
-    fn dispatch_request(topic: String, payload: Vec<u8>, published_by: Option<String>) {
+    /// The custodian's requests carry the instance the broker stamped beside it too: a multi-instance workload's pods
+    /// each have a custodian of the one identity, told apart by their pod (docs/architecture/authority-model.md,
+    /// "Multi-instance workloads").
+    fn dispatch_request(
+        topic: String,
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
         if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
-            ConsumerSupervisor::dispatch_store_secret_request(payload, published_by);
+            ConsumerSupervisor::dispatch_store_secret_request(
+                payload,
+                published_by,
+                published_instance,
+            );
         } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
             ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
         } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
             ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
                 payload,
                 published_by,
+                published_instance,
             );
         } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
             ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(payload, published_by);
         } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
-            ConsumerSupervisor::dispatch_agent_escrow_issuance_request(payload, published_by);
+            ConsumerSupervisor::dispatch_agent_escrow_issuance_request(
+                payload,
+                published_by,
+                published_instance,
+            );
         } else if topic == credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC {
-            ConsumerSupervisor::dispatch_custodian_issuance_request(payload, published_by);
+            ConsumerSupervisor::dispatch_custodian_issuance_request(
+                payload,
+                published_by,
+                published_instance,
+            );
         } else {
             ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
         }
@@ -1372,9 +1413,16 @@ impl Actor for ConsumerSupervisor {
                 policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
                 model: gate_model,
                 record_asker: record_asker.clone(),
-                dispatch: std::sync::Arc::new(|topic, payload, published_by| {
-                    ConsumerSupervisor::dispatch_request(topic, payload, published_by)
-                }),
+                dispatch: std::sync::Arc::new(
+                    |topic, payload, published_by, published_instance| {
+                        ConsumerSupervisor::dispatch_request(
+                            topic,
+                            payload,
+                            published_by,
+                            published_instance,
+                        )
+                    },
+                ),
             },
             myself.get_cell(),
         )
@@ -1569,6 +1617,7 @@ impl Actor for ConsumerSupervisor {
                     topic,
                     payload,
                     published_by,
+                    published_instance,
                     ..
                 } => {
                     state.activity.record(&topic, std::time::Instant::now());
@@ -1585,6 +1634,7 @@ impl Actor for ConsumerSupervisor {
                         topic,
                         payload,
                         published_by,
+                        published_instance.map(|instance| instance.uid),
                     );
                 }
                 ClientEvent::TransportError { reason } => {
@@ -2328,6 +2378,7 @@ mod agent_escrow_wiring_tests {
             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC.to_string(),
             bytes,
             Some(crate::custodian::tests::CUSTODIAN.to_string()),
+            None,
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -2801,6 +2852,7 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
         ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
             bytes,
             Some(crate::custodian::tests::CUSTODIAN.to_string()),
+            None,
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -3219,6 +3271,7 @@ mod builder_wiring_tests {
                 topic: subscription.topic.clone(),
                 payload: vec![1, 2, 3],
                 published_by: Some("a.verified.identity".to_string()),
+                published_instance: None,
                 trace_ctx: None,
             });
         }
@@ -3277,6 +3330,7 @@ mod builder_wiring_tests {
                     topic,
                     payload,
                     published_by,
+                    ..
                 } = message;
                 self.0.lock().unwrap().push((topic, payload, published_by));
                 Ok(())
@@ -3292,6 +3346,7 @@ mod builder_wiring_tests {
             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
             vec![1],
             by.clone(),
+            None,
         );
         ConsumerSupervisor::on_request(
             false,
@@ -3299,6 +3354,7 @@ mod builder_wiring_tests {
             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
             vec![2],
             by.clone(),
+            None,
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
@@ -3363,6 +3419,7 @@ mod builder_wiring_tests {
                 topic: subscription.topic.clone(),
                 payload: vec![4, 5, 6],
                 published_by,
+                published_instance: None,
                 trace_ctx: None,
             });
         }

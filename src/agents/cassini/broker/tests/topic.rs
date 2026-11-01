@@ -255,6 +255,7 @@ mod tests {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                published_instance: None,
                 id: cassini_types::MessageId { epoch: 1, seq: 1 },
                 window: cassini_types::Hold::none(),
             })
@@ -307,6 +308,7 @@ mod tests {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                published_instance: None,
                 id: cassini_types::MessageId { epoch: 1, seq: 1 },
                 window: cassini_types::Hold::none(),
             })?;
@@ -366,6 +368,7 @@ mod tests {
             reply_to: None,
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             id: cassini_types::MessageId { epoch: 1, seq: 1 },
             window: cassini_types::Hold::none(),
         };
@@ -475,6 +478,7 @@ mod tests {
             reply_to: Some(session.clone()),
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             id: cassini_types::MessageId { epoch: 1, seq },
             window: cassini_types::Hold::none(),
         };

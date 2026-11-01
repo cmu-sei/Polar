@@ -992,6 +992,27 @@ impl TestClient {
             .collect()
     }
 
+    /// Who the broker says published each delivery on `topic` so far, in order: the identity and the instance it stamped.
+    pub fn publishers_of(
+        &self,
+        topic: &str,
+    ) -> Vec<(Option<String>, Option<cassini_types::Instance>)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::MessagePublished {
+                    topic: t,
+                    published_by,
+                    published_instance,
+                    ..
+                } if t == topic => Some((published_by.clone(), published_instance.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Payloads delivered on `topic` so far, in order.
     pub fn received(&self, topic: &str) -> Vec<Vec<u8>> {
         self.events

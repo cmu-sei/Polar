@@ -261,6 +261,9 @@ impl Gone {
 }
 
 /// A frame read while a publish waited for its admission, to go on with once it is admitted.
+/// Held one at a time, on the reader's stack: a decoded frame is kept as it is, not boxed, so a delivery (larger since
+/// protocol 2 carries its publisher's instance) costs no allocation more.
+#[allow(clippy::large_enum_variant)]
 enum Next {
     /// A frame too large to read before it is admitted: only its length was read.
     Header(usize),
@@ -527,6 +530,7 @@ fn charged(message: BrokerMessage, (credit, charge): (WindowCharge, Charge)) -> 
             reply_to,
             trace_ctx,
             published_by,
+            published_instance,
             id,
             ..
         } => BrokerMessage::PublishRequest {
@@ -539,6 +543,7 @@ fn charged(message: BrokerMessage, (credit, charge): (WindowCharge, Charge)) -> 
             reply_to,
             trace_ctx,
             published_by,
+            published_instance,
             id,
             window: Hold::new(credit),
         },
@@ -1553,6 +1558,7 @@ impl Actor for Listener {
                                     result: Err(REFUSED_FOR_NOW.to_string()),
                                     trace_ctx: None,
                                     published_by: None,
+                                    published_instance: None,
                                     origin: Some(id),
                                     delivery_id: None,
                                     refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -1720,6 +1726,7 @@ impl Actor for Listener {
                 reply_to,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
             } => {
@@ -1732,6 +1739,7 @@ impl Actor for Listener {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     id,
                     window,
                 )
@@ -1743,6 +1751,7 @@ impl Actor for Listener {
                 trace_ctx,
                 result,
                 published_by,
+                published_instance,
                 origin,
                 delivery_id,
                 refusal,
@@ -1755,6 +1764,7 @@ impl Actor for Listener {
                     trace_ctx,
                     result,
                     published_by,
+                    published_instance,
                     origin,
                     delivery_id,
                     refusal,
@@ -2043,6 +2053,7 @@ impl Listener {
         _reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         id: MessageId,
         window: Hold,
     ) -> Result<(), ActorProcessingErr> {
@@ -2100,6 +2111,7 @@ impl Listener {
                         )),
                         trace_ctx: WireTraceCtx::from_current_span(),
                         published_by: None,
+                        published_instance: None,
                         origin: Some(id),
                         delivery_id: None,
                         refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -2122,6 +2134,7 @@ impl Listener {
                     result: Err(reason),
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
+                    published_instance: None,
                     origin: Some(id),
                     delivery_id: None,
                     refusal: Some(cassini_types::PublishRefusal::Denied),
@@ -2148,6 +2161,7 @@ impl Listener {
                 reply_to: None,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
             }) {
@@ -2157,6 +2171,7 @@ impl Listener {
                     result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
+                    published_instance: None,
                     origin: Some(id),
                     delivery_id: None,
                     refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -2183,6 +2198,7 @@ impl Listener {
         trace_ctx: Option<opentelemetry::Context>,
         result: Result<(), String>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         origin: Option<MessageId>,
         delivery_id: Option<u64>,
         refusal: Option<cassini_types::PublishRefusal>,
@@ -2218,6 +2234,7 @@ impl Listener {
                 result,
                 trace_ctx: WireTraceCtx::from_current_span(),
                 published_by,
+                published_instance,
                 origin,
                 delivery_id,
                 refusal,

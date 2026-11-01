@@ -843,6 +843,23 @@ impl CredentialsState {
         })
     }
 
+    /// The live custodian certificate of `identity` for the pod `instance` (a multi-instance workload's custodian's, its
+    /// instance stamped by the broker): the one naming that pod, by the supersession rule
+    /// (`cert_issuer_common::instance::same_instance`); with no instance, any live one, of which a single-instance
+    /// workload has one.
+    pub fn custodian_certificate_of(
+        &self,
+        identity: &str,
+        instance: Option<&str>,
+    ) -> Option<&CertificateRecord> {
+        self.valid_certificates.values().find(|record| {
+            record.identity == identity
+                && record.cert_type == WorkloadCertType::Custody
+                && !record.revoked
+                && cert_issuer_common::instance::same_instance(record.instance.as_deref(), instance)
+        })
+    }
+
     pub fn certificate_for(&self, identity: &str) -> Option<&CertificateRecord> {
         // The requester's certificate is its client certificate. A server
         // certificate is the listener's, and says nothing of what the

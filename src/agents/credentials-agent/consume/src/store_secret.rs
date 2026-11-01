@@ -71,10 +71,21 @@ fn refused(reason: StoreRefusalReason) -> StoreSecretReply {
 }
 
 impl StoreSecretHandler {
+    /// [`handle_from`](Self::handle_from), from a publisher with no instance (a single-instance workload's).
     pub async fn handle(
         &self,
         request: StoreSecretRequest,
         stored_by: Option<String>,
+    ) -> StoreSecretReply {
+        self.handle_from(request, stored_by, None).await
+    }
+
+    /// A store from `stored_by`, the pod `instance` of it when the broker stamped one.
+    pub async fn handle_from(
+        &self,
+        request: StoreSecretRequest,
+        stored_by: Option<String>,
+        instance: Option<String>,
     ) -> StoreSecretReply {
         let Some(stored_by) = stored_by else {
             return refused(StoreRefusalReason::AnonymousPublisherNotAllowed);
@@ -90,7 +101,9 @@ impl StoreSecretHandler {
         // "Part A's bootstrap: the custodian"): not the agent's, whose workload must never hold the key, and not
         // policy's to widen.
         if let Some(owner) = escrow_keypair_owner(&request.name).map(str::to_string) {
-            return self.store_escrow_keypair(&owner, request, stored_by).await;
+            return self
+                .store_escrow_keypair(&owner, request, stored_by, instance.as_deref())
+                .await;
         }
 
         let requester_certificate = match call_check_certificate(&self.ledger, &stored_by).await {
@@ -154,10 +167,12 @@ impl StoreSecretHandler {
         owner: &str,
         request: StoreSecretRequest,
         stored_by: String,
+        instance: Option<&str>,
     ) -> StoreSecretReply {
         match crate::custodian::custodian(
             &self.ledger,
             Some(&stored_by),
+            instance,
             cert_issuer_common::custody::CustodyPermission::Escrow,
         )
         .await

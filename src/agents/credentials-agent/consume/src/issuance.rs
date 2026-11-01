@@ -751,6 +751,7 @@ pub(crate) mod tests {
         assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
         let custodian = ractor::call!(ledger, |reply| LedgerMessage::CustodianCertificate {
             identity: "custody.kube-consumer.polar.serviceaccount.cluster.local".to_string(),
+            instance: None,
             reply,
         })
         .unwrap();

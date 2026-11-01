@@ -1365,6 +1365,7 @@ mod tests {
             topic: polar_scheduler_common::configuration_topic(agent),
             payload,
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         }
     }
@@ -1423,6 +1424,7 @@ mod tests {
             topic: sub.topic.clone(),
             payload: vec![1, 2, 3],
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         });
         // A notification whose document is not JSON.
@@ -1555,6 +1557,7 @@ mod tests {
             topic: sub.topic.clone(),
             payload: vec![1, 2],
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         });
         (sub.deliver)(notification(

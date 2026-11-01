@@ -268,6 +268,7 @@ impl Actor for TopicManager {
                 reply_to,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
             } => {
@@ -280,6 +281,7 @@ impl Actor for TopicManager {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     id,
                     window,
                 )
@@ -290,6 +292,7 @@ impl Actor for TopicManager {
                 payload,
                 trace_ctx,
                 published_by,
+                published_instance,
                 ..
             } => {
                 self.handle_publish_response(
@@ -299,6 +302,7 @@ impl Actor for TopicManager {
                     payload,
                     trace_ctx,
                     published_by,
+                    published_instance,
                 )
                 .await?;
             }
@@ -395,6 +399,7 @@ impl TopicManager {
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         id: MessageId,
         window: Hold,
     ) -> Result<(), ActorProcessingErr> {
@@ -422,6 +427,7 @@ impl TopicManager {
                         reply_to, // forward to topic agent
                         trace_ctx: Some(span.context()),
                         published_by,
+                        published_instance,
                         id,
                         window,
                     }) {
@@ -446,6 +452,7 @@ impl TopicManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -454,6 +461,7 @@ impl TopicManager {
         payload: Payload,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_response", topic = %topic, payload_len = payload.len());
         try_set_parent_otel(&span, trace_ctx);
@@ -467,6 +475,7 @@ impl TopicManager {
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
                 published_by,
+                published_instance,
                 origin: None,
                 delivery_id: None,
                 refusal: None,
@@ -568,11 +577,12 @@ impl TopicManager {
 /// (`crate::pressure`), and when it ends or goes away it holds the topic back no more.
 struct TopicAgent;
 
-/// A message waiting in a topic with no subscriber: when it came, its payload, who published it and their number for it.
+/// A message waiting in a topic with no subscriber: when it came, its payload, who published it (and its instance) and their number for it.
 type Queued = (
     std::time::Instant,
     Payload,
     Option<String>,
+    Option<cassini_types::Instance>,
     Option<MessageId>,
 );
 
@@ -583,6 +593,7 @@ struct Pending {
     reply_to: Option<ActorRef<BrokerMessage>>,
     trace_ctx: Option<opentelemetry::Context>,
     published_by: Option<String>,
+    published_instance: Option<cassini_types::Instance>,
     id: MessageId,
     /// The publisher's connection's credit for it, released when it is accepted.
     window: Hold,
@@ -664,6 +675,7 @@ impl Actor for TopicAgent {
                 reply_to,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
                 ..
@@ -676,6 +688,7 @@ impl Actor for TopicAgent {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     id,
                     window,
                 });
@@ -777,6 +790,7 @@ impl TopicAgent {
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
                 published_by: pending.published_by.clone(),
+                published_instance: pending.published_instance.clone(),
                 origin: Some(pending.id),
                 delivery_id: None,
                 refusal: None,
@@ -813,6 +827,7 @@ impl TopicAgent {
                     std::time::Instant::now(),
                     pending.payload.clone(),
                     pending.published_by.clone(),
+                    pending.published_instance.clone(),
                     Some(pending.id),
                 ));
                 info!(
@@ -832,6 +847,7 @@ impl TopicAgent {
                     result: Err(reason),
                     trace_ctx: Some(span.context()),
                     published_by: None,
+                    published_instance: None,
                     origin: Some(pending.id),
                     delivery_id: None,
                     refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -874,7 +890,9 @@ impl TopicAgent {
 
         // Phase 3 (flush) happens before phase 4 (terminate subscribers), so subscribers might still exist: queued
         // messages are delivered to them.
-        while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by, published_instance, origin)) =
+            state.queue.pop_front()
+        {
             state.held.remove(msg.weight());
             if state.subscribers.is_empty() {
                 warn!(
@@ -890,6 +908,7 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: None,
                     published_by: published_by.clone(),
+                    published_instance: published_instance.clone(),
                     origin,
                     delivery_id: None,
                     refusal: None,
@@ -950,7 +969,9 @@ impl TopicAgent {
         let _ = subscriber_ref.send_message(BrokerMessage::TopicAttached { topic: myself });
 
         // Drain queued messages now that someone is listening.
-        while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by, published_instance, origin)) =
+            state.queue.pop_front()
+        {
             state.held.remove(msg.weight());
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
@@ -959,6 +980,7 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
                     published_by,
+                    published_instance,
                     origin,
                     delivery_id: None,
                     refusal: None,
@@ -1006,11 +1028,11 @@ impl TopicAgent {
         let threshold = std::time::Duration::from_secs(QUEUE_STALE_AFTER_SECS);
         let mut dropped = 0usize;
 
-        while let Some((queued_at, _, _, _)) = state.queue.front() {
+        while let Some((queued_at, _, _, _, _)) = state.queue.front() {
             if queued_at.elapsed() < threshold {
                 break;
             }
-            if let Some((_, payload, _, _)) = state.queue.pop_front() {
+            if let Some((_, payload, _, _, _)) = state.queue.pop_front() {
                 state.held.remove(payload.weight());
             }
             dropped += 1;

@@ -219,6 +219,8 @@ pub enum LedgerMessage {
     /// bootstrap: the custodian").
     CustodianCertificate {
         identity: String,
+        /// The pod UID the broker stamped beside the requester, when it is one pod of a multi-instance workload's.
+        instance: Option<String>,
         reply: RpcReplyPort<Option<CertificateRecord>>,
     },
     /// The certificate `identity` connects with, whose groups policy reads at the request gate: its workload's client
@@ -498,10 +500,14 @@ impl Actor for LedgerActor {
                 let record = state.credentials_state.certificate_for(&identity).cloned();
                 let _ = reply.send(record);
             }
-            LedgerMessage::CustodianCertificate { identity, reply } => {
+            LedgerMessage::CustodianCertificate {
+                identity,
+                instance,
+                reply,
+            } => {
                 let record = state
                     .credentials_state
-                    .custodian_certificate_for(&identity)
+                    .custodian_certificate_of(&identity, instance.as_deref())
                     .cloned();
                 let _ = reply.send(record);
             }

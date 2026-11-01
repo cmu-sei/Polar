@@ -345,6 +345,7 @@ mod tests {
             topic: topic.into(),
             payload,
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         }
     }

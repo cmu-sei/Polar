@@ -564,6 +564,7 @@ impl Actor for Broker {
                 reply_to,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
             } => {
@@ -576,6 +577,7 @@ impl Actor for Broker {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     id,
                     window,
                 )
@@ -587,6 +589,7 @@ impl Actor for Broker {
                 result,
                 trace_ctx,
                 published_by,
+                published_instance,
                 origin,
                 ..
             } => {
@@ -598,6 +601,7 @@ impl Actor for Broker {
                     result,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     origin,
                 )
                 .await?;
@@ -991,6 +995,7 @@ impl Broker {
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         id: cassini_types::MessageId,
         window: cassini_types::Hold,
     ) -> Result<(), ActorProcessingErr> {
@@ -1015,6 +1020,7 @@ impl Broker {
                 result: Err(reason),
                 trace_ctx: Some(span.context()),
                 published_by: None,
+                published_instance: None,
                 origin: Some(id),
                 delivery_id: None,
                 refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -1049,6 +1055,7 @@ impl Broker {
                 reply_to, // pass through the reply_to from the incoming message
                 trace_ctx: Some(span.context()),
                 published_by,
+                published_instance,
                 id,
                 window,
             });
@@ -1081,6 +1088,7 @@ impl Broker {
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         origin: Option<cassini_types::MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
@@ -1095,6 +1103,7 @@ impl Broker {
                 result,
                 trace_ctx: Some(span.context()),
                 published_by,
+                published_instance,
                 origin,
                 delivery_id: None,
                 refusal: None,

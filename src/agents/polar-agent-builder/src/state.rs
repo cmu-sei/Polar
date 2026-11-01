@@ -456,6 +456,7 @@ mod tests {
                             payload: reply.clone(),
                         }),
                         published_by: self.publisher.clone(),
+                        published_instance: None,
                         trace_ctx: None,
                     });
                 }

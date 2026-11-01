@@ -1220,6 +1220,7 @@ mod tests {
             topic: polar_scheduler_common::command_topic(agent),
             payload,
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         }
     }
@@ -1254,6 +1255,7 @@ mod tests {
             topic: sub.topic.clone(),
             payload: vec![1, 2, 3],
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         });
         let mut bad = notification(AGENT, &json!({}));

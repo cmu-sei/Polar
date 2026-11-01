@@ -40,8 +40,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::sync::Arc;
 use tracing::warn;
 
-/// Where an admitted request goes: the supervisor's dispatch, in the agent.
-pub type Dispatch = Arc<dyn Fn(String, Vec<u8>, Option<String>) + Send + Sync>;
+/// Where an admitted request goes: the supervisor's dispatch, in the agent: its topic, payload, publisher and the
+/// publisher's instance (the pod UID the broker stamped beside it, a multi-instance workload's).
+pub type Dispatch = Arc<dyn Fn(String, Vec<u8>, Option<String>, Option<String>) + Send + Sync>;
 
 pub enum RequestGateMessage {
     /// A request, as the broker delivered it.
@@ -49,6 +50,9 @@ pub enum RequestGateMessage {
         topic: String,
         payload: Vec<u8>,
         published_by: Option<String>,
+        /// The pod UID the broker stamped beside `published_by`, when the publisher is one pod of a multi-instance
+        /// workload (docs/architecture/authority-model.md, "Multi-instance workloads").
+        published_instance: Option<String>,
     },
 }
 
@@ -169,9 +173,10 @@ impl Actor for RequestGate {
             topic,
             payload,
             published_by,
+            published_instance,
         } = message;
         match judged(state, &topic, published_by.as_deref()).await {
-            Ok(()) => (state.dispatch)(topic, payload, published_by),
+            Ok(()) => (state.dispatch)(topic, payload, published_by, published_instance),
             Err(why) => warn!(
                 %topic,
                 requester = published_by.as_deref().unwrap_or("unverified"),
@@ -315,7 +320,7 @@ mod tests {
                 policy,
                 model: with_model.then(|| Arc::new(Model::parse(MODEL).unwrap())),
                 record_asker: Some(asker),
-                dispatch: Arc::new(move |topic, payload, by| {
+                dispatch: Arc::new(move |topic, payload, by, _instance| {
                     sink.lock().unwrap().push((topic, payload, by))
                 }),
             },
@@ -666,6 +671,7 @@ mod tests {
                 topic: topic.to_string(),
                 payload,
                 published_by: by,
+                published_instance: None,
             })
             .unwrap();
         }
@@ -825,7 +831,7 @@ mod tests {
                             policy: registered_policy(policy.clone()).await,
                             model: Some(model.clone()),
                             record_asker: None,
-                            dispatch: Arc::new(|_, _, _| {}),
+                            dispatch: Arc::new(|_, _, _, _| {}),
                         };
                         for requester in &requesters {
                             for topic in credentials_agent_common::REQUEST_TOPICS {

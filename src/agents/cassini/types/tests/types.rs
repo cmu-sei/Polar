@@ -227,6 +227,7 @@ fn test_client_event_variants() {
         payload: vec![1, 2, 3],
         trace_ctx: None,
         published_by: None,
+        published_instance: None,
     };
 
     assert_eq!(
@@ -284,7 +285,7 @@ fn test_client_message_registration_request() {
 
     assert_eq!(
         format!("{:?}", msg),
-        "RegistrationRequest { registration_id: None, trace_ctx: None, protocol: 1 }"
+        "RegistrationRequest { registration_id: None, trace_ctx: None, protocol: 2 }"
     );
 }
 
@@ -485,6 +486,7 @@ fn test_client_message_publish_response() {
         result: Ok(()),
         trace_ctx: None,
         published_by: None,
+        published_instance: None,
         delivery_id: None,
         refusal: None,
         origin: None,

@@ -52,6 +52,8 @@ pub struct AgentEscrowKeypairBootstrapActorState {
 pub struct AgentEscrowKeypairBootstrapDispatch {
     pub envelope: Envelope<RetrieveAgentEscrowKeypairRequest>,
     pub published_by: Option<String>,
+    /// The pod UID the broker stamped beside it, a multi-instance workload's: its custodian is told apart by it.
+    pub published_instance: Option<String>,
 }
 
 #[async_trait]
@@ -79,7 +81,11 @@ impl Actor for AgentEscrowKeypairBootstrapActor {
         let correlation_id = message.envelope.correlation_id.clone();
         let reply = state
             .handler
-            .handle(message.envelope.payload, message.published_by)
+            .handle_from(
+                message.envelope.payload,
+                message.published_by,
+                message.published_instance,
+            )
             .await;
 
         let envelope = Envelope {

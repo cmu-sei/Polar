@@ -323,6 +323,7 @@ impl ClusterConsumerSupervisor {
                     payload: incoming.payload,
                     trace_ctx: incoming.trace_ctx,
                     published_by: incoming.published_by,
+                    published_instance: incoming.published_instance,
                 };
                 if let Err(e) = supervisor_for_consumer
                     .send_message(ConsumerSupervisorMessage::ClientEvent { event })
@@ -336,6 +337,7 @@ impl ClusterConsumerSupervisor {
                     payload: incoming.payload,
                     trace_ctx: incoming.trace_ctx,
                     published_by: incoming.published_by,
+                    published_instance: incoming.published_instance,
                 };
                 if let Err(e) = supervisor_for_resolution
                     .send_message(ConsumerSupervisorMessage::ClientEvent { event })
@@ -773,6 +775,7 @@ mod subscription_tests {
                 topic: subscription.topic.clone(),
                 payload: format!("payload for {}", subscription.topic).into_bytes(),
                 published_by: Some("kube-observer".to_string()),
+                published_instance: None,
                 trace_ctx: None,
             });
         }

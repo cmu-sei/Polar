@@ -1368,6 +1368,7 @@ mod tests {
                         topic: reply_topic.to_string(),
                         payload: bytes,
                         published_by: None,
+                        published_instance: None,
                         trace_ctx: None,
                     },
                 ));

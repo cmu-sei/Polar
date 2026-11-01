@@ -119,6 +119,7 @@ mod tests {
             result,
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             origin: None,
             delivery_id,
             refusal: None,

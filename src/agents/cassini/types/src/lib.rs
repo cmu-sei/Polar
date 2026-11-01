@@ -44,6 +44,8 @@ pub struct HeldDelivery {
     pub payload: Payload,
     /// Who published it, if they shared it.
     pub published_by: Option<String>,
+    /// The instance of its publisher, beside `published_by` (a multi-instance workload's pod).
+    pub published_instance: Option<Instance>,
     /// Its publisher's number for it.
     pub origin: Option<MessageId>,
 }
@@ -244,6 +246,8 @@ pub enum BrokerMessage {
         /// decode time needs to know about share_identity/peer_identity
         /// separately again.
         published_by: Option<String>,
+        /// The publisher's instance, read from the same certificate and shared as `published_by` is.
+        published_instance: Option<Instance>,
         /// The message's `(epoch, seq)` as its publisher numbered it, returned in its acknowledgement.
         id: MessageId,
         /// The publisher's connection's ingress credit for this frame, let go when the topic accepts the publish (or
@@ -261,6 +265,7 @@ pub enum BrokerMessage {
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<Instance>,
         /// The `(epoch, seq)` of the publish this is about: the refused one, for a refusal; the delivered one's, as its
         /// publisher numbered it, for a delivery.
         origin: Option<MessageId>,
@@ -341,6 +346,7 @@ pub enum BrokerMessage {
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<Instance>,
         origin: Option<MessageId>,
         /// The subscriber's number for this delivery, which the client acknowledges.
         delivery_id: u64,
@@ -572,6 +578,12 @@ impl BrokerMessage {
                 } else {
                     None
                 },
+                // The instance beside it, by the same choice: a multi-instance workload's pod, from the same certificate.
+                published_instance: if share_identity {
+                    peer_instance.clone()
+                } else {
+                    None
+                },
                 id: MessageId { epoch, seq },
                 window: Hold::none(),
             },
@@ -713,8 +725,9 @@ pub enum RefusalCode {
 }
 
 /// The version of the protocol between Cassini's clients and its broker: sent at registration, refused by the broker
-/// when it is not its own. Raised with every change to the wire.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// when it is not its own. Raised with every change to the wire: 2 stamps the publisher's instance beside `published_by`
+/// on every delivery (docs/architecture/authority-model.md, "Multi-instance workloads").
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// What a refused publish means, for the client to act on (a reader never acts on the refusal's words).
 #[derive(
@@ -795,6 +808,9 @@ pub enum ClientEvent {
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
         published_by: Option<String>,
+        /// The publisher's instance, as the broker stamped it beside `published_by`: a multi-instance workload's pod
+        /// (docs/architecture/authority-model.md, "Multi-instance workloads").
+        published_instance: Option<Instance>,
     },
     TransportError {
         reason: String,
@@ -899,6 +915,9 @@ pub enum ClientMessage {
         result: Result<(), String>,
         trace_ctx: Option<WireTraceCtx>,
         published_by: Option<String>,
+        /// The publisher's instance (its pod's UID and name), stamped by the broker from its verified certificate beside
+        /// `published_by`, as `published_by` is shared: a multi-instance workload's pod (protocol version 2).
+        published_instance: Option<Instance>,
         origin: Option<MessageId>,
         delivery_id: Option<u64>,
         /// For a refusal (`result` an `Err`), what kind it is, which the client acts on: the words are for people.

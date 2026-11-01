@@ -117,10 +117,12 @@ pub fn judge(
     })
 }
 
-/// [`judge`], with the ledger asked for the requester's custodian certificate.
+/// [`judge`], with the ledger asked for the requester's custodian certificate: the one of its pod, `instance`, when the
+/// broker stamped one (a multi-instance workload's custodians are one identity, each its own pod's).
 pub async fn custodian(
     ledger: &ActorRef<LedgerMessage>,
     requester: Option<&str>,
+    instance: Option<&str>,
     needs: CustodyPermission,
 ) -> Result<Custodian, CustodianRefusal> {
     let Some(requester) = requester else {
@@ -135,6 +137,7 @@ pub async fn custodian(
     }
     let record = ractor::call!(ledger, |reply| LedgerMessage::CustodianCertificate {
         identity: requester.to_string(),
+        instance: instance.map(str::to_string),
         reply,
     })
     .map_err(|e| CustodianRefusal::Unavailable(e.to_string()))?;
@@ -161,10 +164,22 @@ pub struct CustodianIssuanceHandler {
 }
 
 impl CustodianIssuanceHandler {
+    /// [`handle_from`](Self::handle_from), from a publisher with no instance (a single-instance workload's).
     pub async fn handle(
         &self,
         request: CustodianIssuanceRequest,
         requested_by: Option<String>,
+    ) -> IssuanceReply {
+        self.handle_from(request, requested_by, None).await
+    }
+
+    /// A request from `requested_by`, the pod `instance` of it when the broker stamped one: a multi-instance
+    /// workload's custodians are one identity, each its own pod's.
+    pub async fn handle_from(
+        &self,
+        request: CustodianIssuanceRequest,
+        requested_by: Option<String>,
+        instance: Option<String>,
     ) -> IssuanceReply {
         let refused = |reason| IssuanceReply::Refused { reason };
         // ---- Step 1: what is asked for, judged on the request alone ----
@@ -185,7 +200,14 @@ impl CustodianIssuanceHandler {
             return refused(IssuanceRefusalReason::RequestNotPermitted);
         }
         // ---- Step 2: who asks: a live custodian, in its window, for what its certificate names ----
-        let custodian = match custodian(&self.ledger, requested_by.as_deref(), needs).await {
+        let custodian = match custodian(
+            &self.ledger,
+            requested_by.as_deref(),
+            instance.as_deref(),
+            needs,
+        )
+        .await
+        {
             Ok(custodian) => custodian,
             Err(CustodianRefusal::WindowClosed) => {
                 warn!(?requested_by, "a custodian asked after its window: refused");
@@ -542,6 +564,56 @@ pub(crate) mod tests {
             ),
             Err(CustodianRefusal::NotACustodian(_))
         ));
+    }
+
+    /// Two pods of a multi-instance workload have two custodians of the one identity `custody.X`: each request is
+    /// answered as the custodian of the pod the broker stamped beside it, and never as the other's.
+    #[tokio::test]
+    async fn each_pod_s_custodian_is_answered_as_its_own_pod() {
+        let ledger = spawn_test_ledger().await;
+        for pod in ["pod-a", "pod-b"] {
+            call_append(
+                &ledger,
+                CredentialsEvent::IssuanceCompleted {
+                    identity: CUSTODIAN.to_string(),
+                    instance_binding: pod.to_string(),
+                    serial: format!("c-{pod}"),
+                    timestamp: polar::time::now_millis(),
+                    cert_type: WorkloadCertType::Custody,
+                    grant_key: None,
+                    certificate_pem: custodian_pem_naming(
+                        &[CustodyPermission::Client],
+                        3600,
+                        &[&format!("i:uid:{pod}"), &format!("i:pod:{pod}-name")],
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for pod in ["pod-b", "pod-a"] {
+            let found = custodian(
+                &ledger,
+                Some(CUSTODIAN),
+                Some(pod),
+                CustodyPermission::Client,
+            )
+            .await
+            .unwrap();
+            assert_eq!(found.instance_binding, pod);
+            assert_eq!(found.instance_pod, Some(format!("{pod}-name")));
+        }
+        assert!(
+            custodian(
+                &ledger,
+                Some(CUSTODIAN),
+                Some("pod-c"),
+                CustodyPermission::Client
+            )
+            .await
+            .is_err(),
+            "no custodian of a pod that has none"
+        );
     }
 
     #[tokio::test]

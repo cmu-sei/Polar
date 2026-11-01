@@ -1098,6 +1098,7 @@ impl Actor for SessionAgent {
                 reply_to,
                 trace_ctx,
                 published_by,
+                published_instance,
                 id,
                 window,
             } => {
@@ -1110,6 +1111,7 @@ impl Actor for SessionAgent {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     id,
                     window,
                 )
@@ -1123,6 +1125,7 @@ impl Actor for SessionAgent {
                 result: Err(reason),
                 trace_ctx,
                 published_by,
+                published_instance,
                 origin,
                 delivery_id,
                 refusal,
@@ -1135,6 +1138,7 @@ impl Actor for SessionAgent {
                         result: Err(reason),
                         trace_ctx,
                         published_by,
+                        published_instance,
                         origin,
                         delivery_id,
                         refusal,
@@ -1195,6 +1199,7 @@ impl Actor for SessionAgent {
                 topic,
                 trace_ctx,
                 published_by,
+                published_instance,
                 origin,
                 delivery_id,
             } => {
@@ -1205,6 +1210,7 @@ impl Actor for SessionAgent {
                     topic,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     origin,
                     delivery_id,
                 )
@@ -1410,6 +1416,7 @@ impl SessionAgent {
         _reply_to: Option<ActorRef<BrokerMessage>>, // added but ignored; we'll use our own
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         id: MessageId,
         window: Hold,
     ) -> Result<(), ActorProcessingErr> {
@@ -1428,6 +1435,7 @@ impl SessionAgent {
                     result: Err("the broker is shutting down".to_string()),
                     trace_ctx: Some(span.context()),
                     published_by: None,
+                    published_instance: None,
                     origin: Some(id),
                     delivery_id: None,
                     refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -1464,6 +1472,7 @@ impl SessionAgent {
                         result: Err(err_msg),
                         trace_ctx: Some(span.context()),
                         published_by: None,
+                        published_instance: None,
                         origin: Some(id),
                         delivery_id: None,
                         refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -1496,6 +1505,7 @@ impl SessionAgent {
             reply_to: Some(myself.clone()),
             trace_ctx: Some(span.context()),
             published_by,
+            published_instance,
             id,
             window,
         }) {
@@ -1522,6 +1532,7 @@ impl SessionAgent {
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         origin: Option<MessageId>,
         delivery_id: u64,
     ) -> Result<(), ActorProcessingErr> {
@@ -1537,6 +1548,7 @@ impl SessionAgent {
             result: Ok(()),
             trace_ctx: Some(span.context()),
             published_by,
+            published_instance,
             origin,
             delivery_id: Some(delivery_id),
             refusal: None,

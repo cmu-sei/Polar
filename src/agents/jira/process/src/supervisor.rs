@@ -140,6 +140,7 @@ impl ConsumerSupervisor {
                         payload: incoming.payload,
                         trace_ctx: incoming.trace_ctx,
                         published_by: incoming.published_by,
+                        published_instance: incoming.published_instance,
                     };
                     if let Err(e) =
                         supervisor.send_message(ConsumerSupervisorMessage::ClientEvent { event })

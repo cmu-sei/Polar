@@ -134,6 +134,63 @@ proptest! {
     }
 }
 
+// ==================== The publisher's instance (docs/architecture/authority-model.md, "Multi-instance workloads") ====
+
+fn instance() -> impl Strategy<Value = cassini_types::Instance> {
+    (
+        "[a-z0-9][a-z0-9-]{0,20}",
+        proptest::option::of("[a-z0-9][a-z0-9.-]{0,20}"),
+    )
+        .prop_map(|(uid, pod)| cassini_types::Instance { uid, pod })
+}
+
+proptest! {
+    /// A publish's instance is the connection's, stamped beside its identity exactly when the publisher shares its
+    /// identity, and never anything the client sent: the wire's publish has no field for either.
+    #[test]
+    fn a_publish_is_stamped_with_the_connection_s_instance_as_its_identity_is(
+        share_identity in any::<bool>(),
+        peer_identity in proptest::option::of("[a-z][a-z0-9.-]{0,30}"),
+        peer_instance in proptest::option::of(instance()),
+    ) {
+        use cassini_types::{BrokerMessage, ClientMessage};
+        let sent = ClientMessage::PublishRequest {
+            topic: "t".to_string(),
+            payload: std::sync::Arc::new(vec![1]),
+            registration_id: "r".to_string(),
+            trace_ctx: None,
+            share_identity,
+            epoch: 1,
+            seq: 1,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sent).unwrap();
+        let received = rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap();
+        match BrokerMessage::from_client_message(received, "c".to_string(), peer_identity.clone(), peer_instance.clone()) {
+            BrokerMessage::PublishRequest { published_by, published_instance, .. } => {
+                prop_assert_eq!(published_by, if share_identity { peer_identity } else { None });
+                prop_assert_eq!(published_instance, if share_identity { peer_instance } else { None });
+            }
+            _ => prop_assert!(false, "not a publish"),
+        }
+    }
+
+    /// A registration carries the connection's instance to the broker, as it carries its identity.
+    #[test]
+    fn a_registration_carries_the_connection_s_instance(peer_instance in proptest::option::of(instance())) {
+        use cassini_types::{BrokerMessage, ClientMessage};
+        let sent = ClientMessage::RegistrationRequest { registration_id: None, trace_ctx: None, protocol: cassini_types::PROTOCOL_VERSION };
+        match BrokerMessage::from_client_message(sent, "c".to_string(), Some("w".into()), peer_instance.clone()) {
+            BrokerMessage::RegistrationRequest { peer_instance: got, .. } => prop_assert_eq!(got, peer_instance),
+            _ => prop_assert!(false, "not a registration"),
+        }
+    }
+}
+
+#[test]
+fn the_protocol_is_version_2_since_deliveries_carry_the_instance() {
+    assert_eq!(cassini_types::PROTOCOL_VERSION, 2);
+}
+
 // ==================== Numbered publishes ====================
 
 proptest! {
@@ -183,6 +240,7 @@ proptest! {
             result: Err("no".into()),
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             delivery_id: None,
             refusal: None,
             origin: Some(MessageId { epoch, seq }),
@@ -205,6 +263,7 @@ proptest! {
         seq in any::<u64>(),
         delivery_id in any::<u64>(),
         published_by in proptest::option::of("[a-z][a-z0-9.-]{0,30}"),
+        published_instance in proptest::option::of(instance()),
     ) {
         use cassini_types::{BrokerMessage, ClientMessage, MessageId};
         use std::sync::Arc;
@@ -218,15 +277,18 @@ proptest! {
             result: Ok(()),
             trace_ctx: None,
             published_by: published_by.clone(),
+            published_instance: published_instance.clone(),
             origin: Some(MessageId { epoch, seq }),
             delivery_id: Some(delivery_id),
             refusal: None,
         };
         match wire(&delivery) {
-            ClientMessage::PublishResponse { origin, delivery_id: d, published_by: p, .. } => {
+            ClientMessage::PublishResponse { origin, delivery_id: d, published_by: p, published_instance: i, .. } => {
                 prop_assert_eq!(origin, Some(MessageId { epoch, seq }));
                 prop_assert_eq!(d, Some(delivery_id));
                 prop_assert_eq!(p, published_by);
+                // The instance stamped beside it comes off the wire as it went on (protocol 2).
+                prop_assert_eq!(i, published_instance);
             }
             _ => prop_assert!(false, "not a delivery"),
         }

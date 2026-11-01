@@ -1148,6 +1148,7 @@ mod tests {
                             topic,
                             payload,
                             published_by: None,
+                            published_instance: None,
                             trace_ctx: None,
                         },
                     ));
@@ -1615,6 +1616,7 @@ mod tests {
                         .unwrap()
                         .to_vec(),
                     published_by: published_by.map(str::to_string),
+                    published_instance: None,
                     trace_ctx: None,
                 },
             ))
@@ -2122,6 +2124,7 @@ mod tests {
                         .unwrap()
                         .to_vec(),
                     published_by: None,
+                    published_instance: None,
                     trace_ctx: None,
                 },
             ))
@@ -2223,6 +2226,7 @@ mod tests {
                         .unwrap()
                         .to_vec(),
                     published_by: None,
+                    published_instance: None,
                     trace_ctx: None,
                 },
             ))
@@ -2370,6 +2374,7 @@ mod tests {
                         topic: command_topic("infra-commands"),
                         payload,
                         published_by: None,
+                        published_instance: None,
                         trace_ctx: None,
                     },
                 ))
@@ -2480,6 +2485,7 @@ mod tests {
                         topic: command_topic("infra-command-policy"),
                         payload,
                         published_by: None,
+                        published_instance: None,
                         trace_ctx: None,
                     },
                 ))

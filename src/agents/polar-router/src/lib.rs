@@ -67,6 +67,9 @@ pub struct IncomingMessage {
     pub topic: String,
     pub payload: Vec<u8>,
     pub published_by: Option<String>,
+    /// The publisher's instance, as the broker stamped it beside `published_by`: a multi-instance workload's pod
+    /// (docs/architecture/authority-model.md, "Multi-instance workloads").
+    pub published_instance: Option<cassini_types::Instance>,
     pub trace_ctx: Option<cassini_types::WireTraceCtx>,
 }
 
@@ -166,6 +169,7 @@ mod tests {
             topic: topic.to_string(),
             payload: payload.to_vec(),
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         }
     }

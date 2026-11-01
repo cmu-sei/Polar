@@ -365,6 +365,7 @@ mod tests {
                 topic: sub.topic.clone(),
                 payload: vec![1, 2, 3],
                 published_by: None,
+                published_instance: None,
                 trace_ctx: None,
             });
         });
@@ -408,6 +409,7 @@ mod tests {
                 topic: CONFIGURATION_REPLAY_TOPIC.to_string(),
                 payload,
                 published_by: None,
+                published_instance: None,
                 trace_ctx: None,
             };
             let request = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationReplayRequest {

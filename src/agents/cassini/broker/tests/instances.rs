@@ -131,6 +131,51 @@ async fn one_pod_neither_resumes_nor_inherits_another_pod_s_session() {
     .await;
 }
 
+/// The broker stamps the publisher's instance beside `published_by` on every delivery, from the verified certificate
+/// as it takes the identity: a message names the workload and the pod it came from. A single-instance publisher's
+/// deliveries carry none, and an anonymous publish carries neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_delivery_names_the_pod_it_came_from_beside_the_workload() {
+    with_broker(|broker| async move {
+        let sink = TestClient::connect(&broker, "sink.test").await;
+        sink.subscribe("news");
+        pause().await;
+        let a = TestClient::connect_as_instance(&broker, WORKLOAD, "uid-a", None).await;
+        let b = TestClient::connect_as_instance(&broker, WORKLOAD, "uid-b", None).await;
+        let one = TestClient::connect(&broker, "publisher.test").await;
+        a.publish("news", b"from a");
+        sink.wait_for_messages("news", 1).await;
+        b.publish("news", b"from b");
+        sink.wait_for_messages("news", 2).await;
+        one.publish("news", b"from one");
+        sink.wait_for_messages("news", 3).await;
+        a.transport
+            .cast(cassini_client::TcpClientMessage::publish_anonymous(
+                "news".to_string(),
+                b"from no one".to_vec(),
+                None,
+            ))
+            .unwrap();
+        sink.wait_for_messages("news", 4).await;
+        let pod = |uid: &str| {
+            Some(cassini_types::Instance {
+                uid: uid.to_string(),
+                pod: Some(format!("{uid}-pod")),
+            })
+        };
+        assert_eq!(
+            sink.publishers_of("news"),
+            [
+                (Some(WORKLOAD.to_string()), pod("uid-a")),
+                (Some(WORKLOAD.to_string()), pod("uid-b")),
+                (Some("publisher.test".to_string()), None),
+                (None, None),
+            ]
+        );
+    })
+    .await;
+}
+
 #[test]
 fn supersession_and_resumption_are_by_identity_and_instance() {
     let w = WORKLOAD;

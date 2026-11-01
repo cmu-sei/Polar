@@ -1012,6 +1012,7 @@ impl TcpClientActor {
                 result,
                 trace_ctx,
                 published_by,
+                published_instance,
                 origin,
                 delivery_id,
                 refusal,
@@ -1033,6 +1034,7 @@ impl TcpClientActor {
                         payload: payload.to_vec(),
                         trace_ctx: current_trace_ctx,
                         published_by: published_by.clone(),
+                        published_instance: published_instance.clone(),
                     };
                     TcpClientActor::dispatch_event(delivery, event);
                     trace!("TCP client dispatched MessagePublished for topic {}", topic);
@@ -1294,12 +1296,14 @@ impl TcpClientActor {
                     payload,
                     trace_ctx,
                     published_by,
+                    published_instance,
                 } => {
                     if let Err(e) = router.send_message(polar_router::RouterMessage::Route(
                         polar_router::IncomingMessage {
                             topic,
                             payload,
                             published_by,
+                            published_instance,
                             trace_ctx,
                         },
                     )) {
@@ -2101,6 +2105,10 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: Some("some-agent".to_string()),
+                published_instance: Some(cassini_types::Instance {
+                    uid: "pod-uid".to_string(),
+                    pod: Some("some-agent-0".to_string()),
+                }),
                 delivery_id: None,
                 refusal: None,
                 origin: None,
@@ -2116,11 +2124,19 @@ mod process_client_message_tests {
                 topic,
                 payload,
                 published_by,
+                published_instance,
                 ..
             } => {
                 assert_eq!(topic, "a-real-topic");
                 assert_eq!(payload, b"real payload");
                 assert_eq!(published_by, &Some("some-agent".to_string()));
+                // The instance the broker stamped beside it travels with it (protocol 2).
+                assert_eq!(
+                    published_instance
+                        .as_ref()
+                        .map(|i| (i.uid.as_str(), i.pod.as_deref())),
+                    Some(("pod-uid", Some("some-agent-0")))
+                );
             }
             other => panic!("expected MessagePublished, got {other:?}"),
         }
@@ -2147,6 +2163,7 @@ mod process_client_message_tests {
                     result,
                     trace_ctx: None,
                     published_by: None,
+                    published_instance: None,
                     origin: None,
                     delivery_id,
                     refusal: None,
@@ -2192,6 +2209,7 @@ mod process_client_message_tests {
                     result: Err("no".to_string()),
                     trace_ctx: None,
                     published_by: None,
+                    published_instance: None,
                     origin: Some(MessageId { epoch: 5, seq }),
                     delivery_id: None,
                     refusal: Some(refusal),
@@ -2240,6 +2258,7 @@ mod process_client_message_tests {
                     result: Err("Broker is shutting down".to_string()),
                     trace_ctx: None,
                     published_by: None,
+                    published_instance: None,
                     origin: Some(MessageId { epoch: 5, seq: 1 }),
                     delivery_id: None,
                     refusal: Some(cassini_types::PublishRefusal::Unavailable),
@@ -2290,6 +2309,7 @@ mod process_client_message_tests {
             result: Ok(()),
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             origin: None,
             delivery_id: Some(3),
             refusal: None,
@@ -2403,6 +2423,7 @@ mod process_client_message_tests {
             result: Err("broker rejected it".to_string()),
             trace_ctx: None,
             published_by: None,
+            published_instance: None,
             delivery_id: None,
             refusal: None,
             origin: None,
@@ -2495,6 +2516,7 @@ mod process_client_message_tests {
                 result: Err("the broker refused: no".to_string()),
                 trace_ctx: None,
                 published_by: None,
+                published_instance: None,
                 delivery_id: None,
                 refusal: None,
                 origin: None,
@@ -2506,6 +2528,7 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: None,
+                published_instance: None,
                 delivery_id: None,
                 refusal: None,
                 origin: None,
@@ -2554,6 +2577,7 @@ mod process_client_message_tests {
                     result: Err(reason.clone()),
                     trace_ctx: None,
                     published_by: None,
+                    published_instance: None,
                     delivery_id: None,
                     refusal: None,
                     origin: None,

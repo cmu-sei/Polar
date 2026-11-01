@@ -51,10 +51,21 @@ pub struct AgentEscrowKeypairBootstrapHandler {
 }
 
 impl AgentEscrowKeypairBootstrapHandler {
+    /// [`handle_from`](Self::handle_from), from a publisher with no instance (a single-instance workload's).
     pub async fn handle(
         &self,
         request: RetrieveAgentEscrowKeypairRequest,
         requested_by: Option<String>,
+    ) -> RetrieveAgentEscrowKeypairReply {
+        self.handle_from(request, requested_by, None).await
+    }
+
+    /// A retrieval by `requested_by`, the pod `instance` of it when the broker stamped one: its custodian.
+    pub async fn handle_from(
+        &self,
+        request: RetrieveAgentEscrowKeypairRequest,
+        requested_by: Option<String>,
+        instance: Option<String>,
     ) -> RetrieveAgentEscrowKeypairReply {
         let Some(requested_by) = requested_by else {
             return RetrieveAgentEscrowKeypairReply::Refused {
@@ -68,6 +79,7 @@ impl AgentEscrowKeypairBootstrapHandler {
         let workload = match crate::custodian::custodian(
             &self.ledger,
             Some(&requested_by),
+            instance.as_deref(),
             cert_issuer_common::custody::CustodyPermission::Escrow,
         )
         .await

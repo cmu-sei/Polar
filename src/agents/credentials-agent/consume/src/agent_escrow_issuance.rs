@@ -72,16 +72,28 @@ pub struct AgentEscrowIssuanceHandler {
 }
 
 impl AgentEscrowIssuanceHandler {
+    /// [`handle_from`](Self::handle_from), from a publisher with no instance (a single-instance workload's).
     pub async fn handle(
         &self,
         request: AgentEscrowIssuanceRequest,
         requested_by: Option<String>,
+    ) -> AgentEscrowIssuanceReply {
+        self.handle_from(request, requested_by, None).await
+    }
+
+    /// An escrow issuance asked by `requested_by`, the pod `instance` of it when the broker stamped one: its custodian.
+    pub async fn handle_from(
+        &self,
+        request: AgentEscrowIssuanceRequest,
+        requested_by: Option<String>,
+        instance: Option<String>,
     ) -> AgentEscrowIssuanceReply {
         let refused = |reason| AgentEscrowIssuanceReply::Refused { reason };
         // ---- Step 1: who asks: the workload's custodian, live, in its window, its certificate naming the key ----
         let custodian = match custodian(
             &self.ledger,
             requested_by.as_deref(),
+            instance.as_deref(),
             CustodyPermission::Escrow,
         )
         .await

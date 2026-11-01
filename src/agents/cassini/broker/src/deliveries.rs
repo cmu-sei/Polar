@@ -94,6 +94,7 @@ mod tests {
         HeldDelivery {
             payload: vec![0; len].into(),
             published_by: None,
+            published_instance: None,
             origin: None,
         }
     }

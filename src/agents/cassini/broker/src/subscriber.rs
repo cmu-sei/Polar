@@ -546,6 +546,7 @@ impl SubscriberManager {
                         result: Ok(()),
                         trace_ctx: None,
                         published_by: held.published_by,
+                        published_instance: held.published_instance,
                         origin: held.origin,
                         delivery_id: None,
                         refusal: None,
@@ -841,6 +842,7 @@ impl Actor for SubscriberAgent {
                 payload,
                 trace_ctx,
                 published_by,
+                published_instance,
                 origin,
                 ..
             } => {
@@ -851,6 +853,7 @@ impl Actor for SubscriberAgent {
                     payload,
                     trace_ctx,
                     published_by,
+                    published_instance,
                     origin,
                 )
                 .await?;
@@ -1019,6 +1022,7 @@ impl SubscriberAgent {
             topic: topic.to_string(),
             trace_ctx,
             published_by: delivery.published_by.clone(),
+            published_instance: delivery.published_instance.clone(),
             origin: delivery.origin,
             delivery_id,
         }
@@ -1033,6 +1037,7 @@ impl SubscriberAgent {
         payload: Payload,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
         origin: Option<MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.subscriber.publish_response", %topic);
@@ -1062,6 +1067,7 @@ impl SubscriberAgent {
         let delivery = HeldDelivery {
             payload,
             published_by,
+            published_instance,
             origin,
         };
         let push = Self::push(&topic, delivery_id, &delivery, Some(span.context()));

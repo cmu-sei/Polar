@@ -403,6 +403,7 @@ mod tests {
                 topic: $topic.to_string(),
                 payload: bytes.to_vec(),
                 published_by: None,
+                published_instance: None,
                 trace_ctx: None,
             });
         }};
@@ -577,6 +578,7 @@ mod tests {
             topic: CREDENTIALS_ISSUANCE_REPLIES_TOPIC.to_string(),
             payload: vec![1, 2, 3],
             published_by: None,
+            published_instance: None,
             trace_ctx: None,
         });
 
