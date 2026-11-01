@@ -734,7 +734,7 @@ the Job, and so the build or the run). Nothing about the instance is self-report
   never an instance's mTLS certificate. To check in the build: what `certificate_for` returns today; if it is the mTLS
   certificate, the lookup points at the wrong key for every workload, not only multi-instance ones.
 
-**Encryption, and its threat model (DRAFT 2026-11-01, for the maintainer's review).** Two things can be encrypted to:
+**Encryption, and its threat model (accepted by the maintainer 2026-11-01).** Two things can be encrypted to:
 
 - *The workload* ("whoever does this work": a job, a secret at rest): sealed to the workload's escrow key, one per
   workload, held only in each instance's custody daemon (`key-custody.md`, "The escrow keys into the daemon"); the
@@ -757,9 +757,22 @@ What changes against `key-custody.md`'s table, "What it protects", with N instan
 | Root on a node | outside the boundary (Kubernetes is the trust base) | unchanged; the key sits on more nodes |
 | A compromised instance asks for more copies of the key | not applicable | retrieval is per pod (its token, its custodian), as for one |
 
-So rotation is for the DAEMON's compromise, not the workload's. Open: whether revocation records why (a daemon or key
-compromise against an ordinary end) so that rotation follows it, and who decides a daemon is compromised (the attestation
-agent's word, an administrator's signed command).
+So rotation is for the DAEMON's compromise, not the workload's; the custodian exists so that a compromised workload never
+has the key (the maintainer: "This is literally why we built the custodian"). Decided 2026-11-01: revocation RECORDS WHY
+(a compromise against an ordinary end), and a compromise is what starts a rotation; a daemon is declared compromised by
+EITHER the attestation agent's verdict OR an administrator's signed command. How a rotation runs is its own design
+(`key-rotation.md`).
+
+**Later, not in the first build (recorded 2026-11-01).** The first build is for workloads that publish (the harness, Blitz).
+What lets a multi-instance workload CONSUME, designed when a scaled consumer needs it: shared subscriptions (the broker
+gives each message to one instance, a "load balancer": NATS queue groups, Kafka consumer groups; an unacknowledged
+delivery goes back to another instance), and commands to one instance (a signed command addressed to the workload today
+runs in every instance, against "run once"). Encryption already fits it: work is sealed to the workload's key, which every
+instance's daemon holds, so the broker may pick any instance; a payload sealed to one instance never goes on a shared
+subscription. The maintainer: the encryption model comes first, "but I can't ignore the load balancer need if it affects
+the encryption design"; it does not, as above.
+
+
 
 **What does not change.** `workload_of`, the authority model's facts by workload, the judge, Cedar's `Identity` (rules
 name the workload), the builder's own-name check, topics as exact names, a single-instance workload's behaviour.

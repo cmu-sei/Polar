@@ -748,6 +748,14 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   the StateActor at a short fixed interval (a declared variable) before the caller hears anything, so the domain's
   backoff sees only real failures. Found on u7c: jira-observer's Jira backoff (to 15 minutes) delayed the first cursor
   pull 14 minutes after the schema arrived (soft-state.md, "The rebuild, seen on a cluster").
+- [ ] KEY ROTATION (direction decided by the maintainer 2026-11-01; `docs/architecture/key-rotation.md`): revocation records
+  why (compromise vs an ordinary end), and only a compromise starts a rotation; a compromise is declared by the attestation
+  agent or an administrator's signed command; rotation is a builder `RotationActor` over an agent's own declared encrypted
+  stores (a `BackupActor` its sibling), observable through pulled health; the credentials agent's store is its first user;
+  document-carried secrets are re-delivered by the credentials agent after a workload's key rotates, never rewritten. The
+  design is to be written and cleared before building.
+- [ ] MULTI-INSTANCE: WHAT LETS ONE CONSUME (later; `authority-model.md`, "Multi-instance workloads", "Later"): shared
+  subscriptions (a "load balancer") and commands to one instance; the encryption model already fits them.
 - [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; DECIDED 2026-11-01, `docs/architecture/authority-model.md`,
   "Multi-instance workloads"; the load harness is its first user, then Blitz; next to build). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
   topics while a shared one supersedes. Recommended instead of their family of identities: one exact workload marked
