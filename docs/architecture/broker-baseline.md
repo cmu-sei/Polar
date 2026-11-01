@@ -699,6 +699,222 @@ mechanism on both targets is the rule (one artifact per target).
   length to 140 KiB and any alignment, and that `memmove` within one buffer, overlapping either way, is a copy through a
   temporary.
 
+## The fifth set: backpressure, and its tunables (2026-10-31 and 11-01, u7c)
+
+*Why.* The backpressure work (cassini-backpressure.md, "As built" and "Runtime budget") changed the wire (numbered
+publishes, acknowledged deliveries, a protocol version) and gave the broker a memory budget set at run time, whose
+defaults were left for a benchmark to inform. The maintainer: new throughput numbers for a broker with measured
+back-pressure tunables set. Two parts: the broker before the backpressure merge against the one after it, and the
+tunables under a consumer whose slowness reaches the broker.
+
+*The builds.* S4m is main at `2ee4b559`, the last commit before the merge: Scudo with one thread cache a thread and
+LLVM libc's `memcpy` and `memmove`, in every binary since "Decided (2026-10-30)", so here its producer and sink have them
+too (the fourth set's S4m had them in the broker only). NEW is main at `452deec0` with this set's commits: the slow
+consumer and the controller's two settings below (`e6a22fe7`, `d478883f`; the broker's defaults unchanged), the harness's
+per-run settings and image tag (`001b9592`, `5b1508e1`); its images were built by `up.nu --dev` from `001b9592`, and
+`5b1508e1` changes only `load-harness.nu` and the plans. Broker images `cassini@sha256:877192d5…` (S4m) and
+`cassini@sha256:aec75ec9…` (NEW).
+
+*How both run on one cluster.* The wire differs, so a round of one build must run that build's every Cassini peer, and
+more than the broker and harness speak it: a pod's custody daemon watches the broker, and a pod's certificate is
+issued through the credentials agents, which talk to cert-issuer over the broker. (A first try with only the S4m broker
+and harness stopped at the first sink's `polar-init`: the credentials agent could not register with the older broker,
+so nothing was issued.) Every image both builds need is in the in-cluster registry under its own tag, `:s4m` (built from
+the archived tree at `2ee4b559`) and `:new` (`up.nu`'s `latest`, copied): cassini, polar-custody, polar-init,
+cert-issuer, credentials-agent-consumer and -observer, harness-producer and -sink. A round sets the broker, cert-issuer
+and both credentials agents to its tag, every container and init container (pinned by digest, and checked running),
+and runs the plan with `--image-tag`, which retags every container of the run's Jobs. Nothing is rebuilt between
+rounds. The configuration documents are NEW's renders; a document is an environment, so a variable S4m does not
+declare is never read.
+
+*The procedure.* precisionws (i9-13950HX, 24 threads, 62 GB, Linux 7.3.0, FIPS on), `u7c` brought up by `up.nu
+sandbox-local --dev` from this branch (stopped at the browser step, as expected), then pared down as the third and
+fourth sets were: every Polar kustomization suspended, everything but the broker, cert-issuer, the two credentials
+agents and Neo4j scaled to 0, Jaeger among them (tracing off); all put back at the end. The broker on `core`, every
+harness pod on `services`. Scratch driver and analysis beside the records (`~/.cache/polar/harness/fifth-set/`:
+`driver.nu`, `analyse.nu`, `sampler.sh`, the cgroup samples and the driver's logs). Every run of the set reported,
+nothing was lost or refused, and the NEW broker's budget stayed at its floor, 268,435,456, in every run.
+
+### The comparison: S4m against NEW
+
+The baseline plan, three rounds interleaved (S4m then NEW, three times, 20:17 to 21:47). Records: S4m
+`baseline-20261031T201929.nuon`, `T204940`, `T211909`; NEW `baseline-20261031T203420.nuon`, `T210420`, `T213349`. Each
+cell is rounds 1, 2, 3; received a second, p50 and p99 in ms, the broker's CPU in µs a message received.
+
+| size | rate | S4m /s | NEW /s | S4m p50 | NEW p50 | S4m p99 | NEW p99 | S4m CPU | NEW CPU |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 B | 100 | 100, 100, 100 | 100, 100, 100 | 0.38, 0.37, 0.37 | 0.42, 0.41, 0.42 | 29.56, 0.8, 0.7 | 0.72, 0.72, 0.75 | 177, 184, 180 | 219, 224, 224 |
+| 256 B | 1000 | 998, 998, 998 | 1000, 1000, 1000 | 1.71, 1.69, 1.43 | 0.29, 0.29, 0.29 | 4.97, 4.31, 4.03 | 0.66, 0.62, 0.66 | 86, 101, 98 | 130, 131, 134 |
+| 256 B | 10000 | 10000, 10000, 10000 | 9999, 9999, 9999 | 0.56, 0.56, 0.53 | 0.58, 0.64, 0.61 | 1.9, 1.5, 1.75 | 1.08, 1.16, 1.14 | 39, 39, 42 | 54, 52, 52 |
+| 256 B | max | 78637, 74757, 72213 | 74340, 79055, 76110 | 10.7, 11.37, 11.34 | 13.92, 14.55, 12.84 | 17.96, 23.72, 18.98 | 33.28, 23.65, 23.42 | 65, 70, 68 | 78, 71, 72 |
+| 4 KiB | 100 | 100, 100, 100 | 100, 100, 100 | 0.39, 0.38, 0.39 | 0.45, 0.43, 0.45 | 0.69, 0.68, 0.68 | 0.78, 0.76, 0.77 | 198, 202, 201 | 256, 249, 247 |
+| 4 KiB | 1000 | 1000, 1000, 1000 | 1000, 1000, 1000 | 0.35, 0.29, 0.36 | 0.37, 0.34, 0.34 | 0.68, 0.65, 0.68 | 0.71, 0.69, 0.69 | 104, 121, 114 | 113, 126, 118 |
+| 4 KiB | 10000 | 10000, 10000, 10000 | 10000, 10000, 9999 | 0.62, 0.62, 0.66 | 0.74, 0.75, 0.76 | 1.18, 1.15, 1.21 | 1.36, 1.37, 1.39 | 47, 49, 50 | 62, 62, 61 |
+| 4 KiB | max | 61294, 61259, 65212 | 58301, 60143, 61482 | 13.66, 14.24, 13.64 | 40.71, 21.71, 22.9 | 24.41, 21.66, 23.04 | 56.21, 72.92, 44.03 | 68, 69, 62 | 81, 74, 78 |
+| 64 KiB | 100 | 100, 100, 100 | 100, 100, 100 | 10.37, 10.37, 10.3 | 0.54, 0.53, 0.54 | 20.44, 11.64, 11.48 | 10.29, 9.73, 10.72 | 257, 255, 259 | 303, 309, 306 |
+| 64 KiB | 1000 | 998, 997, 998 | 1000, 1000, 1000 | 0.58, 0.53, 0.54 | 0.53, 0.55, 0.55 | 3.2, 2.77, 2.01 | 2.18, 2.23, 2.18 | 143, 139, 132 | 151, 180, 173 |
+| 64 KiB | 10000 | 9995, 9998, 9989 | 9992, 9987, 9999 | 1.46, 1.59, 1.52 | 1.83, 1.91, 1.81 | 4.23, 4.52, 4.25 | 4.33, 4.87, 4.25 | 108, 117, 101 | 154, 157, 152 |
+| 64 KiB | max | 23054, 23504, 23212 | 19022, 20800, 20784 | 60.41, 48.92, 47.11 | 57.4, 51.86, 51.63 | 71.58, 61.48, 58.76 | 71.54, 73.35, 63.78 | 104, 107, 111 | 136, 126, 126 |
+| 1 MiB | 100 | 100, 100, 100 | 100, 100, 100 | 1.4, 1.44, 1.38 | 1.53, 1.42, 1.45 | 12.81, 21.54, 12.47 | 13.07, 13.56, 20.85 | 942, 933, 930 | 1087, 1034, 1022 |
+| 1 MiB | 1000 | 1003, 1003, 1002 | 964, 964, 1002 | 1.85, 1.88, 2.21 | 2.89, 2.42, 2.94 | 5.37, 6.88, 8.14 | 9.02, 7.02, 6.68 | 834, 936, 970 | 1260, 1219, 1284 |
+| 1 MiB | 10000 | 2109, 2010, 1771 | 1881, 1935, 1951 | 33.61, 33.18, 40.17 | 34.6, 36.7, 35.26 | 51.76, 51.82, 67.67 | 53.2, 49.7, 61.19 | 985, 922, 1075 | 1076, 1081, 1055 |
+| 1 MiB | max | 2111, 2191, 2059 | 2103, 2129, 2022 | 33.23, 35.41, 33.15 | 31.61, 31.95, 34.32 | 44.94, 45.13, 50.98 | 53.03, 41.36, 53.24 | 925, 970, 935 | 1013, 1012, 1050 |
+
+The broker's peak (cAdvisor's, since the container started, so it rises through a round): after the small-message
+rows S4m 24, 30, 26 MB, NEW 54, 71, 48; after every row S4m 81, 57, 62, NEW 79, 115, 98.
+
+Then the saturated 64 KiB and 1 MiB rows alone (`infra/load-plans/saturated.nuon`), three rounds interleaved (21:47 to
+22:04), the broker's cgroup sampled every 100 ms from its node (`memory.current`, `memory.stat`), as the fourth set's
+`exp-driver6.nu` did. Records: S4m `saturated-20261031T214842.nuon`, `T215418`, `T215949`; NEW `T215137`, `T215702`,
+`T220237`; the samples `fifth-set/cgroup-<build>-r<round>-<time>.txt`. In MB, rounds 1, 2, 3:
+
+| | S4m | NEW |
+| --- | --- | --- |
+| 64 KiB saturated, received a second | 23,405, 23,308, 23,023 | 19,662, 19,413, 20,110 |
+| 64 KiB, p99 | 64, 59, 58 ms | 61, 84, 64 ms |
+| 64 KiB, CPU a message | 105, 105, 106 µs | 126, 126, 129 µs |
+| 64 KiB, `memory.current` at its peak | 45, 35, 29 | 56, 104, 42 |
+| 64 KiB, anonymous memory at its peak | 37, 26, 23 | 43, 95, 39 |
+| its socket memory then | 4, 1, 1 | 0, 2, 0 |
+| 1 MiB saturated, received a second | 2,052, 1,983, 1,989 | 2,130, 2,017, 1,850 |
+| 1 MiB, anonymous memory at its peak | 34, 33, 48 | 55, 56, 69 |
+| at rest between runs | 15, 13, 17 | 17, 22, 21 |
+
+Read plainly:
+- **NEW carries what S4m carries at every set rate** (but for 964 a second of 1 MiB at 1,000 in two rounds of three),
+  and as many small and 1 MiB messages saturated (256 B 74,340 to
+  79,055 a second against 72,213 to 78,637; 1 MiB 2,022 to 2,129 against 2,059 to 2,191). **64 KiB saturated it carries
+  about 13% fewer** (19,022 to 20,800 against 23,054 to 23,504, in both sets of rounds), and 4 KiB saturated about 5% fewer.
+- **It costs more CPU a message, everywhere:** 8 to 10% when saturated with 256 B and 1 MiB, 15 to 20% with 4 and 64
+  KiB, and at the set rates up to 45% (256 B at 10,000 a second 52 to 54 µs against 39 to 42; 64 KiB at 10,000 152 to
+  157 against 101 to 117; 1 MiB at 1,000 1,219 to 1,284 against 834 to 970), though 4 KiB at 1,000 and 1 MiB at 10,000
+  are within 10%. The rows at 100 a second carry the controller's fixed cost,
+  a memory sample a second and a report every 30 s, spread over few messages. Each delivery is now acknowledged by its
+  number and each publish answered with its own, and the budget charged and refunded per payload; which of these the
+  CPU goes to was not profiled.
+- **Latency at low rates is better:** S4m's p50 of about 10 ms at 64 KiB and 100 a second, in every baseline since
+  2026-10-21, is 0.54 ms in NEW, and 256 B at 1,000 a second is 0.29 ms against 1.4 to 1.7. Saturated with 4 KiB the p99
+  is worse (44 to 73 ms against 22 to 24).
+- **The fourth set's backlog is gone in both builds**: with the clients' `memcpy` as fast as the broker's, the sink
+  keeps up, and the broker's anonymous memory at 64 KiB saturated peaks at 23 to 37 MB in S4m (154 to 196 in the
+  fourth set) and 39 to 95 in NEW. NEW holds more: its peak after every row is about half again S4m's (79 to 115 MB
+  against 57 to 81), twice after the small-message rows (48 to 71 against 24 to 30), its rest 17 to 22 MB.
+
+### The tunables, under a consumer slow before it acknowledges
+
+*The consumer.* Until this set the harness sink spent its delay after its client had acknowledged the delivery, on
+messages already in its own mailbox, so a slow sink never pressured the broker (on 2026-10-31 the controller stayed at
+its floor with less than about 42 MB held). With `sink_slow: "before_ack"` the sink's client's reader spends the delay
+on each delivery before it hands it over and acknowledges it (`cassini_client::hand_off`, feature `slow-hand-off`, which
+only the sink enables), so acknowledgements come at the consumer's pace and what waits for it waits in the broker.
+
+*The plan* (`infra/load-plans/tunables.nuon`, the NEW broker only): one producer at 1,000 messages a second for 10 s
+(10,000 messages; 4,096 at 1 MiB, its 4 GiB cap), the sink spending 1.1 ms a delivery (about 9% slower than the
+producer) or 10 ms (a tenth of it), at 4 KiB, 64 KiB and 1 MiB, under ten broker settings: the cap
+(`CASSINI_MEMORY_BUDGET_BYTES`) at 256 MiB, 512 MiB, 1 GiB and 2 GiB; uncapped at the controller's defaults, its latency
+target at ½ and 2 × the stall bound (`CASSINI_BUDGET_LATENCY_PERCENT`, a setting added for this set), its step at 4 ×
+(`CASSINI_BUDGET_STEP_BYTES` 64 MiB); the stall bound (`CASSINI_STALL_SECS`) at 10 and 50 s. The producer waits 120 s for
+an acknowledgement and the sink 60 s for a message, so a 50 s stall bound is what is measured. 60 runs, about two hours,
+which is the grid: three sizes, two delays, ten settings. Records `tunables-20261031T220424.nuon` (its first ten runs,
+4 KiB at 1.1 ms, the broker restarted before each) and `tunables-rest-20261031T224500.nuon` (the other 50, the setting
+the slowest axis and the broker restarted ten times; `fifth-set/tunables-rest.nuon`). The eleventh run failed and was run
+again in the second: see "Found on the way".
+
+Across the ten settings, the range of each load (received a second; p50, p99; what the budget held at most):
+
+| load | received /s | p50 | p99 | held, at most | stall ends |
+| --- | --- | --- | --- | --- | --- |
+| 4 KiB, 1.1 ms | 890 to 904 | 542 to 642 ms | 1.05 to 1.23 s | 1 to 4 MB | none |
+| 4 KiB, 10 ms | 96 to 100 | 39 to 49 s | 80.8 to 85.1 s | 38 MB | at 10 s and 30 s, none at 50 s |
+| 64 KiB, 1.1 ms | 883 to 896 | 586 to 701 ms | 1.14 to 1.32 s | 10 to 71 MB | none |
+| 64 KiB, 10 ms | 100 | 15.6 to 15.7 s | 21.6 s | 144 MB | none |
+| 1 MiB, 1.1 ms | 632 to 661 | 153 to 162 ms | 212 to 226 ms | 62 to 146 MB | none |
+| 1 MiB, 10 ms | 98 to 99 | 1.07 to 1.08 s | 1.39 to 1.40 s | 144 to 145 MB | none |
+
+The broker's CPU was 128 to 141 µs a message at 4 KiB and 1.1 ms, 175 to 205 at 4 KiB and 10 ms, 160 to 179 at 64 KiB,
+and 1,038 to 1,093 at 1 MiB, under every setting. (At 1 MiB the sink takes about 1.5 ms over each delivery, its delay and
+the reading, so it drains about 650 a second, not 909.)
+
+**(a) The cap changes nothing at these loads.** The budget was 268,435,456, its floor, in every run under every cap, and
+each load's figures under 256 MiB, 512 MiB, 1 GiB and 2 GiB are within one another's spread (64 KiB at 1.1 ms received
+885 to 895 a second; 1 MiB at 1.1 ms 632 to 655). A cap only clips a budget that grows, and none grew.
+
+**(b) The controller never grows here, whatever its target or step.** Its target (the drain rate × the latency target)
+was 0.5 to 5.3 GB at 64 KiB and 1 MiB, far over the floor, so the target never held it back; what did is the used
+share: it grows only while it holds three quarters of the budget, 201 MB, and one publisher and one subscriber held at
+most 145 MB, 54% of it. A connection's window is a quarter of the budget and a subscriber's high water an eighth, so one
+publisher and one held-back subscriber hold about three eighths and what is in flight between them; to reach three
+quarters needs about three publishers held back at once, which the harness cannot make (one identity, one session,
+"Open" below). Half and twice the latency target and four times the step changed nothing measurable, as they cannot
+until the used share is reached. Where it settles: at the floor, `limited_by` `Floor` or `Target` in every decision
+logged (and `Cap` under a cap of the floor itself). How fast: not measured, for the same reason.
+
+**On u7c the ceiling is the host's.** The broker's cgroup has no `memory.max` (cassini-backpressure.md, "What u7c
+exposes"), so the ceiling is held + (`MemAvailable` − 512 MiB) / 2: 27.5 GB in every run of the set, with the cluster
+pared down (26.6 GB in the broker's log with it all running, before the set). A broker whose controller did grow could hold half of what the host has
+free before anything but the 512 MiB reserve stopped it, and with no PSI in that nested cgroup only `memory.events`
+could cut it, and only when the file is there.
+
+**(c) The stall bound ends a subscriber that is slow, not one that is stuck.** A subscriber above its high water (32 MiB
+at the floor) holds its topic back until its outbox falls below half of it, and is ended when that takes longer than
+the stall bound, whether or not it acknowledges meanwhile. So the rule is a drain rate: a subscriber is ended when it
+drains slower than (high water / 2) / `T_stall`, 0.56 MB/s at 30 s, 1.7 MB/s at 10 s, 0.34 MB/s at 50 s, while its
+publisher outpaces it. The 4 KiB consumer at 10 ms drains about 0.41 MB/s (half its high water in about 40 s); every
+other load drains faster (64 KiB at 10 ms, 6.5 MB/s, half in 2.6 s).
+
+| 4 KiB, 10 ms a delivery | `T_stall` 10 s | 30 s (eight settings) | 50 s |
+| --- | --- | --- | --- |
+| ended | 4 times, 15 s apart | once | never |
+| held back that long first (`stalled_for`) | 12.7 to 14.0 s | 35.6 to 39.9 s | |
+| delivered twice (the session resumed, its unacknowledged deliveries sent again) | 13 | 3 | 0 |
+| lost | 0 | 0 | 0 |
+| the producer done after | 20.8 s | 43.7 to 48.1 s | 58.4 s |
+| the sink's p50 | 48.7 s | 45.2 to 46.5 s | 39.3 s |
+
+An end comes the bound, the confirmation (an eighth of the bound) and up to a check later. Its cost is a reconnection
+and the deliveries in flight again, and what it buys is the producer: the ended subscriber's session is away, an away
+subscriber holds no topic back, and the producer runs on into its outbox. The sink takes as long either way (100 to 104
+s for 10,000 messages); at 50 s it is never ended and the producer is held to the sink's pace to the end.
+
+**The latency of a slow consumer is the bounds over its drain.** Held over drain rate gives each row's p99: 144 MB at
+6.5 MB/s is 22 s (p99 21.6 s), 145 MB at 105 MB/s is 1.4 s (1.40 s), 38 MB at 0.41 MB/s is 93 s (81 to 85 s, the
+sink's own reconnections among them). A larger
+budget raises the window and high water with it, so it would buy a slow consumer more backlog and latency, not
+throughput, and raise the drain rate below which the stall rule ends it.
+
+### Recommended defaults (for the maintainer's decision)
+
+Nothing is changed in code; every default stays as set until the maintainer decides.
+
+| tunable | default | recommended | evidence |
+| --- | --- | --- | --- |
+| cap (`CASSINI_MEMORY_BUDGET_BYTES`) | unset | unset; give the broker's workload a memory limit where it has none | no cap changed any run; the budget never left the floor. Without `memory.max` the ceiling is half the host's free memory (27.5 GB on u7c), which a limit, not the cap, is the place to bound |
+| floor | 4 frames, 256 MiB | 4 frames | every load fit in it: at most 145 MB held, 54% of it, with no alarm, no refusal, nothing lost |
+| used share (above which it may grow) | 3/4 | 3/4, unmeasured where it matters | one publisher and one subscriber reach 54%, so the budget never grows for them, and growing would buy them only latency; whether several publishers held back at once should grow it needs a harness with several identities |
+| latency target | 1 × `T_stall` | 1 × `T_stall` (unmeasured) | ½ and 2 × changed nothing: the target was 0.5 to 5.3 GB, the used share always held the budget first |
+| step | 16 MiB a sample | 16 MiB (unmeasured) | 4 × changed nothing, for the same reason |
+| stall bound (`CASSINI_STALL_SECS`) | 30 s | 30 s | at 30 s only the slowest consumer (0.41 MB/s of 4 KiB messages) is ended, once, with 3 duplicates and nothing lost; 10 s ends it four times (13 duplicates), 50 s never, holding its producer 10 s longer. The rule ends a consumer below (high water / 2) / `T_stall` (0.56 MB/s at the floor), which rises with the budget: a decision of policy as much as a default, see below |
+| share of `MemAvailable`, reserve, PSI threshold, cut, smoothing, hysteresis | 1/2, 512 MiB, 10%, 1/2, 1/4, 5/4 | as set (not exercised) | no run grew the budget or saw pressure; u7c has no PSI in the broker's cgroup |
+
+*For the maintainer, not decided here:* the stall rule ends a subscriber that is acknowledging, at 0.56 MB/s and below,
+because its outbox has to fall to half its high water within the bound. A consumer of small messages that does a
+millisecond-scale write for each (a graph write a message, once acknowledgements are the domain's) is one. Whether
+progress within the bound should spare it, or the low water be nearer the high water, is a question of the rule, not of
+its default.
+
+*Found on the way:*
+- **A broker restart can stop issuance until cert-issuer restarts.** After the broker's tenth restart in a row
+  (tunables-10, 02:17), the credentials agent registered again and heard no request: cert-issuer held the sink's
+  request and offered it to the credentials agent, which never answered (`the consumer did not answer`, every 15 s), and
+  `polar-init` waited until the run gave up after ten minutes. Restarting the credentials agents alone did not clear it;
+  restarting cert-issuer did (its held offer is made once and not again). The rest of the plan ran with a watchdog that
+  would have restarted cert-issuer for a pod held in its init for two minutes; it never had to. Not reproduced; its own
+  item.
+- **After the cluster was put back, jira-processor stayed in `Init:Error`**: its `polar-init` was restarted while the
+  custody daemon beside it kept the custodian's slot sealed from the first try ("the slot is sealed: a certificate is
+  installed in it"), so every retry is refused. The pod needs replacing; jira-observer, which has no Jira to reach on
+  u7c, was failing before the set.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
@@ -751,6 +967,11 @@ document (`c5ab1a5f`); the render's layer checks and rendered-only files (`9f759
 - In the earlier, invalid four-by-four runs one message in 100,000 was still lost after the fixes; with one connection
   none was. Measure again once several connections are valid.
 - Backpressure, in the broker and the client (the maintainer, 2026-10-30): nothing bounds what the broker holds for a
-  subscriber that is slow but connected (the fourth set, above). A plan first, cleared before any code.
+  subscriber that is slow but connected (the fourth set, above). Built (cassini-backpressure.md) and measured (the fifth
+  set); its defaults await the maintainer's decision there.
+- The runtime budget's growth is unmeasured: one publisher and one subscriber never reach its used share (the fifth
+  set). Measuring it needs several connections at once, so the first item above.
+- NEW against S4m: 13% fewer 64 KiB messages saturated and 8 to 45% more CPU a message (the fifth set). Profile where it
+  goes.
 - The harness's producer, soon after the cluster is scaled down, carries about a seventh of its rate in what looks like a
   retry loop (the fourth set). Reproduce it with its logs kept.

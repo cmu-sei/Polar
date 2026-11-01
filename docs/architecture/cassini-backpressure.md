@@ -172,7 +172,9 @@ the broker's bounds; the client's bounds; the harness's slow sink.
   acknowledgement, or a delivery resent on resume, arrives twice); an outbox entry older than `R` is not dropped
   (5a). The harness's slow sink slows its handling, not its acknowledgements, so until the acknowledgement is the
   domain's its backlog waits in the sink, not the broker; the broker side of a slow reader is what
-  `cassini/broker/tests/backpressure.rs` tests.
+  `cassini/broker/tests/backpressure.rs` tests. (Since 2026-10-31 a plan's `sink_slow: "before_ack"` spends the delay
+  in the sink's client's reader before each acknowledgement, `cassini_client::hand_off`; broker-baseline.md, the fifth
+  set.)
 
 The choices the decisions settled are kept below for the record.
 
@@ -514,7 +516,10 @@ counters; `PressureManager::sample`, `pressure.rs:169`).
 - **A broker built from `Bounds` directly** (a test's) keeps a fixed budget.
 
 **Defaults, MARKED FOR THE MAINTAINER'S REVIEW** (`Tunables`, `runtime_budget.rs:132`). Reviewed 2026-10-31: they
-stay as set until the benchmark (saturated and slow-sink loads) informs them; every one is a variable.
+stay as set until the benchmark (saturated and slow-sink loads) informs them; every one is a variable. Measured
+2026-10-31 (broker-baseline.md, the fifth set, with its recommendations): the latency target and the step are settings
+now (`CASSINI_BUDGET_LATENCY_PERCENT`, `CASSINI_BUDGET_STEP_BYTES`, defaults unchanged); no load the harness can make
+grew the budget off its floor.
 
 | Tunable | Default |
 |---|---|
