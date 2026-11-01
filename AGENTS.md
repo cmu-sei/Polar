@@ -63,6 +63,25 @@ src/agents/
 
 Each agent crate follows: `lib.rs` (exports/constants) + `entrypoint.rs` (binary entry) + feature modules.
 
+## Design Principles
+
+Decided by the maintainer; each line points at its reasoning. Where a task is silent, decide by these and mark the
+decision for review; where a task conflicts with one, stop and ask.
+
+- Control travels signed, at run time: what an agent must know about others is a signed runtime section via
+  polar-schedules, never a render-time env var; authority updates are only for security (`soft-state.md`, "Revised").
+- Applying the catalog is the sign-off for deployment facts (workloads, capabilities, topics); certificates carry them
+  (`policy-enforcement.md`, "Decisions").
+- The builder computes facts from how an agent is built (capabilities, implied topics); nobody hand-declares them twice.
+- Every component is a supervised actor; actors exchange messages and never write another actor's state.
+- Infrastructure actors answer for introspection (health, configuration); a domain's own state is its own, and nothing
+  outside reads a domain actor (`soft-state.md`, "Self-state and introspection").
+- Topics are exact names; Cedar overrides the floor both ways; a request is judged by the broker-stamped identity.
+- Kubernetes is the trust base; don't defend Polar against what is already inside it (`runtime-attestation.md`).
+- Limits come from what the machine really has, and a hint never widens a signed bound.
+- Special cases accumulating around one mechanism mean its shape is wrong: rework the shape, don't add the next case.
+- Fix at the cause; never weaken a test; never measure in debug.
+
 ## Code Conventions
 
 ### Actor Pattern (ractor)
