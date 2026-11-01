@@ -29,7 +29,7 @@ use cassini_client::facade::Backoff;
 use jira_observer::JiraDeployment;
 use jira_observer::Retry;
 use jira_observer::issues::{
-    INCREMENTAL_OVERLAP_SECS, ORDER, Start, cursor_minutes, incremental_window, issue_jql,
+    Filter, INCREMENTAL_OVERLAP_SECS, ORDER, Start, cursor_minutes, incremental_window, issue_jql,
     jql_filter,
 };
 use jira_observer::settings::{normalise_jira_url, token_looks_base64};
@@ -260,6 +260,32 @@ proptest! {
         // And it is what the first pull asks.
         let jql = jql_filter(false, Duration::from_secs(1800), Some(Start::Since(newest)), now, Some("2020-01-01"));
         prop_assert_eq!(jql, Some(format!("updated >= -{minutes}m")));
+    }
+
+    /// A walk asked again later (its next page, or after a failure) reaches back from that moment by its first reach
+    /// and the time since, rounded up to the minute: its oldest end never moves later than where the walk began, and
+    /// by less than a minute earlier.
+    #[test]
+    fn a_walk_asked_later_never_reaches_back_less_than_where_it_began(
+        minutes in 1u64..10_000_000,
+        elapsed_ms in 0u64..30 * 24 * 3_600_000,
+    ) {
+        let filter = Filter::Within { minutes };
+        let jql = filter.jql(Duration::from_millis(elapsed_ms)).unwrap();
+        let asked: u64 = jql
+            .strip_prefix("updated >= -")
+            .and_then(|m| m.strip_suffix('m'))
+            .and_then(|m| m.parse().ok())
+            .unwrap();
+        let needed = u128::from(minutes) * 60_000 + u128::from(elapsed_ms);
+        prop_assert!(u128::from(asked) * 60_000 >= needed, "{} for {} after {} ms", jql, minutes, elapsed_ms);
+        prop_assert!(u128::from(asked) * 60_000 < needed + 60_000, "{}", jql);
+        // At its start it is what jql_filter says.
+        prop_assert_eq!(filter.jql(Duration::ZERO), Some(format!("updated >= -{minutes}m")));
+        // A filter that is not relative does not move.
+        for fixed in [Filter::Everything, Filter::After("2024-01-01".to_string())] {
+            prop_assert_eq!(fixed.jql(Duration::from_millis(elapsed_ms)), fixed.jql(Duration::ZERO));
+        }
     }
 
     /// Every issue pull's JQL is ordered oldest update first, once, whatever the filter and the deployment.

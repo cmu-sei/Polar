@@ -62,13 +62,34 @@ impl JiraUserObserver {
     /// most its autocomplete limit, and `query=''` matches no one. On Cloud, which has no such search by name, the
     /// picker as before. Either is read to an empty page, or one with no user not already read (a site that ignored
     /// `startAt`).
+    ///
+    /// A page that fails leaves what was read in the observer's state ([`UserWalk`]), and the next attempt goes on
+    /// from that page.
     async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
         state.ensure_token().await?;
 
-        let mut all_users: Vec<JiraUser> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut start_at = 0usize;
+        let mut walk = state.user_walk.take().unwrap_or_default();
+        if walk.start_at > 0 {
+            info!("going on from user {} of the walk", walk.start_at);
+        }
+        if let Err(e) = Self::walk(op, state, &mut walk).await {
+            state.user_walk = Some(walk);
+            return Err(e);
+        }
 
+        publish_data(
+            &state.tcp_client,
+            JIRA_USERS_CONSUMER_TOPIC,
+            &JiraData::Users(walk.users),
+        )
+        .await
+    }
+
+    async fn walk(
+        op: &str,
+        state: &JiraObserverState,
+        walk: &mut UserWalk,
+    ) -> Result<(), ActorProcessingErr> {
         loop {
             let (endpoint, mut params) = match state.deployment {
                 JiraDeployment::ServerOrDataCenter => (
@@ -81,7 +102,7 @@ impl JiraUserObserver {
                 ),
                 JiraDeployment::Cloud => (op, vec![("query", "''".to_string())]),
             };
-            params.push(("startAt", start_at.to_string()));
+            params.push(("startAt", walk.start_at.to_string()));
             params.push(("maxResults", PAGE_SIZE.to_string()));
             let url = Url::parse_with_params(&format!("{}{endpoint}", state.jira_url), params)?;
             debug!("{url}");
@@ -108,27 +129,28 @@ impl JiraUserObserver {
                 // ignored `startAt` would otherwise be asked for ever.
                 match user.identity().map(str::to_string) {
                     Some(identity) => {
-                        if seen.insert(identity) {
+                        if walk.seen.insert(identity) {
                             new += 1;
-                            all_users.push(user);
+                            walk.users.push(user);
                         }
                     }
-                    None => all_users.push(user),
+                    None => walk.users.push(user),
                 }
             }
             if fetched == 0 || new == 0 {
-                break;
+                return Ok(());
             }
-            start_at += fetched;
+            walk.start_at += fetched;
         }
-
-        publish_data(
-            &state.tcp_client,
-            JIRA_USERS_CONSUMER_TOPIC,
-            &JiraData::Users(all_users),
-        )
-        .await
     }
+}
+
+/// The users read so far by a walk that has not finished, and where it goes on from.
+#[derive(Default)]
+pub struct UserWalk {
+    users: Vec<JiraUser>,
+    seen: HashSet<String>,
+    start_at: usize,
 }
 
 /// A Data Center's and Server's search for users by name, paged by `startAt`.

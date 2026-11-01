@@ -797,3 +797,163 @@ async fn published_on(topics: &Arc<Mutex<Vec<String>>>, topic: &str, count: usiz
     tokio::time::sleep(Duration::from_millis(200)).await;
     reached
 }
+
+/// A site that is rate limiting (429), or down for a while (503), says when to come back in `Retry-After`: the
+/// observer waits that long, not its own shorter backoff, and then pulls.
+#[tokio::test]
+async fn retry_after_is_honoured_on_429_and_503() {
+    for status in [429, 503] {
+        let server = MockServer::start().await;
+        fail_first(
+            &server,
+            PROJECTS,
+            ResponseTemplate::new(status).insert_header("Retry-After", "1"),
+            1,
+        )
+        .await;
+        mount_site(&server).await;
+        let (client, topics) = recorder().await;
+        let started = Instant::now();
+        let (observer, _) = Actor::spawn(None, JiraProjectObserver, args(&server, client))
+            .await
+            .unwrap();
+
+        assert!(published(&topics, JIRA_PROJECTS_CONSUMER_TOPIC, 1).await);
+        let waited = started.elapsed();
+        // The test's backoff is 20 ms; Retry-After says a second.
+        assert!(
+            waited >= Duration::from_secs(1),
+            "{status}: pulled again after {waited:?}"
+        );
+        assert_eq!(asked(&server, PROJECTS).await.len(), 2, "{status}");
+        observer.stop(None);
+    }
+}
+
+/// Fails the request to `endpoint` whose `startAt` is `start_at`, the first `times` it is asked.
+async fn fail_page(server: &MockServer, endpoint: &str, start_at: usize, times: u64) {
+    Mock::given(method("GET"))
+        .and(path(endpoint))
+        .and(wiremock::matchers::query_param(
+            "startAt",
+            start_at.to_string(),
+        ))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(times)
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// A page that fails is asked again, and the walk goes on from it: the pages before it are neither asked nor
+/// published twice.
+#[tokio::test]
+async fn an_issue_pull_that_fails_on_a_page_resumes_at_that_page() {
+    let server = MockServer::start().await;
+    fail_page(&server, SEARCH, 50, 1).await;
+    Mock::given(method("GET"))
+        .and(path(SEARCH))
+        .respond_with(issue_search(120, true))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics) = recorder().await;
+    let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client))
+        .await
+        .unwrap();
+
+    assert!(published_on(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 120).await);
+    let starts: Vec<usize> = asked(&server, SEARCH)
+        .await
+        .iter()
+        .map(|r| number(r, "startAt"))
+        .collect();
+    assert_eq!(starts, [0, 50, 50, 100]);
+    let issues = topics
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| *t == JIRA_ISSUES_CONSUMER_TOPIC)
+        .count();
+    assert_eq!(issues, 120, "no page published twice");
+    // The same question each time: the resumed walk asks what the first attempt asked.
+    let jql: Vec<String> = searches(&server).await;
+    assert!(jql.iter().all(|q| q == &jql[0]), "{jql:?}");
+    observer.stop(None);
+}
+
+#[tokio::test]
+async fn a_user_pull_that_fails_on_a_page_resumes_at_that_page() {
+    let server = MockServer::start().await;
+    fail_page(&server, USER_SEARCH, 50, 1).await;
+    Mock::given(method("GET"))
+        .and(path(USER_SEARCH))
+        .respond_with(user_search(107))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics, published) = recording().await;
+    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client))
+        .await
+        .unwrap();
+
+    assert!(published_on(&topics, JIRA_USERS_CONSUMER_TOPIC, 1).await);
+    let [JiraData::Users(users)] = &decoded(&published, JIRA_USERS_CONSUMER_TOPIC)[..] else {
+        panic!("one message of users");
+    };
+    assert_eq!(users.len(), 107);
+    let starts: Vec<usize> = asked(&server, USER_SEARCH)
+        .await
+        .iter()
+        .map(|r| number(r, "startAt"))
+        .collect();
+    assert_eq!(starts, [0, 50, 50, 100, 107]);
+    observer.stop(None);
+}
+
+#[tokio::test]
+async fn a_group_pull_that_fails_on_a_page_resumes_at_that_page() {
+    let server = MockServer::start().await;
+    let names: Vec<String> = (1..=7).map(|i| format!("group-{i:02}")).collect();
+    // The second page (three groups left out) fails once.
+    let picker = group_picker(names.clone());
+    let failed = Arc::new(AtomicU64::new(0));
+    let failed_in = failed.clone();
+    Mock::given(method("GET"))
+        .and(path(GROUPS))
+        .respond_with(move |request: &Request| {
+            if params(request, "exclude").len() == 3
+                && failed_in.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return ResponseTemplate::new(503);
+            }
+            picker(request)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics, published) = recording().await;
+    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client))
+        .await
+        .unwrap();
+
+    assert!(published_on(&topics, JIRA_GROUPS_CONSUMER_TOPIC, 1).await);
+    let [JiraData::Groups(groups)] = &decoded(&published, JIRA_GROUPS_CONSUMER_TOPIC)[..] else {
+        panic!("one message of groups");
+    };
+    assert_eq!(groups.len(), 7);
+    let excluded: Vec<usize> = asked(&server, GROUPS)
+        .await
+        .iter()
+        .map(|r| params(r, "exclude").len())
+        .collect();
+    assert_eq!(
+        excluded,
+        [0, 3, 3, 6],
+        "resumed with the three already read left out"
+    );
+    observer.stop(None);
+}

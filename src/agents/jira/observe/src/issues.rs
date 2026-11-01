@@ -21,8 +21,8 @@
    DM26-0670
 */
 use crate::{
-    Command, JIRA_ISSUE_OBSERVER, JiraDeployment, JiraError, JiraObserverArgs, JiraObserverMessage,
-    JiraObserverState, publish_data,
+    Command, FIELD_OP, JIRA_ISSUE_OBSERVER, JiraDeployment, JiraError, JiraObserverArgs,
+    JiraObserverMessage, JiraObserverState, publish_data,
 };
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
@@ -140,13 +140,17 @@ impl JiraIssueObserver {
     /// Pulls issues from Jira and publishes each one. A failure in talking
     /// to Jira is a JiraError, and the pull is tried again later
     /// (`JiraObserverState::settle`); any other failure ends the observer.
+    ///
+    /// A pull is a walk ([`IssueWalk`]) kept in the observer's state while it is under way: a page that fails leaves
+    /// it there, and the next attempt goes on from that page, asking what the first attempt asked. Once it completes,
+    /// the next incremental pull reaches back to when it began.
     async fn pull_issues(
         op: &str,
         state: &mut JiraObserverState,
     ) -> Result<(), ActorProcessingErr> {
         state.ensure_token().await?;
         let fields: Vec<JiraField> = state
-            .get_json(&format!("{}/rest/api/2/field", state.jira_url))
+            .get_json(&format!("{}{FIELD_OP}", state.jira_url))
             .await?;
         let updated_id = system_field_id(&fields, "updated");
         let names: HashMap<String, String> = fields
@@ -154,113 +158,188 @@ impl JiraIssueObserver {
             .map(|f| (f.id.to_string(), f.name.to_string()))
             .collect();
 
-        let filter = jql_filter(
-            state.full_pull_done,
-            incremental_window(
-                state.last_pull_started,
-                (state.clock)(),
-                state.base_interval,
-            ),
-            state.start,
-            (state.wall_clock)(),
-            state.query_date.as_deref(),
-        );
-        info!(
-            "Pulling issues ({})",
-            match (state.full_pull_done, state.start) {
-                (true, _) => "incremental",
-                (false, Some(Start::Since(_))) => "from the newest issue the graph has",
-                (false, _) => "full",
+        let mut walk = match state.issue_walk.take() {
+            Some(walk) => {
+                info!(
+                    "Going on with the issue pull from issue {} ({} published)",
+                    walk.start_at, walk.published
+                );
+                walk
             }
-        );
-        let jql = issue_jql(filter.as_deref(), state.deployment);
+            None => {
+                info!(
+                    "Pulling issues ({})",
+                    match (state.full_pull_done, state.start) {
+                        (true, _) => "incremental",
+                        (false, Some(Start::Since(_))) => "from the newest issue the graph has",
+                        (false, _) => "full",
+                    }
+                );
+                IssueWalk::new(
+                    walk_filter(
+                        state.full_pull_done,
+                        incremental_window(
+                            state.last_pull_started,
+                            (state.clock)(),
+                            state.base_interval,
+                        ),
+                        state.start,
+                        (state.wall_clock)(),
+                        state.query_date.as_deref(),
+                    ),
+                    (state.clock)(),
+                )
+            }
+        };
 
-        match state.deployment {
+        let walked = match state.deployment {
             JiraDeployment::ServerOrDataCenter => {
-                let endpoint = format!("{}{}", state.jira_url, op);
-                let mut start_at = 0usize;
-                let mut warned_no_total = false;
-
-                loop {
-                    let params = vec![
-                        ("startAt", start_at.to_string()),
-                        ("maxResults", PAGE_SIZE.to_string()),
-                        ("expand", "changelog".to_string()),
-                        ("jql", jql.clone()),
-                    ];
-                    let url = Url::parse_with_params(&endpoint, params)?;
-                    debug!("{url}");
-
-                    let res: Value = state.get_json(url.as_str()).await?;
-                    let fetched =
-                        publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)
-                            .await?;
-                    let total = res["total"].as_u64().map(|t| t as usize);
-                    if total.is_none() && !warned_no_total {
-                        warn!(
-                            "{op} answered without a total: reading on to an empty page rather than stopping here"
-                        );
-                        warned_no_total = true;
-                    }
-
-                    start_at += fetched;
-                    debug!("Loaded {start_at}/{total:?}...");
-
-                    // An empty page ends the walk: with a non-zero total it would otherwise never advance. Without a
-                    // total, only an empty page does.
-                    if fetched == 0 || total.is_some_and(|total| start_at >= total) {
-                        break;
-                    }
-                }
+                Self::walk_by_offset(op, state, &mut walk, &names, updated_id.as_deref()).await
             }
             JiraDeployment::Cloud => {
-                // Cloud removed /rest/api/2/search (CHANGE-2046). Use
-                // /rest/api/3/search/jql with cursor-based pagination; the
-                // JQL is bounded even for a full pull (`issue_jql`).
-                let endpoint = format!("{}/rest/api/3/search/jql", state.jira_url);
-                let mut next_page_token: Option<String> = None;
-
-                loop {
-                    // The enhanced search returns only issue ids unless the
-                    // fields are asked for.
-                    let mut params = vec![
-                        ("jql", jql.clone()),
-                        ("maxResults", PAGE_SIZE.to_string()),
-                        ("expand", "changelog".to_string()),
-                        ("fields", "*all".to_string()),
-                    ];
-                    if let Some(token) = &next_page_token {
-                        params.push(("nextPageToken", token.clone()));
-                    }
-                    let url = Url::parse_with_params(&endpoint, params)?;
-                    debug!("{url}");
-
-                    let res: Value = state.get_json(url.as_str()).await?;
-                    publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client).await?;
-
-                    next_page_token = res["nextPageToken"].as_str().map(str::to_string);
-                    match res["isLast"].as_bool() {
-                        Some(true) => break,
-                        Some(false) => {}
-                        // Said, not taken for the end: the page token says whether there is more.
-                        None => warn!(
-                            "the search answered without isLast: {}",
-                            if next_page_token.is_some() {
-                                "reading on, since it gave a next page"
-                            } else {
-                                "stopping, since it gave no next page"
-                            }
-                        ),
-                    }
-                    if next_page_token.is_none() {
-                        break;
-                    }
-                    debug!("Fetching next page...");
-                }
+                Self::walk_by_token(state, &mut walk, &names, updated_id.as_deref()).await
+            }
+        };
+        match walked {
+            Ok(()) => {
+                state.full_pull_done = true;
+                state.last_pull_started = Some(walk.started);
+                Ok(())
+            }
+            Err(e) => {
+                // Cloud's page tokens are not known to outlive a failure: the walk goes on from its first page, still
+                // asking what it first asked.
+                walk.next_page_token = None;
+                state.issue_walk = Some(walk);
+                Err(e)
             }
         }
+    }
 
-        Ok(())
+    /// Server and Data Center: `/rest/api/2/search`, paged by `startAt`.
+    async fn walk_by_offset(
+        op: &str,
+        state: &JiraObserverState,
+        walk: &mut IssueWalk,
+        names: &HashMap<String, String>,
+        updated_id: Option<&str>,
+    ) -> Result<(), ActorProcessingErr> {
+        let endpoint = format!("{}{}", state.jira_url, op);
+        loop {
+            let jql = walk.jql((state.clock)(), state.deployment);
+            let params = vec![
+                ("startAt", walk.start_at.to_string()),
+                ("maxResults", PAGE_SIZE.to_string()),
+                ("expand", "changelog".to_string()),
+                ("jql", jql),
+            ];
+            let url = Url::parse_with_params(&endpoint, params)?;
+            debug!("{url}");
+
+            let res: Value = state.get_json(url.as_str()).await?;
+            let fetched = publish_issues(&res, names, updated_id, &state.tcp_client).await?;
+            walk.published += fetched;
+            let total = res["total"].as_u64().map(|t| t as usize);
+            if total.is_none() && !walk.warned_no_total {
+                warn!(
+                    "{op} answered without a total: reading on to an empty page rather than stopping here"
+                );
+                walk.warned_no_total = true;
+            }
+
+            walk.start_at += fetched;
+            debug!("Loaded {}/{total:?}...", walk.start_at);
+
+            // An empty page ends the walk: with a non-zero total it would otherwise never advance. Without a
+            // total, only an empty page does.
+            if fetched == 0 || total.is_some_and(|total| walk.start_at >= total) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Cloud removed /rest/api/2/search (CHANGE-2046): `/rest/api/3/search/jql`, paged by its next page token; the
+    /// JQL is bounded even for a full pull (`issue_jql`).
+    async fn walk_by_token(
+        state: &JiraObserverState,
+        walk: &mut IssueWalk,
+        names: &HashMap<String, String>,
+        updated_id: Option<&str>,
+    ) -> Result<(), ActorProcessingErr> {
+        let endpoint = format!("{}/rest/api/3/search/jql", state.jira_url);
+        loop {
+            // The enhanced search returns only issue ids unless the
+            // fields are asked for.
+            let mut params = vec![
+                ("jql", walk.jql((state.clock)(), state.deployment)),
+                ("maxResults", PAGE_SIZE.to_string()),
+                ("expand", "changelog".to_string()),
+                ("fields", "*all".to_string()),
+            ];
+            if let Some(token) = &walk.next_page_token {
+                params.push(("nextPageToken", token.clone()));
+            }
+            let url = Url::parse_with_params(&endpoint, params)?;
+            debug!("{url}");
+
+            let res: Value = state.get_json(url.as_str()).await?;
+            walk.published += publish_issues(&res, names, updated_id, &state.tcp_client).await?;
+
+            walk.next_page_token = res["nextPageToken"].as_str().map(str::to_string);
+            match res["isLast"].as_bool() {
+                Some(true) => return Ok(()),
+                Some(false) => {}
+                // Said, not taken for the end: the page token says whether there is more.
+                None => warn!(
+                    "the search answered without isLast: {}",
+                    if walk.next_page_token.is_some() {
+                        "reading on, since it gave a next page"
+                    } else {
+                        "stopping, since it gave no next page"
+                    }
+                ),
+            }
+            if walk.next_page_token.is_none() {
+                return Ok(());
+            }
+            debug!("Fetching next page...");
+        }
+    }
+}
+
+/// An issue pull under way: what it asks, when it began, and how far it has read. Kept in the observer's state while
+/// a page fails, so the next attempt goes on from that page rather than from the first.
+#[derive(Debug, Clone)]
+pub struct IssueWalk {
+    /// What the walk asks, as it was at its start.
+    filter: Filter,
+    /// When the walk began, on the observer's clock: the next incremental pull reaches back to here, and a relative
+    /// filter is reached back by the time since, so its oldest end never moves later while the walk goes on.
+    started: Instant,
+    /// Server and Data Center: the offset of the next page.
+    start_at: usize,
+    /// Cloud: the next page's token.
+    next_page_token: Option<String>,
+    published: usize,
+    warned_no_total: bool,
+}
+
+impl IssueWalk {
+    pub fn new(filter: Filter, started: Instant) -> Self {
+        Self {
+            filter,
+            started,
+            start_at: 0,
+            next_page_token: None,
+            published: 0,
+            warned_no_total: false,
+        }
+    }
+
+    /// The JQL of a page asked at `now`.
+    fn jql(&self, now: Instant, deployment: JiraDeployment) -> String {
+        let filter = self.filter.jql(now.saturating_duration_since(self.started));
+        issue_jql(filter.as_deref(), deployment)
     }
 }
 
@@ -314,6 +393,7 @@ impl Actor for JiraIssueObserver {
                 state.full_pull_done = false;
                 state.start = None;
                 state.last_pull_started = None;
+                state.issue_walk = None;
             }
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetIssues(op) = command {
@@ -334,21 +414,18 @@ impl Actor for JiraIssueObserver {
                                 state.start = Some(start);
                             }
                             Err(why) => {
-                                return state.settle(
-                                    &myself,
-                                    JIRA_ISSUE_OBSERVER,
-                                    Err(JiraError::no_cursor(why).into()),
-                                    Self::tick,
-                                );
+                                return state
+                                    .settle(
+                                        &myself,
+                                        JIRA_ISSUE_OBSERVER,
+                                        Err(JiraError::no_cursor(why).into()),
+                                        Self::tick,
+                                    )
+                                    .map(|_| ());
                             }
                         }
                     }
-                    let started = (state.clock)();
                     let pulled = JiraIssueObserver::pull_issues(&op, state).await;
-                    if pulled.is_ok() {
-                        state.full_pull_done = true;
-                        state.last_pull_started = Some(started);
-                    }
                     state.settle(&myself, JIRA_ISSUE_OBSERVER, pulled, Self::tick)?;
                 }
             }
@@ -385,19 +462,58 @@ pub fn jql_filter(
     now_ms: i64,
     query_date: Option<&str>,
 ) -> Option<String> {
+    walk_filter(full_pull_done, window, start, now_ms, query_date).jql(Duration::ZERO)
+}
+
+/// What an issue pull asks, as [`jql_filter`] says, kept as a value so that a walk can ask it again later.
+pub fn walk_filter(
+    full_pull_done: bool,
+    window: Duration,
+    start: Option<Start>,
+    now_ms: i64,
+    query_date: Option<&str>,
+) -> Filter {
     if full_pull_done {
         let reach = window + Duration::from_secs(INCREMENTAL_OVERLAP_SECS);
-        let minutes = reach.as_millis().div_ceil(60_000);
-        Some(format!("updated >= -{minutes}m"))
+        Filter::Within {
+            minutes: u64::try_from(reach.as_millis().div_ceil(60_000)).unwrap_or(u64::MAX),
+        }
     } else if let Some(Start::Since(newest_ms)) = start {
-        Some(format!(
-            "updated >= -{}m",
-            cursor_minutes(now_ms, newest_ms)
-        ))
+        Filter::Within {
+            minutes: cursor_minutes(now_ms, newest_ms),
+        }
     } else {
         match query_date {
-            Some(date) if !date.is_empty() => Some(format!("updated > {date}")),
-            _ => None,
+            Some(date) if !date.is_empty() => Filter::After(date.to_string()),
+            _ => Filter::Everything,
+        }
+    }
+}
+
+/// What an issue pull asks of Jira's `updated`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filter {
+    /// Every issue.
+    Everything,
+    /// Updated within this many minutes of the walk's start: relative, so the Jira user's time zone does not enter.
+    Within { minutes: u64 },
+    /// Updated after a date (`QUERY_DATE`).
+    After(String),
+}
+
+impl Filter {
+    /// The JQL restricting a page asked `elapsed` after the walk began, if any. A relative filter reaches back by
+    /// `elapsed` as well, rounded up to the minute, so that its oldest end stays where it was at the walk's start:
+    /// Jira measures `-Nm` from when each page is asked, and an oldest end that moved later would drop issues from
+    /// the front of a walk ordered oldest first and shift the rest under its offset, skipping some.
+    pub fn jql(&self, elapsed: Duration) -> Option<String> {
+        match self {
+            Filter::Everything => None,
+            Filter::Within { minutes } => {
+                let reach = u128::from(*minutes) * 60_000 + elapsed.as_millis();
+                Some(format!("updated >= -{}m", reach.div_ceil(60_000)))
+            }
+            Filter::After(date) => Some(format!("updated > {date}")),
         }
     }
 }

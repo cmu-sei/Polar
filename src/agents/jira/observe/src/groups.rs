@@ -62,22 +62,46 @@ impl JiraGroupObserver {
     /// takes is `exclude`, the groups to leave out. So each page asks again leaving out every group already read,
     /// until the picker has none left or as many have been read as it said match. Each group read is in the next
     /// request's address, so a site with very many groups is read only as far as [`MAX_URL_LEN`] allows, logged.
+    ///
+    /// A page that fails leaves what was read in the observer's state ([`GroupWalk`]), and the next attempt goes on
+    /// from that page.
     async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
         state.ensure_token().await?;
         debug!("{op}");
 
-        let endpoint = format!("{}{}", state.jira_url, op);
-        let mut all_groups: Vec<JiraGroup> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut warned_no_total = false;
+        let mut walk = state.group_walk.take().unwrap_or_default();
+        if !walk.groups.is_empty() {
+            info!(
+                "{op}: going on from the {} groups already read",
+                walk.groups.len()
+            );
+        }
+        if let Err(e) = Self::walk(op, state, &mut walk).await {
+            state.group_walk = Some(walk);
+            return Err(e);
+        }
 
+        publish_data(
+            &state.tcp_client,
+            JIRA_GROUPS_CONSUMER_TOPIC,
+            &JiraData::Groups(walk.groups),
+        )
+        .await
+    }
+
+    async fn walk(
+        op: &str,
+        state: &JiraObserverState,
+        walk: &mut GroupWalk,
+    ) -> Result<(), ActorProcessingErr> {
+        let endpoint = format!("{}{}", state.jira_url, op);
         loop {
             let mut params = vec![
                 ("query".to_string(), String::new()),
                 ("maxResults".to_string(), PAGE_SIZE.to_string()),
             ];
             params.extend(
-                all_groups
+                walk.groups
                     .iter()
                     .map(|g| ("exclude".to_string(), g.name.clone())),
             );
@@ -86,9 +110,9 @@ impl JiraGroupObserver {
                 warn!(
                     "{op}: read {} groups and stopped: leaving out that many more makes the request longer than \
                      {MAX_URL_LEN} bytes; the rest are not read",
-                    all_groups.len()
+                    walk.groups.len()
                 );
-                break;
+                return Ok(());
             }
 
             let res: serde_json::Value = state.get_json(url.as_str()).await?;
@@ -100,36 +124,37 @@ impl JiraGroupObserver {
                 })?
             };
             let total = res["total"].as_u64();
-            if total.is_none() && !warned_no_total {
+            if total.is_none() && !walk.warned_no_total {
                 warn!(
                     "{op} answered without a total: reading until it has no group left that was not read"
                 );
-                warned_no_total = true;
+                walk.warned_no_total = true;
             }
 
             // A page with nothing new ends the walk: a site that ignored `exclude` would otherwise answer the same
             // page for ever.
-            let before = all_groups.len();
+            let before = walk.groups.len();
             for group in groups {
-                if seen.insert(group.name.clone()) {
-                    all_groups.push(group);
+                if walk.seen.insert(group.name.clone()) {
+                    walk.groups.push(group);
                 }
             }
-            debug!("{op}: read {} of {total:?} groups", all_groups.len());
-            if all_groups.len() == before
-                || total.is_some_and(|total| all_groups.len() as u64 >= total)
+            debug!("{op}: read {} of {total:?} groups", walk.groups.len());
+            if walk.groups.len() == before
+                || total.is_some_and(|total| walk.groups.len() as u64 >= total)
             {
-                break;
+                return Ok(());
             }
         }
-
-        publish_data(
-            &state.tcp_client,
-            JIRA_GROUPS_CONSUMER_TOPIC,
-            &JiraData::Groups(all_groups),
-        )
-        .await
     }
+}
+
+/// The groups read so far by a walk of the picker that has not finished.
+#[derive(Default)]
+pub struct GroupWalk {
+    groups: Vec<JiraGroup>,
+    seen: HashSet<String>,
+    warned_no_total: bool,
 }
 
 /// How many groups a page asks for; the picker answers at most its autocomplete limit, which may be fewer.

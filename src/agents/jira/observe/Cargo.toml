@@ -31,6 +31,8 @@ base64.workspace = true
 polar-scudo.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
+# Reads a Retry-After given as an HTTP date, and checks QUERY_DATE is a date (lib.rs, settings.rs).
+chrono.workspace = true
 jira_common.workspace = true
 log.workspace = true
 polar.workspace = true

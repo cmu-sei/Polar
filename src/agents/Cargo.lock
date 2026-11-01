@@ -3887,6 +3887,7 @@ dependencies = [
  "base64 0.22.1",
  "cassini-client",
  "cassini-types",
+ "chrono",
  "jira_common",
  "log",
  "polar",

@@ -66,6 +66,60 @@ const TOKEN_REJECTED: &str = "Jira did not accept the token: the request was tre
     matches the site: Data Center/Server personal access token = no JIRA_EMAIL (Bearer); Jira \
     Cloud API token = JIRA_EMAIL set (Basic)";
 
+/// The endpoints that describe the site rather than hold its data: a body from one of them that does not decode is
+/// not a moment's trouble but a site (or something in front of it, such as a sign-in page) that is not the Jira this
+/// observer reads.
+const CONFIGURATION_ENDPOINTS: &[&str] = &[MYSELF_OP, SERVER_INFO_OP, FIELD_OP];
+
+/// The endpoint that says what the site is: its version and its deployment type.
+pub const SERVER_INFO_OP: &str = "/rest/api/2/serverInfo";
+
+/// The endpoint that lists the site's fields, with each one's schema.
+pub const FIELD_OP: &str = "/rest/api/2/field";
+
+/// What a failure means for trying again (docs/architecture/jira.md, "The review before 3.0.0", 5). Every kind is
+/// still retried on the backoff ([`RETRY`]); the kind is what the observer keeps ([`JiraObserverState::failure`]) and
+/// what health is told once it can be (the hook is [`JiraObserverState::settle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The site could not be reached, took too long, answered 5xx or 429, or the state agent did not say where to
+    /// start: trying again may work.
+    Transient,
+    /// The site refuses the credential, or does not let it read what was asked (401 or 403 after the token was
+    /// checked again; anonymously, at once): trying again cannot change that.
+    Credentials,
+    /// The address, or what answers there, is not a Jira this observer reads: 404, 410 or 400, or a body that does
+    /// not decode from an endpoint that describes the site. Trying again cannot change that either.
+    Configuration,
+}
+
+impl FailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureKind::Transient => "transient",
+            FailureKind::Credentials => "credentials",
+            FailureKind::Configuration => "configuration",
+        }
+    }
+
+    /// The kind of failure an answer with `status` is.
+    pub fn of_status(status: StatusCode) -> Self {
+        match status.as_u16() {
+            401 | 403 => FailureKind::Credentials,
+            400 | 404 | 410 => FailureKind::Configuration,
+            _ => FailureKind::Transient,
+        }
+    }
+}
+
+/// An observer's last failure, by kind, with what it said (the request by its path; never the site's address or
+/// the credential). Kept until a pull succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub message: String,
+}
+
 /// A pull that failed in talking to Jira: the site refused or could not be reached, answered
 /// with an error status, took too long, sent a body that does not decode, or did not accept
 /// the token. The observer logs it and tries again later; it does not fail for it. The message
@@ -73,24 +127,44 @@ const TOKEN_REJECTED: &str = "Jira did not accept the token: the request was tre
 #[derive(Debug)]
 pub struct JiraError {
     message: String,
+    kind: FailureKind,
+    /// How long the site asked to be left alone (`Retry-After` on a 429 or a 503).
+    retry_after: Option<Duration>,
     token_rejected: bool,
     no_cursor: bool,
 }
 
 impl JiraError {
+    /// A failure that may pass: [`FailureKind::Transient`].
     pub fn new(message: String) -> Self {
+        Self::of_kind(message, FailureKind::Transient)
+    }
+
+    pub fn of_kind(message: String, kind: FailureKind) -> Self {
         Self {
             message,
+            kind,
+            retry_after: None,
             token_rejected: false,
             no_cursor: false,
         }
     }
 
+    /// A request to `path` answered with `status`, and the `Retry-After` it gave, if any.
+    pub fn status(path: &str, status: StatusCode, retry_after: Option<Duration>) -> Self {
+        Self {
+            retry_after,
+            ..Self::of_kind(
+                format!("{path} returned {status}"),
+                FailureKind::of_status(status),
+            )
+        }
+    }
+
     fn rejected_token(message: String) -> Self {
         Self {
-            message,
             token_rejected: true,
-            no_cursor: false,
+            ..Self::of_kind(message, FailureKind::Credentials)
         }
     }
 
@@ -98,9 +172,8 @@ impl JiraError {
     /// failed pull is, without anything having been asked of Jira.
     pub fn no_cursor(message: String) -> Self {
         Self {
-            message,
-            token_rejected: false,
             no_cursor: true,
+            ..Self::new(message)
         }
     }
 
@@ -108,6 +181,31 @@ impl JiraError {
     pub fn token_rejected(&self) -> bool {
         self.token_rejected
     }
+
+    /// What the failure is, as the request found it: a refused credential is [`FailureKind::Credentials`] here even
+    /// before the token has been checked again ([`JiraObserverState::settle`] decides).
+    pub fn kind(&self) -> FailureKind {
+        self.kind
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+}
+
+/// The wait a `Retry-After` header asks for, given the time now: a number of seconds, or an HTTP date (a date
+/// already past is no wait). `None` for anything else.
+pub fn retry_after(header: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let header = header.trim();
+    if !header.is_empty() && header.bytes().all(|b| b.is_ascii_digit()) {
+        return header.parse().ok().map(Duration::from_secs);
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(header).ok()?;
+    Some(
+        (date.with_timezone(&chrono::Utc) - now)
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 impl std::fmt::Display for JiraError {
@@ -267,6 +365,17 @@ pub struct JiraObserverState {
     /// Whether Jira accepted the token at the last check. It is checked before the first pull
     /// and again before the pull after any failure.
     pub token_checked: bool,
+    /// Whether the token was checked in the pull under way: a credential refused after that is the credential's
+    /// ([`FailureKind::Credentials`]), one refused before it may be a token revoked since, checked again next.
+    pub token_fresh: bool,
+    /// The last failure, by kind, until a pull succeeds.
+    pub failure: Option<Failure>,
+    /// The issue observer's pull under way, kept when a page fails so the next attempt goes on from it.
+    pub issue_walk: Option<issues::IssueWalk>,
+    /// The users observer's walk under way, kept likewise.
+    pub user_walk: Option<users::UserWalk>,
+    /// The groups observer's walk under way, kept likewise.
+    pub group_walk: Option<groups::GroupWalk>,
 }
 
 /// Renders an error together with every cause beneath it. reqwest reports
@@ -307,6 +416,11 @@ impl JiraObserverState {
             clock: Instant::now,
             retry: Retry::new(RETRY),
             token_checked: false,
+            token_fresh: false,
+            failure: None,
+            issue_walk: None,
+            user_walk: None,
+            group_walk: None,
             cursor: None,
             start: None,
             wall_clock: issues::wall_clock_ms,
@@ -364,15 +478,18 @@ impl JiraObserverState {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(JiraError::new(format!("{} returned {status}", request_path(url))).into());
+            return Err(failed_status(&request_path(url), &response).into());
         }
 
         response.json::<T>().await.map_err(|e| {
-            JiraError::new(format!(
-                "could not decode the response from {}: {}",
-                request_path(url),
-                error_chain(&e.without_url())
-            ))
+            JiraError::of_kind(
+                format!(
+                    "could not decode the response from {}: {}",
+                    request_path(url),
+                    error_chain(&e.without_url())
+                ),
+                decode_failure_kind(url),
+            )
             .into()
         })
     }
@@ -406,14 +523,17 @@ impl JiraObserverState {
             return Err(rejected(format!("returned {status}")));
         }
         if !status.is_success() {
-            return Err(JiraError::new(format!("{MYSELF_OP} returned {status}")));
+            return Err(failed_status(MYSELF_OP, &response));
         }
 
         let myself: Value = response.json().await.map_err(|e| {
-            JiraError::new(format!(
-                "could not decode the response from {MYSELF_OP}: {}",
-                error_chain(&e.without_url())
-            ))
+            JiraError::of_kind(
+                format!(
+                    "could not decode the response from {MYSELF_OP}: {}",
+                    error_chain(&e.without_url())
+                ),
+                FailureKind::Configuration,
+            )
         })?;
         account_kind(&myself).ok_or_else(|| rejected("returned no user".to_string()))
     }
@@ -424,22 +544,46 @@ impl JiraObserverState {
             let account = self.check_token().await?;
             info!("Jira accepted the token ({account})");
             self.token_checked = true;
+            self.token_fresh = true;
         }
         Ok(())
     }
 
-    /// Settles a pull and schedules the next. After a success the next pull is a base interval
-    /// away. A failure in talking to Jira ([`JiraError`]) is logged, the token is checked again
-    /// before the next pull, and that pull is the retry's next wait away: Jira being
-    /// unreachable is not the agent being unhealthy, so the observer stays up. Any other error
-    /// is returned and fails the observer, as before.
+    /// The observer's last failure, by kind, until a pull succeeds.
+    pub fn failure(&self) -> Option<&Failure> {
+        self.failure.as_ref()
+    }
+
+    /// What `failure` is for this observer: a credential refused on an endpoint before the token was checked again
+    /// in this pull may be a token revoked since its last check, which the next pull checks first, so it is
+    /// [`FailureKind::Transient`] until then; after a check it is the credential's.
+    fn classify(&self, failure: &JiraError) -> FailureKind {
+        match failure.kind {
+            FailureKind::Credentials if !failure.token_rejected && !self.token_fresh => {
+                FailureKind::Transient
+            }
+            kind => kind,
+        }
+    }
+
+    /// Settles a pull and schedules the next, and returns the wait. After a success the next pull is a base interval
+    /// away and the last failure is cleared. A failure in talking to Jira ([`JiraError`]) is kept by kind
+    /// ([`JiraObserverState::failure`]) and logged (a kind a retry cannot fix at error, with what to check), the
+    /// token is checked again before the next pull, and that pull is the retry's next wait away, or what the site's
+    /// `Retry-After` asked if that is longer (never more than the base interval): Jira being unreachable is not the
+    /// agent being unhealthy, so the observer stays up. Any other error is returned and fails the observer, as before.
+    ///
+    /// HEALTH HOOK (pulled health, the soft-state agents' workstream): this is where an observer's failure is decided
+    /// and cleared. Once the builder's health API takes a domain failure, the observer is given the agent's
+    /// `HealthHandle` in [`JiraObserverArgs`] and reports `self.failure` here: set with its kind and its message on a
+    /// failure, cleared on a success.
     pub fn settle(
         &mut self,
         myself: &ActorRef<JiraObserverMessage>,
         observer: &str,
         pulled: Result<(), ActorProcessingErr>,
         tick: fn() -> JiraObserverMessage,
-    ) -> Result<(), ActorProcessingErr> {
+    ) -> Result<Duration, ActorProcessingErr> {
         let wait = match pulled {
             Ok(()) => {
                 if self.retry.failures() > 0 {
@@ -448,6 +592,7 @@ impl JiraObserverState {
                         self.retry.failures()
                     );
                 }
+                self.failure = None;
                 self.retry.next(true, self.base_interval)
             }
             Err(e) => {
@@ -455,29 +600,76 @@ impl JiraObserverState {
                     return Err(e);
                 };
                 let attempt = self.retry.failures() + 1;
-                let wait = self.retry.next(false, self.base_interval);
+                let backoff = self.retry.next(false, self.base_interval);
+                let wait = match failure.retry_after {
+                    Some(asked) => backoff.max(asked.min(self.base_interval)),
+                    None => backoff,
+                };
+                let kind = self.classify(failure);
+                self.failure = Some(Failure {
+                    kind,
+                    message: failure.to_string(),
+                });
                 if failure.no_cursor {
                     // Nothing was asked of Jira, so the token stands as it was checked.
                     warn!(
                         "{observer}: not pulling yet: {failure}. Asking again in {wait:?} (attempt {attempt})"
                     );
+                    self.token_fresh = false;
                     myself.send_after(wait, tick);
-                    return Ok(());
+                    return Ok(wait);
                 }
                 self.token_checked = false;
-                if failure.token_rejected() {
-                    error!("{observer}: {failure}. Trying again in {wait:?} (attempt {attempt})");
-                } else {
-                    warn!(
+                match kind {
+                    FailureKind::Transient => warn!(
                         "{observer}: pull from Jira failed: {failure}. Trying again in {wait:?} \
                          (attempt {attempt})"
-                    );
+                    ),
+                    FailureKind::Credentials | FailureKind::Configuration => error!(
+                        "{observer}: {failure}. A retry cannot fix this ({}): {}. Trying again in {wait:?} \
+                         (attempt {attempt})",
+                        kind.as_str(),
+                        match kind {
+                            FailureKind::Credentials =>
+                                "the site refuses the credential, or does not let it read this; check the token, \
+                                 the auth mode and the account's permissions",
+                            _ =>
+                                "check JIRA_URL, and that the site is a Jira Server, Data Center or Cloud this \
+                                  observer can read",
+                        }
+                    ),
                 }
                 wait
             }
         };
+        self.token_fresh = false;
         myself.send_after(wait, tick);
-        Ok(())
+        Ok(wait)
+    }
+}
+
+/// The failure an answer that is not a success is, with the `Retry-After` it gave on a 429 or a 503.
+fn failed_status(path: &str, response: &reqwest::Response) -> JiraError {
+    let status = response.status();
+    let asked = (status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::SERVICE_UNAVAILABLE)
+        .then(|| response.headers().get(reqwest::header::RETRY_AFTER))
+        .flatten()
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| retry_after(v, chrono::Utc::now()));
+    JiraError::status(path, status, asked)
+}
+
+/// What a body that does not decode means from `url`: the site's configuration from an endpoint that describes the
+/// site, a moment's trouble from any other.
+fn decode_failure_kind(url: &str) -> FailureKind {
+    let path = Url::parse(url)
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    if CONFIGURATION_ENDPOINTS.iter().any(|op| path.ends_with(op)) {
+        FailureKind::Configuration
+    } else {
+        FailureKind::Transient
     }
 }
 
@@ -753,6 +945,193 @@ mod tests {
                 .contains(gone.trim_start_matches("http://")),
             "{error}"
         );
+    }
+
+    /// What the status of a failed request means for trying again.
+    #[tokio::test]
+    async fn a_failed_request_is_classified_by_what_a_retry_could_change() {
+        use FailureKind::*;
+        for (status, kind) in [
+            (401, Credentials),
+            (403, Credentials),
+            (404, Configuration),
+            (410, Configuration),
+            (400, Configuration),
+            (429, Transient),
+            (500, Transient),
+            (502, Transient),
+            (503, Transient),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let s = state(server.uri(), bearer()).await;
+            let error = s
+                .get_json::<Value>(&format!("{}/rest/api/2/project", server.uri()))
+                .await
+                .unwrap_err();
+            let error = error.downcast_ref::<JiraError>().unwrap();
+            assert_eq!(error.kind(), kind, "{status}");
+        }
+    }
+
+    /// A body that does not decode is the site's configuration when it comes from an endpoint that describes the
+    /// site (its fields, its version, the credential's user); from a search it may be a moment's trouble.
+    #[tokio::test]
+    async fn a_malformed_body_is_configuration_only_from_an_endpoint_that_describes_the_site() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>sign in</html>"))
+            .mount(&server)
+            .await;
+        let s = state(server.uri(), bearer()).await;
+        for (endpoint, kind) in [
+            ("/rest/api/2/field", FailureKind::Configuration),
+            ("/rest/api/2/serverInfo", FailureKind::Configuration),
+            ("/rest/api/2/search", FailureKind::Transient),
+        ] {
+            let error = s
+                .get_json::<Value>(&format!("{}{endpoint}", server.uri()))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<JiraError>().unwrap().kind(),
+                kind,
+                "{endpoint}"
+            );
+        }
+        let error = s.check_token().await.unwrap_err();
+        assert_eq!(error.kind(), FailureKind::Configuration);
+    }
+
+    #[test]
+    fn retry_after_is_read_as_seconds_or_as_a_date() {
+        let now = chrono::DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(retry_after("120", now), Some(Duration::from_secs(120)));
+        assert_eq!(retry_after(" 0 ", now), Some(Duration::ZERO));
+        assert_eq!(
+            retry_after("Wed, 21 Oct 2015 07:30:30 GMT", now),
+            Some(Duration::from_secs(150))
+        );
+        // A date already past is now.
+        assert_eq!(
+            retry_after("Wed, 21 Oct 2015 07:00:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        for nonsense in ["", "soon", "-5", "1.5"] {
+            assert_eq!(retry_after(nonsense, now), None, "{nonsense:?}");
+        }
+    }
+
+    /// Takes the observer messages a settled pull schedules, and drops them.
+    struct Ticks;
+
+    #[async_trait]
+    impl Actor for Ticks {
+        type Msg = JiraObserverMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    fn tick() -> JiraObserverMessage {
+        JiraObserverMessage::Resync
+    }
+
+    /// The observer keeps what its last failure was, by kind, until a pull succeeds. A credential the site refuses on
+    /// an endpoint is the credential's only once the token has been checked again: before that it may be a token
+    /// revoked since its check, and the next pull checks it first.
+    #[tokio::test]
+    async fn the_observer_keeps_the_kind_of_its_last_failure_until_a_pull_succeeds() {
+        let (ticks, _) = Actor::spawn(None, Ticks, ()).await.unwrap();
+        let mut s = state("http://jira.invalid".into(), bearer()).await;
+        let forbidden = || -> ActorProcessingErr {
+            JiraError::status("/rest/api/2/project", StatusCode::FORBIDDEN, None).into()
+        };
+
+        // The token was checked in this very pull: the refusal is the credential's.
+        s.token_checked = true;
+        s.token_fresh = true;
+        s.settle(&ticks, "test", Err(forbidden()), tick).unwrap();
+        assert_eq!(s.failure().map(|f| f.kind), Some(FailureKind::Credentials));
+        assert!(!s.token_checked, "checked again before the next pull");
+
+        // A success clears it.
+        s.settle(&ticks, "test", Ok(()), tick).unwrap();
+        assert!(s.failure().is_none());
+
+        // The token was last checked in an earlier pull: not yet the credential's, but a moment's.
+        s.token_checked = true;
+        s.token_fresh = false;
+        s.settle(&ticks, "test", Err(forbidden()), tick).unwrap();
+        assert_eq!(s.failure().map(|f| f.kind), Some(FailureKind::Transient));
+
+        // A site that is down, and a 404, as they are.
+        s.settle(
+            &ticks,
+            "test",
+            Err(JiraError::status("/rest/api/2/project", StatusCode::BAD_GATEWAY, None).into()),
+            tick,
+        )
+        .unwrap();
+        assert_eq!(s.failure().map(|f| f.kind), Some(FailureKind::Transient));
+        s.settle(
+            &ticks,
+            "test",
+            Err(JiraError::status("/rest/api/2/project", StatusCode::NOT_FOUND, None).into()),
+            tick,
+        )
+        .unwrap();
+        let failure = s.failure().unwrap();
+        assert_eq!(failure.kind, FailureKind::Configuration);
+        assert!(
+            failure.message.contains("/rest/api/2/project"),
+            "{}",
+            failure.message
+        );
+        ticks.stop(None);
+    }
+
+    /// The wait after a failure is the backoff's, or what the site's `Retry-After` said if that is longer, but never
+    /// longer than the base interval.
+    #[tokio::test]
+    async fn retry_after_lengthens_the_wait_up_to_the_base_interval() {
+        let (ticks, _) = Actor::spawn(None, Ticks, ()).await.unwrap();
+        let mut s = state("http://jira.invalid".into(), bearer()).await;
+        let limited = |secs: u64| -> ActorProcessingErr {
+            JiraError::status(
+                "/rest/api/2/search",
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(Duration::from_secs(secs)),
+            )
+            .into()
+        };
+        assert_eq!(
+            s.settle(&ticks, "test", Err(limited(120)), tick).unwrap(),
+            Duration::from_secs(120)
+        );
+        // The backoff's second wait (60 s) is longer than one second.
+        assert_eq!(
+            s.settle(&ticks, "test", Err(limited(1)), tick).unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            s.settle(&ticks, "test", Err(limited(86_400)), tick)
+                .unwrap(),
+            Duration::from_secs(1800)
+        );
+        ticks.stop(None);
     }
 
     #[test]
