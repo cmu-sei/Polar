@@ -301,6 +301,24 @@ mod tests {
         assert_eq!(anonymous.credential_host, None);
     }
 
+    /// u7c's settings (infra/targets/sandbox-local/config.nuon): Apache's Jira, read anonymously as a Server, the
+    /// first pull of an empty graph from 2026-10-31. They start the observers.
+    #[test]
+    fn u7c_s_settings_for_apache_s_jira_start_the_observers() {
+        let prepared = prepare(&config_of(&[
+            ("JIRA_URL", "https://issues.apache.org/jira"),
+            ("JIRA_ANONYMOUS", "true"),
+            ("JIRA_DEPLOYMENT", "server"),
+            ("QUERY_DATE", "2026-10-31"),
+        ]))
+        .unwrap();
+        assert_eq!(prepared.jira_url, "https://issues.apache.org/jira");
+        assert!(prepared.anonymous);
+        assert_eq!(prepared.credential_host, None);
+        assert_eq!(prepared.deployment, JiraDeployment::ServerOrDataCenter);
+        assert_eq!(prepared.query_date.as_deref(), Some("2026-10-31"));
+    }
+
     /// The credential is the `credentials` runtime section, opened by the CryptoActor: the agent needs encryption,
     /// and declares the section.
     #[test]

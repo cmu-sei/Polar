@@ -123,10 +123,16 @@
     # The state agent's writer (pulled health, docs/architecture/soft-state.md), which presents its one client
     # certificate to Neo4j too (graph-write).
     soft-state-processor: { issuer: "credentials-agent" }
+    # Apache's Jira, a public Data Center (deploymentType "Server"), read anonymously: no credential section is
+    # signed for it, and the users observer is not started (a Data Center lists users only to a login). QUERY_DATE
+    # bounds the first pull of an empty graph to the issues updated since 2026-10-31 (docs/architecture/jira.md).
     jira-observer: {
       issuer: "credentials-agent"
       env: [
-        { name: "JIRA_URL", value: "https://example.atlassian.net" }
+        { name: "JIRA_URL", value: "https://issues.apache.org/jira" }
+        { name: "JIRA_ANONYMOUS", value: "true" }
+        { name: "JIRA_DEPLOYMENT", value: "server" }
+        { name: "QUERY_DATE", value: "2026-10-31" }
       ]
     }
   }
