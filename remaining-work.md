@@ -841,9 +841,13 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   and its client sends the message again while later ones go on: a mechanism read, not reproduced. Test first: a
   publisher refused for now mid-stream, then its order at the subscriber. Also to settle: why a producer's own selftest
   subscription stalls at all while it publishes.
-- [ ] u7c has no Jira: jira-observer ends at once (`JIRA_URL is still the example placeholder`), the pod's rule restarts
-  every container, and each restart's new custodian key waits out the renewal rule, so it loops every five minutes.
-  Correct behaviour for a missing setting; set `workloads.jira-observer.env` for u7c or leave it scaled to 0.
+- [ ] SEEN AGAIN 2026-11-01 on u7c, which has no Jira: jira-observer ends at once (`JIRA_URL is still the example
+  placeholder`), the pod's rule restarts every container, and each restart's new custodian key waits out the renewal
+  rule, so it loops every five minutes. NOT correct behaviour: the maintainer decided on 2026-10-30, after the same loop,
+  that a `Configuration` or `Credentials` reason keeps the agent up, reporting and no longer retrying ("HEALTH IN THE
+  GRAPH, PULLED", below). Only the run-time half was built that day (Jira errors retried with backoff, `jira.md`); the
+  start-time configuration refusal still ends the process, and waits on that item, which was queued after the
+  backpressure merge and not started.
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
