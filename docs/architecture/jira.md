@@ -139,3 +139,45 @@ then what each pattern means. It never prints the host, URL, email or token (INF
   open: pagination by `startAt` can skip an issue updated during a pull, as before; and a graph whose issues were all written before jira-processor wrote `updated_ms` answers that
   none has it, so the first start after the upgrade pulls everything (or from `QUERY_DATE`) once, as before.
 - A failed container's cause outlives it only if written to a volume that survives the in-place restart.
+
+## The review before 3.0.0 (2026-11-01)
+
+A read-only review of both agents, ranked, with two claims checked against a real Data Center (`issues.apache.org/jira`,
+anonymous, one request each). Paths under `src/agents/jira/`. Nothing here is fixed yet.
+
+1. **A start-time configuration refusal ends the process and the pod loops** (`observe/src/agent.rs:85`; the decided
+   split, remaining-work.md "HEALTH IN THE GRAPH, PULLED", is unbuilt for start).
+2. **Changelog authors without an email drop the whole issue.** `JiraAuthor` requires `emailAddress`
+   (`common/src/types.rs:79-91`); CHECKED: Apache's changelog authors carry `name`, `key`, `displayName`, `avatarUrls`,
+   `active`, `timeZone`, `self` and no email, as any site that hides email does. `handle_issue`
+   (`process/src/issues.rs:458-463`) logs a warning without the key and returns `Ok`: nothing written, nothing unhealthy.
+   On Cloud also: users have only `accountId` (`JiraUser`, `JiraAuthor` require `name` and `key`), and
+   `/rest/api/3/search/jql` returns rich text as ADF, which `FieldValue`'s five fixed tiers (`types.rs:118-188`) cannot
+   hold, so a non-empty description fails to decode.
+3. **A field name the graph refuses loses the issue for good.** Field names are sanitized, not validated
+   (`process/src/issues.rs:184-199`); `validate_cypher_identifier` (`lib/src/graph/controller.rs:133-150`) refuses `.`,
+   `:`, `'`, `&` and non-ASCII, and the issue's upsert is op 0 of one transaction, so one bad name (`Est. hours`,
+   `Fälligkeitsdatum`) fails it, unretried. The cursor then passes over it, since newer issues are written.
+4. **Pagination:** the group picker takes no `startAt` (`observe/src/groups.rs:66-94`): it re-fetches the first page
+   and never sees later groups; the user picker's `query=''`: CHECKED, Apache answers 404, so the users observer backs
+   off forever on that Data Center; a missing `total` (DC) or `isLast` (Cloud) ends a walk after one page, unlogged.
+   The deployment guess (`observe/src/lib.rs:215-229`) can be replaced: `serverInfo` carries `deploymentType` (CHECKED:
+   `Server` on all four public Data Centers); `/rest/api/2/search/jql` does not exist on Data Center (CHECKED: 404).
+5. **Every non-2xx is one retry** (`observe/src/lib.rs:362-378`, `settle` :436): 404, 410, a refused token, a malformed
+   body back off forever and never reach health; 429's `Retry-After` is ignored; a failure on page N restarts at page 0.
+6. **The processor's shutdown drops queued writes:** `stop_and_wait` (`process/src/supervisor.rs:286-305`) is served
+   before ordinary messages, so ops still in the graph controller's mailbox are lost at each rejuvenation;
+   `drain_and_wait` keeps them. Writes while Neo4j is down are dropped, not retried. MERGE keeps every write repeatable,
+   but never removes an old `ASSIGNED` edge or a cleared field's property.
+7. **Start validation lets through:** a mistyped `JIRA_DEPLOYMENT` (falls back to the guess), `QUERY_DATE` unchecked and
+   unquoted in the JQL (a time gives a 400, retried forever), the shipped placeholder `JIRA_EMAIL`
+   `jira-user@example.org` (a Data Center then gets Basic auth, refused forever).
+8. **English display names:** the processor finds assignee, reporter, creator, type and project by display name
+   (`process/src/issues.rs:236-278`), so on a site in another language those edges are not written (the cursor is
+   language-safe; the "another language works too" above is about the cursor only).
+9. **Tests:** no multi-page walk, no 429, no realistic issue JSON through `JiraIssue`, no graph write, nothing end to
+   end; the fake site in `observe/tests/observers.rs` serves issues without `changelog`, and the u7c fake is not
+   committed.
+
+Stale here: egress is built (`polar::egress`; `PROXY_CA_CERT` is gone, the section is `POLAR_EGRESS_*`), and the cursor
+was seen on a cluster (soft-state.md, "Seen on a cluster" and "The rebuild, seen on a cluster").
