@@ -28,7 +28,9 @@ written, not an explicit cursor node). BUILT 2026-10-30, then REVIEWED by the ma
 (below, "Revised by the maintainer's review" for why, "As built" for what): the floor a signed runtime section seeded
 from the scaffolds, a `StateActor` in the builder, the `soft-state` capability computed by the builder. Unit-,
 property- and Neo4j-container-tested, its image built; the rebuild has not run on a cluster (the first build has,
-"Seen on a cluster"). The writer half is not built. Paths are relative to `src/agents/`. First user: the Jira
+"Seen on a cluster"). The writer half, `soft-state-processor`, was BUILT 2026-11-01 for pulled health ("As built:
+pulled health"), unit-, property- and Neo4j-container-tested, its image built, not yet run on a cluster; self-state
+writes (`StateHandle::put`) are not built. Paths are relative to `src/agents/`. First user: the Jira
 observer's issue cursor (`jira.md`, "What it does at start").
 
 ## What it is for
@@ -61,9 +63,10 @@ for all of them, and decides each request by WHO asks against the graph schema t
 
 One workload, `soft-state-observer` (`soft-state/observe`), a graph READER only. It needs a new capability `graph-read`
 (the graph section and client certificate of `graph-write`, without `expects_graph` in the health check), since none
-exists (`polar-agent-builder/src/capability.rs:41-50`). The writer half (`soft-state-processor`) waits for a first
+exists (`polar-agent-builder/src/capability.rs:41-50`). The writer half (`soft-state-processor`) waited for a first
 writer: the Jira cursor is derived from issues jira-processor already writes, so it needs no new writes, and the git
-checkpoints (git-controller.md, "Status and checkpoints") read the `POINTS_TO` edges the git processor writes.
+checkpoints (git-controller.md, "Status and checkpoints") read the `POINTS_TO` edges the git processor writes. Its first
+writer is pulled health, built 2026-11-01 ("As built: pulled health").
 
 Requests are closed, typed operations, never Cypher from the asker. Labels and property names cannot be Cypher
 parameters, so the observer accepts only a label in the asker's allowed set and a property matching
@@ -249,6 +252,96 @@ Decided where the review was silent (by the agent that rebuilt it; to confirm):
 The first build's decisions are in "The as-built decisions, reviewed" above; its floor variable, readers variable,
 `Over::StateReaders` and second scaffold pass are gone.
 
+## As built: pulled health (2026-11-01)
+
+Built in a worktree on main `2e76cc2d`, as decided in "Revised by the maintainer's review"; tested (unit, property,
+Neo4j container) and the images built, not yet run on a cluster. Paths relative to `src/agents/`.
+
+- **The report** (`polar-health/src/report.rs`). `HealthReport { status, phase, reason, message, cassini_connected,
+  graph_connected, expects_graph, counters, uptime_secs }`, rkyv on the wire, serde for the file's readers. `status`
+  is `ReportStatus`: `Starting | Healthy | Degraded | Unhealthy | Draining`. `reason` is `HealthReason`: `Broker`,
+  `Graph`, `Dependency`, `Internal` (`restart_helps()`: the verdict ends the agent as before) and `Configuration`,
+  `Credentials` (a restart does not help). `counters` are the health actor's own (`HealthCounters`: Cassini
+  disconnects, graph operations failed, topics refused now, health-file writes failed in a row); a domain's counts are
+  domain facts and are not here. The message is `sanitize`d: one line, at most `MAX_MESSAGE_CHARS` (200), each secret
+  value of the agent in force (`polar_env::Config::secret_values`, at least `MIN_SECRET_CHARS`) and the shapes a
+  credential takes (a PEM block, a URL's user information, the word after `Bearer`/`Basic`, the value of a name such as
+  `password=`, `token:`) withheld; a message that would still carry a secret is not sent (`None`).
+- **The machine** (`polar-health/src/machine.rs`, `HealthMachine::report`): `Draining` once a verdict is given (its
+  reason the verdict's: `Broker` for the Cassini deadline, `Graph` for the graph's, `Internal` for the certificate's,
+  the health file's or custody's; none for a rejuvenation) or once the supervisor begins to end the agent for a
+  reason of its own (`HealthCheckMessage::Draining`); then `Unhealthy` with the held reason while a standing problem is
+  held; then `Starting` until the connections the agent counts have all been up once, `Unhealthy` (`Broker` or `Graph`)
+  when one drops after; `Degraded` (`Graph`) for an agent that reads the graph without depending on it while it is
+  down (the state agent's reader); else `Healthy`.
+- **A standing problem** (the typed, declared API a domain reports through, as it sends `GraphOpFailed`):
+  `HealthHandle::hold(HoldReason::Configuration | HoldReason::Credentials, message)` and `HealthHandle::release(reason)`
+  (`polar-agent-builder/src/health.rs`), messages `HealthCheckMessage::Hold`/`Release`. A hold never becomes a verdict:
+  the agent stays up, its health file says `unhealthy` (the probe judges only its age), its report says why, and it
+  still rejuvenates; the domain stops retrying what cannot work. `polar_agent_builder::held::stay_up` (`held.rs`) is
+  the start-time form: an agent whose own configuration cannot work starts its infrastructure and no domain, holds
+  the problem, answers health queries, and ends only by its health actor's verdict or a signal.
+- **The question and the answer** (`polar-agent-builder/src/health_query.rs`). The `agent` rule implies, for every
+  Cassini client, subscribe `agent.<name>.health` and publish `polar-health-replies` (`topics.rs`, `implied_by`; the
+  answer is caused by the question), so the broker's floor, the certificates and the agent's own set have them. The
+  builder subscribes for every client (`infrastructure.rs`, `spawn_client_parts`) and hands each question to the
+  InfrastructureSupervisor (`HealthQuery`), which answers off its thread: the request gate (Cedar `Action::"request"`
+  on `Request::"agent.<name>.health"` for the broker-stamped `published_by`; where policy is silent, none is loaded or
+  none runs, the floor; a policy that cannot be consulted refuses), then the health actor's report
+  (`HealthCheckMessage::Report`), its message cleaned of the secrets in force, published with the agent's identity
+  (`share_identity`) and `OfflineBehavior::Drop`. The floor admits `soft-state-processor` of the agent's own namespace
+  and domain (`writer_identity`), exactly; `context.declared` is true for it. No heartbeat timer in any agent.
+- **The writer** (`soft-state/process`, workload `soft-state-processor`, `NEEDS [GraphWrite]`, owns `AgentHealth`).
+  Its set of agents asked is its signed runtime section `agents` (`expected.rs`: `{ workloads: [{ workload, identity
+  }] }`, judged as `schema` is), seeded by `infra/seed.nu` from the catalog (`resolve.nu health-agents`: every `agent`
+  kind the target's family serves, by identity) and changed by a signed version. Every
+  `POLAR_HEALTH_ASK_INTERVAL_SECS` (60) it opens a round: one `HealthQuery` with the round's correlation id on
+  `agent.<w>.health` for each expected workload in its deployed family (its `TopicSet`: the family over
+  `POLAR_SERVED_WORKLOADS`); it alone subscribes to `polar-health-replies`, and an answer counts only with the round's
+  id and stamped with an expected identity exactly (`supervisor.rs`, `Round::accept`). After
+  `POLAR_HEALTH_ANSWER_TIMEOUT_SECS` (10, less than the interval) the round closes (`classify.rs`): answering (its
+  report), unresponsive (asked, no answer), or unreachable (named by `agents`, outside the deployed family: drift,
+  warned). Each workload's history (`history.rs`) records a transition when its state or reason changes, at most
+  `MAX_TRANSITIONS` (20), oldest first; the round is one `UpsertNodes` of `(:AgentHealth {workload})` with `identity`,
+  `state`, `observed_at_ms`, the transitions (JSON strings), and, for an answer, the report's fields and
+  `answered_at_ms` (an unresponsive round leaves them as the last answer said) (`graph.rs`). The histories are read
+  back from the graph before the first round, so a restart keeps them. Before a version of `agents` arrives no one
+  is asked.
+- **jira-observer** (`jira/observe/src/agent.rs`, `prepare`): a placeholder or malformed `JIRA_URL`, or any other
+  configuration error at its start, is held as `Configuration` through `held::stay_up`, instead of ending the process
+  (which, with the pod's `RestartAllContainers` rule and the renewal rule, looped every five minutes).
+- **Infra.** `config/workloads/soft-state.nuon` (pool `writers`), `images.nuon`, `soft-state/package.nix`
+  (`processorImage`) and `container-processor.{dhall,nix}`, the targets' resource lists and issuer entries, `seed.nu`
+  (a computed body names its `resolve` command; `computed`), `up.nu` `step_seed` (asks each computed document's
+  command), `graph.nu` `health_agents`.
+
+Decided where the design was silent (by the agent that built it; to confirm):
+
+1. **A new workload, `soft-state-processor`, not part of soft-state-observer.** This doc names a writer half
+   `soft-state-processor`; the pairs' precedent keeps reading and writing apart (the reader is `graph-read`, which
+   keeps no dependency on the graph and so answers `Unavailable` while it is down; a writer is `graph-write`, ended by
+   its health actor when the graph is gone past its deadline); and a separate identity is what Neo4j roles would bind
+   a read-only and a writing credential to. Both hold the graph password, so both are on the writers' pool.
+2. **The floor of the request gate** is the state agent's writer of the asked agent's own namespace and domain, as
+   the StateActor believes only the reader of its own (`state_agent_identity`); Cedar can permit anyone else.
+3. **A standing problem is `Unhealthy`, not `Degraded`**: the agent cannot do its job at all. It is written
+   `unhealthy` in the health file too (informational; the probe judges age only), and it does not stop rejuvenation.
+4. **The verdicts' reasons:** the certificate's hard threshold, a health file that cannot be written and custody are
+   `Internal`; `Dependency` is defined and not yet given by any verdict.
+5. **`Degraded` only for the graph** of an agent that does not depend on it; refused topics and waiting for
+   dependencies' certificates are not degraded (refusals are counted, the phase says `waiting_for_deps`).
+6. **The seed is the `agent` kind of the target's served workloads**: a run (the load harness) ends by design and
+   would be unresponsive. The broker and cert-issuer are not Cassini clients and are not asked ("Services that are not
+   Cassini clients").
+7. **An answer that cannot go now is dropped** (`OfflineBehavior::Drop`, both ways): it would arrive after its round.
+8. **The message is cleaned at the edge** with the secrets in force at that moment, and at the hold with the shapes
+   only; values of fewer than four characters are not looked for.
+9. **The histories are read back at start and no round is written until they are**, rather than writing over them
+   with a short history.
+10. **jira-observer holds any error from `prepare`** (the settings, the address, the egress section) as
+    `Configuration`; a problem `run` judges before `start` (a missing variable) still ends the process with every
+    problem named, since the infrastructure cannot be built on it.
+
 ## Seen on a cluster (u7c, sandbox-local, 2026-10-30), the first build
 
 Against a fake Jira Data Center in its own namespace (120 issues two hours apart, their `updated` alternating `+0000`
@@ -296,6 +389,9 @@ it (`polar-agent-builder/src/state.rs`, `ask_until_available`); a value or a ref
   everything (or from `QUERY_DATE`) once.
 - The rebuild has not run on a cluster: the seeded `schema`, the StateActor and the system field are tested and the
   images built, not deployed. The seed's `resolve.nu state-schema` has run from the workspace's scaffolds only.
-- Health is closest-fit: the health file says `graph_connected: false` with the status healthy; `Degraded` with reason
-  `Graph` waits for health in the graph (remaining-work.md, "HEALTH IN THE GRAPH, PULLED").
-- The writer half (`soft-state-processor`) and the git checkpoints are not built.
+- Health in the graph is built ("As built: pulled health") and not yet seen on a cluster: the seeded `agents`, the
+  rounds, the request gate against the broker's stamped identity, the `AgentHealth` writes, jira-observer held on a
+  placeholder `JIRA_URL`. The state agent's reader now reports `Degraded` with reason `Graph` while the graph is down.
+- Self-state writes (`StateHandle::put`, `changes`) and the git checkpoints are not built.
+- The broker's own health cannot be asked over Cassini (it is not a client); remaining-work.md, "THE BROKER AS A USER
+  OF SOFT STATE".

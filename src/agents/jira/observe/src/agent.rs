@@ -27,7 +27,9 @@
 use crate::settings::{self, JiraSettings};
 use crate::supervisor::{ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET};
 use crate::{JiraAuth, JiraDeployment};
-use polar_agent_builder::{Cause, Configured, GraphDecl, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{
+    Cause, Configured, GraphDecl, HoldReason, PolarAgent, StartError, TopicDecl,
+};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -39,6 +41,38 @@ const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
 const BASE_INTERVAL_SECS: u64 = 1800;
 
 pub struct JiraObserver;
+
+/// What the observers are started with, made from the configuration.
+struct Prepared {
+    jira_url: String,
+    auth: JiraAuth,
+    deployment: JiraDeployment,
+    egress: polar::egress::Egress,
+    query_date: Option<String>,
+}
+
+/// The observers' settings from `config`, or why they cannot work: an address that cannot be the site's (the
+/// placeholder), or any other configuration error. Never a secret's value: polar-env never shows one.
+fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
+    // Declared and judged with the rest of the configuration, so a missing address or token
+    // was reported before this point, with every other problem.
+    let settings = JiraSettings::read(config).map_err(|e| e.to_string())?;
+    let jira_url = settings::normalise_jira_url(&settings.url)?;
+    if settings::token_looks_base64(&settings.token) {
+        warn!(
+            "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
+             text. Jira expects the token itself; check that the Secret was not encoded twice \
+             (a Secret's data is base64 already, its stringData is not)"
+        );
+    }
+    Ok(Prepared {
+        auth: JiraAuth::from_parts(settings.email, settings.token),
+        deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &jira_url),
+        jira_url,
+        egress: polar::egress::Egress::read(config).map_err(|e| e.to_string())?,
+        query_date: settings.query_date,
+    })
+}
 
 impl PolarAgent for JiraObserver {
     const NAME: &'static str = crate::BROKER_CLIENT_NAME;
@@ -92,25 +126,27 @@ impl PolarAgent for JiraObserver {
     async fn start(configured: Configured) -> Result<(), StartError> {
         configured.init_logging(JIRA_OBSERVER_SUPERVISOR);
 
-        // Declared and judged with the rest of the configuration, so a missing address or token
-        // was reported before this point, with every other problem.
-        let settings = JiraSettings::read(configured.config())?;
-        // An address that cannot be the site's is a configuration error, and ends the start
-        // with what to set.
-        let jira_url = settings::normalise_jira_url(&settings.url)?;
-        if settings::token_looks_base64(&settings.token) {
-            warn!(
-                "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
-                 text. Jira expects the token itself; check that the Secret was not encoded twice \
-                 (a Secret's data is base64 already, its stringData is not)"
-            );
-        }
+        // A configuration that cannot work (the placeholder address) is not fixed by starting again: the agent stays
+        // up with its infrastructure only, says why when it is asked about its health, and starts no observer
+        // (docs/architecture/soft-state.md, "As built: pulled health").
+        let prepared = match prepare(configured.config()) {
+            Ok(prepared) => prepared,
+            Err(why) => {
+                return polar_agent_builder::held::stay_up(
+                    configured,
+                    crate::BROKER_CLIENT_NAME,
+                    HoldReason::Configuration,
+                    why,
+                )
+                .await;
+            }
+        };
         let args = ObserverSupervisorArgs {
-            auth: JiraAuth::from_parts(settings.email, settings.token),
-            deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &jira_url),
-            jira_url,
-            egress: polar::egress::Egress::read(configured.config())?,
-            query_date: settings.query_date,
+            auth: prepared.auth,
+            deployment: prepared.deployment,
+            jira_url: prepared.jira_url,
+            egress: prepared.egress,
+            query_date: prepared.query_date,
             // TODO: read this from configuration
             base_interval: BASE_INTERVAL_SECS,
             configured,
@@ -139,6 +175,32 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(JiraObserver);
+
+    fn config(url: &str) -> polar_env::Config {
+        let env: std::collections::HashMap<String, String> =
+            [("JIRA_URL", url), ("JIRA_TOKEN", "t0ken-not-shown")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        polar_env::Config::builder(&env)
+            .register(&settings::SECTION)
+            .register(&polar::egress::SECTION)
+            .build()
+    }
+
+    /// The placeholder address is a configuration problem the agent holds, and says, rather than a reason to end.
+    #[test]
+    fn the_placeholder_address_is_a_configuration_problem_with_what_to_set() {
+        let why = match prepare(&config("https://example.atlassian.net")) {
+            Ok(_) => panic!("the placeholder was taken"),
+            Err(why) => why,
+        };
+        assert!(why.contains("example placeholder"), "{why}");
+        assert!(why.contains("workloads.jira-observer.env"), "{why}");
+        assert!(!why.contains("t0ken-not-shown"));
+        let prepared = prepare(&config("https://jira.example.org")).unwrap();
+        assert_eq!(prepared.jira_url, "https://jira.example.org");
+    }
 
     /// The render writes the target's egress setting only into an agent that declares the section.
     #[test]
