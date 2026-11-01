@@ -65,6 +65,7 @@ let Spec =
       , mounts : List A.MountEntry
       , ports : List Natural
       , placement : Optional { key : Text, pool : Text }
+      , memory : Optional { request : Text, limit : Text }
       }
 
 in  { Spec, VolumeEntry }

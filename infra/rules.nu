@@ -229,6 +229,34 @@ export def placement_problems [declared: any, pool: any, who: string]: nothing -
     }
 }
 
+# The bytes a memory quantity of the catalog's form names: whole bytes, or a whole number of Ki, Mi, Gi or Ti (the
+# binary units the cgroup counts in); null for anything else.
+export def memory_bytes [quantity: any]: nothing -> any {
+    if ($quantity | describe) != "string" { return null }
+    let parsed = ($quantity | parse --regex '^(?<n>[0-9]+)(?<unit>Ki|Mi|Gi|Ti)?$')
+    if ($parsed | is-empty) { return null }
+    let unit = ({ "": 1, Ki: 1024, Mi: 1048576, Gi: 1073741824, Ti: 1099511627776 } | get ($parsed.0.unit? | default ""))
+    ($parsed.0.n | into int) * $unit
+}
+
+# What is wrong with `who`'s container memory (`memory`, `{ request, limit }` or null): each a quantity of the catalog's
+# form, and the request no more than the limit (Kubernetes refuses a request over its limit at apply time).
+export def memory_problems [memory: any, who: string]: nothing -> list<string> {
+    if $memory == null { return [] }
+    if ($memory | describe | str starts-with "record") == false {
+        return [$"($who): memory is \{ request, limit \}, each a quantity such as \"1Gi\""]
+    }
+    let request = (memory_bytes ($memory.request? | default null))
+    let limit = (memory_bytes ($memory.limit? | default null))
+    let unread = ([[request $request] [limit $limit]] | where {|p| $p.1 == null } | each {|p|
+        $"($who): its memory ($p.0) is not a quantity of whole bytes, Ki, Mi, Gi or Ti \(such as \"1Gi\"\)"
+    })
+    if ($unread | is-not-empty) { return $unread }
+    if $request > $limit {
+        [$"($who): its memory request, ($memory.request), is over its limit, ($memory.limit)"]
+    } else { [] }
+}
+
 # What is wrong with a pod whose polar-init is asked to fetch the escrow key (`POLAR_INIT_ESCROW_BOOTSTRAP`, from the
 # `encryption` capability) when it has no custody daemon: only the daemon's custodian fetches the escrow key
 # (docs/architecture/key-custody.md, step 9), and polar-init would stop at once. `custody` is whether the pod has the

@@ -30,6 +30,11 @@
     kind: "service"
     # Its node pool, where a target declares placement (docs/architecture/placement.md).
     pool: "core"
+    # Its container's memory (the maintainer, 2026-11-01): the limit is its cgroup's memory.max, which the broker's
+    # memory controller reads for its ceiling, so the budget is bounded by the container and not by half the host's
+    # free memory (docs/architecture/cassini-backpressure.md, "Runtime budget"). The request is the limit, so what the
+    # scheduler sets aside is what the broker may use. The broker's floor of four 64 MiB frames must fit under it.
+    memory: { request: "1Gi", limit: "1Gi" }
     image: "cassini"
     # The crate is not named for the image.
     scaffold_package: "cassini-broker"

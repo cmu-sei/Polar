@@ -544,6 +544,28 @@ grew the budget off its floor.
 `MemTotal` 62 GiB, `MemAvailable` 49 GiB. There the ceiling is the `MemAvailable` share, and pressure comes only from
 `memory.events`, when the file is present.
 
+**The broker's memory limit, 1 GiB** (the maintainer, 2026-11-01; broker-baseline.md, the fifth set: without one the
+ceiling was 27.5 GB on u7c). The catalog gives the broker's container a request and a limit of 1 GiB each
+(`infra/config/workloads/cassini.nuon`, `memory: { request: "1Gi", limit: "1Gi" }`). The request is the limit: no
+convention in the schema said otherwise (no workload set any resources before), and what the scheduler sets aside is then
+what the broker may use. The render takes it as any workload's `memory` (`infra/schema/functions.dhall`, `memoryOf`, in
+both `agent.dhall` and `ca.dhall`; `resolve.nu` refuses a quantity it cannot read or a request over its limit,
+`rules.nu`, `memory_problems`), and a target may give a workload other memory for a machine that has other. The
+container's limit is its cgroup's `memory.max`, which `SystemMemory` reads (`runtime_budget.rs:88`); then:
+- **The floor holds at start:** `memory.max − memory.current`, 1 GiB less the broker's memory at start (tens of MiB),
+  is well over four frames (256 MiB); it would not be once the working memory passed 768 MiB.
+- **The ceiling is the limit less the broker's working memory, not half of it:** `memory.max − (memory.current −
+  held)`, about 1 GiB − 30 MiB = 994 MiB at rest (the fifth set's broker sat at 17 to 22 MB between runs and peaked at
+  56 to 115 MB). The share (½) applies only to the host's `MemAvailable` above its reserve, which on u7c is some 24 GB,
+  so the limit is what bounds it. Tested: `runtime_budget.rs`'s
+  `under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_the_limit_less_its_working_memory`.
+- **For the maintainer:** that ceiling leaves the broker only what is outside the budget at the last sample (one a
+  second) between its budget and the kernel's OOM kill, while a write's copy of a frame, TLS buffers and the uncharged
+  per-message overhead (review finding 6) grow with load. If the ceiling under a limit should be a share of it (half, as
+  the share of `MemAvailable` is), that is a change to the controller, not made here.
+- **Not verified on a cluster:** that u7c's nested rootless cgroup enforces and shows the limit (`memory.max` read
+  `max` there before any limit was set).
+
 **Visible:**
 - The bounds' report (use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the largest
   holders) is the pressure manager's own, every 30 s (`PressureMsg::Report`; `budget_report::report`), and what it

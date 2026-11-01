@@ -369,6 +369,13 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     if ($misplaced | is-not-empty) {
         error make { msg: $"($name): ($misplaced | str join '; ')" }
     }
+    # Its container's memory, the catalog's (or a target's, for a machine that has other memory), checked before the
+    # template is given it.
+    let memory = ($spec.memory? | default null)
+    let memory_wrong = (memory_problems $memory $name)
+    if ($memory_wrong | is-not-empty) {
+        error make { msg: ($memory_wrong | str join '; ') }
+    }
 
     # Services whose certificates the health check still watches but that polar-init does not wait
     # for before the workload starts: one that must be able to start, and serve, while they are down.
@@ -668,6 +675,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         certs: ($certs | get spec)
         custody: (if $custody { $CUSTODY | insert image (image_ref $images $cluster "polar-custody" $name) } else { null })
         placement: (placement_of $declared $pool)
+        memory: (if $memory == null { null } else { { request: $memory.request, limit: $memory.limit } })
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed, config_maps: $egress.config_maps }
         config_map: $config_map
         config_problems: $config_problems

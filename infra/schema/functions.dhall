@@ -237,6 +237,24 @@ let placementOf =
               placement
         }
 
+-- What a workload's container is given of memory: its request, and its limit, which is the container cgroup's
+-- memory.max (what the broker's memory controller reads: docs/architecture/cassini-backpressure.md, "Runtime budget");
+-- without, nothing is set.
+let Memory = { request : Text, limit : Text }
+
+let memoryOf =
+      \(memory : Optional Memory) ->
+        Prelude.Optional.map
+          Memory
+          kubernetes.ResourceRequirements.Type
+          ( \(m : Memory) ->
+              kubernetes.ResourceRequirements::{
+              , requests = Some [ { mapKey = "memory", mapValue = m.request } ]
+              , limits = Some [ { mapKey = "memory", mapValue = m.limit } ]
+              }
+          )
+          memory
+
 -- What a workload is (docs/architecture/deployments.md, step 4): a run's Job (`job` some), which the Job controller
 -- replaces; or a Deployment of one, `Recreate` (never two pods of one identity), whose pod restarts in place.
 let Job = { backoff_limit : Natural, ttl_after_finished_secs : Natural }
@@ -315,6 +333,8 @@ let restartOf =
 in  { makeGraphEnv
     , Placement
     , placementOf
+    , Memory
+    , memoryOf
     , Job
     , workloadOf
     , restartOf

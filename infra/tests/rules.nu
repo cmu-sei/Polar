@@ -97,6 +97,29 @@ def main [] {
             assert equal (placement_of { pools: ["core"] } "writers") null
         }
 
+        # A container's memory (the broker's, 2026-11-01: its limit is the memory.max its controller reads): a request
+        # and a limit, each a quantity of whole bytes, Ki, Mi, Gi or Ti, the request no more than the limit.
+        "a workload's memory is a request and a limit, each a quantity, the request no more than the limit": {
+            assert equal (memory_bytes "1Gi") 1073741824
+            assert equal (memory_bytes "512Mi") 536870912
+            assert equal (memory_bytes "4096") 4096
+            for bad in ["1G" "1.5Gi" "-1Gi" "lots" "" 1024] {
+                assert equal (memory_bytes $bad) null $"($bad)"
+            }
+            assert equal (memory_problems null "cassini") []
+            assert equal (memory_problems { request: "1Gi", limit: "1Gi" } "cassini") []
+            assert equal (memory_problems { request: "512Mi", limit: "1Gi" } "cassini") []
+            let over = (memory_problems { request: "2Gi", limit: "1Gi" } "cassini")
+            assert equal ($over | length) 1
+            assert ($over.0 | str contains "cassini") $over.0
+            assert ($over.0 | str contains "over its limit") $over.0
+            let unread = (memory_problems { request: "1Gi", limit: "1G" } "cassini")
+            assert equal ($unread | length) 1
+            assert ($unread.0 | str contains "limit") $unread.0
+            assert equal (memory_problems { limit: "1Gi" } "cassini" | length) 1 "a request is needed"
+            assert equal (memory_problems "1Gi" "cassini" | length) 1 "a record, not a quantity"
+        }
+
         # docs/architecture/deployments.md, step 4: a pod that runs polar-init restarts in place, one at a time.
         "a Deployment whose pod runs polar-init restarts in place, one pod at a time": {
             let rule = { action: "RestartAllContainers", exitCodes: { operator: "NotIn", values: [] } }

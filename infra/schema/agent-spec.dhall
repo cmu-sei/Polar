@@ -115,6 +115,8 @@ let Spec =
       , certs : List Text
       , custody : Optional Custody
       , placement : Optional { key : Text, pool : Text }
+      -- Its container's memory request and limit (Kubernetes quantities), or none: nothing set.
+      , memory : Optional { request : Text, limit : Text }
       }
 
 in  { Spec, EnvEntry, VolumeEntry, MountEntry, InitMountEntry, Probe, Custody }

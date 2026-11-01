@@ -756,9 +756,14 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   backpressure merge. A reply to Blitz was drafted for the maintainer.
 - [ ] FROM THE FIFTH SET (decided by the maintainer 2026-11-01; `docs/architecture/broker-baseline.md`, "The fifth set"):
   - The stall rule ends a subscriber only when it makes NO PROGRESS (acknowledges nothing) for `T_stall`; a slow but
-    acknowledging subscriber is held back by its topic instead (its publishers go at its pace), never ended.
+    acknowledging subscriber is held back by its topic instead (its publishers go at its pace), never ended. DONE
+    2026-11-01, not measured on a cluster (cassini-backpressure.md, "The stall rule ends only a subscriber that makes
+    no progress": the budget still recovers, at the slow subscribers' pace rather than within `T_stall`).
   - The broker's workload gets a memory limit in the catalog, 1 GiB, so the controller's ceiling is real (u7c had none:
-    a ceiling of about 27 GB).
+    a ceiling of about 27 GB). DONE 2026-11-01, not deployed (cassini-backpressure.md, "The broker's memory limit,
+    1 GiB"): request and limit 1 GiB; the ceiling is the limit less the working memory, about 994 MiB, not half of it.
+    FOR THE MAINTAINER: whether the ceiling under a limit should be a share of it, to leave the broker's working memory
+    room before an OOM kill. To verify on u7c: that its nested rootless cgroup enforces and shows `memory.max`.
   - The harness runs several publisher identities, so the controller is exercised (one publisher and one subscriber held
     at most 145 MB, never the budget's 3/4); then the tunables are measured again.
   - Profile where the new broker's CPU goes: 8-20% more per message saturated, up to 45% at set rates; -13% at 64 KiB.

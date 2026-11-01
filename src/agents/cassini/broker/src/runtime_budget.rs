@@ -656,6 +656,64 @@ mod tests {
         assert_eq!(c.budget(), before + t.step);
     }
 
+    /// The broker's container has a 1 GiB limit in the catalog (infra/config/workloads/cassini.nuon, 2026-11-01): the
+    /// controller reads it from the cgroup's `memory.max`, the floor of four frames fits under it at start, and the
+    /// ceiling is the limit less the broker's working memory outside the budget, not a share of it, and well under
+    /// the share of the host's `MemAvailable` that bounded it without one.
+    #[test]
+    fn under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_the_limit_less_its_working_memory()
+     {
+        let t = Tunables::default();
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+        write("memory.max", "1073741824\n");
+        write("memory.current", &format!("{}\n", 30 * MIB));
+        // The host's, as a container sees /proc/meminfo: u7c's 49 GiB free.
+        write(
+            "meminfo",
+            "MemTotal: 65011712 kB\nMemAvailable: 51380224 kB\n",
+        );
+        let memory = SystemMemory {
+            meminfo: dir.path().join("meminfo").display().to_string(),
+            cgroup: dir.path().display().to_string(),
+        };
+        let sample = memory.sample();
+        assert_eq!(sample.limit, Some(GIB), "memory.max, read");
+        assert_eq!(sample.current, Some(30 * MIB));
+        assert_eq!(available_at_start(&sample), Some(GIB - 30 * MIB));
+        assert!(
+            startup_check(&sample, &t, None).is_ok(),
+            "the floor, 256 MiB, fits"
+        );
+
+        let mut c = Controller::new(t.clone(), STALL, None);
+        c.sample(second(0), &sample, 0, 0);
+        let s = c.snapshot(false, 0);
+        assert_eq!(
+            s.ceiling,
+            GIB - 30 * MIB,
+            "the limit less the working memory"
+        );
+        assert!(
+            s.ceiling < 49 * GIB / 2,
+            "under the host's share, which was the ceiling without a limit"
+        );
+        // What the budget holds is in memory.current, and is not working memory: the ceiling stays where it was.
+        let holding = MemorySample {
+            current: Some(30 * MIB + 200 * MIB),
+            ..sample.clone()
+        };
+        c.sample(second(1), &holding, 200 * MIB, 0);
+        assert_eq!(c.snapshot(false, 200 * MIB).ceiling, GIB - 30 * MIB);
+
+        // The floor holds at start only while the working memory leaves it room: 768 MiB of it leaves 256 MiB.
+        let crowded = MemorySample {
+            current: Some(800 * MIB),
+            ..sample
+        };
+        assert!(startup_check(&crowded, &t, None).is_err());
+    }
+
     #[test]
     fn below_the_floor_at_run_time_it_starves_and_recovers() {
         let t = Tunables::default();

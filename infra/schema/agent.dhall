@@ -283,6 +283,7 @@ let render =
                   , image = Some v.image
                   , imagePullPolicy = Some v.pull_policy
                   , securityContext = Some Constants.DropAllCapSecurityContext
+                  , resources = functions.memoryOf v.memory
                   , env = Some env
                   , ports =
                       if    Prelude.List.null Natural v.ports

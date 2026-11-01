@@ -902,6 +902,12 @@ millisecond-scale write for each (a graph write a message, once acknowledgements
 progress within the bound should spare it, or the low water be nearer the high water, is a question of the rule, not of
 its default.
 
+*Decided (the maintainer, 2026-11-01), and built:* the stall rule ends only a subscriber that acknowledges nothing for
+`T_stall`; a slow one that keeps acknowledging is held back by its topic, never ended (cassini-backpressure.md, "The
+stall rule ends only a subscriber that makes no progress"). The 4 KiB consumer at 10 ms above would no longer be ended
+at any bound: its producer would be held to its pace, as at 50 s. And the broker's workload has a 1 GiB memory limit in
+the catalog (cassini-backpressure.md, "The broker's memory limit, 1 GiB"). Neither was measured on u7c.
+
 *Found on the way:*
 - **A broker restart can stop issuance until cert-issuer restarts.** After the broker's tenth restart in a row
   (tunables-10, 02:17), the credentials agent registered again and heard no request: cert-issuer held the sink's

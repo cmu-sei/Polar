@@ -364,6 +364,40 @@ def main [] {
             }
         }
 
+        # The broker's memory (the maintainer, 2026-11-01): its container's limit is its cgroup's memory.max, which its
+        # memory controller reads for its ceiling (docs/architecture/cassini-backpressure.md, "Runtime budget"). 1 GiB,
+        # requested as it is limited; no other workload sets any.
+        "the broker's container is given 1 GiB of memory, requested and limited, and no other workload any": {
+            for t in [local-minimal sandbox-local] {
+                assert equal (resolve_for $t "cassini").memory { request: "1Gi", limit: "1Gi" } $t
+                let broker = (pod_of "cassini" $t | get containers | where name == "cassini" | first)
+                assert equal $broker.resources { requests: { memory: "1Gi" }, limits: { memory: "1Gi" } } $t
+            }
+            for n in (^nu $RESOLVER names --target local | from json | where {|n| $n != "cassini" }) {
+                assert equal (resolve_for local $n).memory null $n
+            }
+            let plain = (pod_of "kube-consumer" "local-minimal" | get containers | first)
+            assert equal ($plain.resources? | default null) null "nothing set where the catalog sets nothing"
+        }
+
+        "a target may give a workload other memory, in either template, and memory that is not a quantity or a request over its limit is refused": {
+            with_target { workloads: { cert-issuer: { memory: { request: "256Mi", limit: "512Mi" } } } } {|t|
+                assert equal (resolve_for $t "cert-issuer").memory { request: "256Mi", limit: "512Mi" }
+                # cert-issuer is the `ca` kind, whose template is its own (schema/ca.dhall)
+                let issuer = (pod_of "cert-issuer" $t | get containers | first)
+                assert equal $issuer.resources { requests: { memory: "256Mi" }, limits: { memory: "512Mi" } }
+            }
+            assert equal ((pod_of "cert-issuer" "local-minimal" | get containers | first).resources? | default null) null
+            for bad in [{ request: "2Gi", limit: "1Gi" } { request: "1Gi", limit: "lots" }] {
+                with_target { workloads: { cassini: { memory: $bad } } } {|t|
+                    let r = (do { ^nu $RESOLVER json cassini --target $t } | complete)
+                    assert ($r.exit_code != 0) $"($bad | to nuon) was taken"
+                    assert ($r.stderr | str contains "cassini") $r.stderr
+                    assert ($r.stderr | str contains "memory") $r.stderr
+                }
+            }
+        }
+
         # Flux waits on what each layer's wait_for names, as deploy-objects.nu turns it into a health check; one that names
         # nothing the render makes fails the publish (2026-10-28: the targets still waited on Jobs that had become
         # Deployments). So every wait of the exemplar targets is checked against their render.

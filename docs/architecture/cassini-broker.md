@@ -312,6 +312,13 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   measure others (broker-baseline.md, the fifth set). A limit set below what is held evicts nothing: the alarm stops admission until it drains
   (`Budget::set_limit`); memory below the floor at run time stops admission until it returns (`set_starved`). A test's
   broker, built from `Bounds` directly, keeps a fixed budget.
+- **The broker's container is limited to 1 GiB** (*since 2026-11-01*; the catalog's
+  `infra/config/workloads/cassini.nuon`, `memory: { request: "1Gi", limit: "1Gi" }`, rendered as the container's
+  resources by `infra/schema/functions.dhall`, `memoryOf`). The limit is the cgroup's `memory.max`, which the controller
+  reads (`SystemMemory`, `runtime_budget.rs`): the floor of 256 MiB fits under it at start, and the ceiling becomes the
+  limit less the broker's working memory, about 994 MiB at rest (not half the limit: the share is of the host's
+  `MemAvailable` only), where without a limit it was half the host's free memory, 27.5 GB on u7c
+  (cassini-backpressure.md, "The broker's memory limit, 1 GiB").
 - **Exhausted** when a frame cannot be charged: from then every reader waits (a memory alarm), until what is held
   falls to three quarters of the budget. The pressure manager says when it rises (with the five largest holders by
   name: subscribers as `<registration id>:<topic>`, topics as `topic <name>`) and when it lifts.
