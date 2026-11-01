@@ -817,7 +817,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
       the pod and type cannot tell a retry from a second request; keying an admission on the request's key (the same
       CSR admitted again within the bound) and the custodian re-asking with the same CSR would close all three where
       the voucher's memory closes one.
-    - [ ] DECIDED 2026-11-01 (the maintainer), part of the same fix: an escrow certificate whose key was never escrowed
+    - [x] (Built 2026-11-01, not yet on a cluster: `key-custody.md`, "An escrow certificate asked again, or
+      abandoned"; the same key asked again is issued again too, and the one before is superseded in the ledger.)
+      DECIDED 2026-11-01 (the maintainer), part of the same fix: an escrow certificate whose key was never escrowed
       locks its workload out for good. A pod issued the workload's one escrow certificate that dies before it stores the
       sealed key leaves a live certificate no one holds the key of, and every later pod, its replacement included (a new
       UID), is refused `AlreadyHasValidServiceCertificate`, final, once the issuing custodian's window is past

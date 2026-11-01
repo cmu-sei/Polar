@@ -712,6 +712,56 @@ taken and nothing changed, another refused) and the property that nothing change
 (`a_daemon_whose_custodian_failed_ends_once_polar_init_has_had_time_to_hear_why`, and one that fetched everything does
 not end). Not yet on a cluster; the pods stuck on u7c need replacing once, as before.
 
+### An escrow certificate asked again, or abandoned (decided by the maintainer 2026-11-01; built the same day)
+
+*Found.* A workload has one escrow certificate, and the certificate is recorded before its key is stored: the custodian
+is issued it, then seals the key to the credentials agent and stores it. A pod that dies between the two leaves a live
+certificate whose key no one holds, and every later pod, its own replacement included (a new UID), was refused
+`AlreadyHasValidServiceCertificate`, final, once the issuing custodian's window was past (`first_issuance`,
+`credentials-agent/consume/src/agent_escrow_issuance.rs`). Older than multi-instance; many pods starting at once make it
+likelier. The same refusal met the custodian's own request asked again after its reply was lost.
+
+*The rule* (`first_issuance`, pure, beside the serialization that multi-instance built):
+- none current: issued;
+- the same key asked for again (the CSR's key equals the current certificate's, `cert_issuer_common::public_key`):
+  issued again, the request asked again (`deployments.md`, "A retry is not a second request"); the daemon asks again
+  with the CSR it asked with first;
+- another pod, within the issuing custodian's window: told it is being issued, as built for multi-instance;
+- past that window, with no key stored under the workload's escrow name (`agent_escrow_keypair_secret_name`, the
+  ledger's `CheckSecret`): abandoned, and issued over. Past the window the issuing custodian can no longer store
+  (its window is measured from its own certificate, which comes before the escrow certificate, so the escrow
+  certificate's time plus the window is past it), so no one ever will;
+- anything else, refused as before.
+
+*Superseded, in the ledger:* an escrow certificate recorded over the identity's live one revokes the one before
+(`state.rs`, `record_escrow_certificate`), as a workload's reissue does: its serial among the revoked, its end kept for
+pruning, one current per identity. Revoking an abandoned one loses nothing: the certificate lookup could hand it out
+once recorded, but whatever was encrypted to it is unreadable already, since no one holds its key. Revoked serials are
+published; the custody daemon watches only its slots' serials, and an escrow certificate is in none.
+
+*Found on the way, fixed:* an escrow certificate learned from cert-issuer's record was timed in seconds while every
+other time in the ledger is milliseconds (`record_reported`), which would have put it far past every window. It is in
+milliseconds now, as a reported workload certificate is.
+
+*Decided here, by the rules, marked for review:*
+- *The supersession is derived, not an explicit `Revoke` event,* as a workload certificate's is: the new
+  `AgentEscrowIssuanceCompleted` is the record, and folding it revokes the one before. The graph's escrow certificate
+  node is not marked revoked by it (the projection's supersession marks workload `Certificate` nodes only), as an
+  administrator's `Revoke` of an escrow serial is not marked there today either.
+- *The same pod asking with another key within the window is still refused, final,* not told to wait for itself: a
+  daemon that asks with another key started again empty and will not store the first. Its pod starts again, and past
+  the window the abandoned certificate is issued over.
+- *Two older tests had an abandoned certificate as their setup* (a certificate timed at 1000, no key stored), asserting
+  the refusal; under the decision that is the abandoned case, so they store the key, which is what "already has one"
+  is now, and assert as before.
+
+*Tests:* the rule's property (for any current certificate, its pod, time and key, any pod asking, key asked, stored or
+not, and time: issued exactly when none, the same key, or abandoned; never told to wait for itself or past the window);
+the custodian asking again for the same key issued again and the first superseded, another key refused; an abandoned
+certificate issued over past the window, and one stored, or within the window, refused or told it is being issued as
+before; the state's supersession and a property over issuances and revocations (each identity's last is current unless
+revoked, every earlier one revoked); a reported escrow certificate timed in milliseconds.
+
 ## Step 5, revocation: the plan (2026-10-27, its question decided)
 
 What is there, read for this:

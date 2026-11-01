@@ -251,6 +251,26 @@ impl CredentialsState {
         self.record_cursor.clone()
     }
 
+    /// Records `record` as `identity`'s escrow certificate. The one it replaces, if still live, is superseded, as a
+    /// workload's reissue is: revoked, so one escrow certificate per identity is current however it was issued again
+    /// (a request asked again for the same key, or an abandoned one issued over: docs/architecture/key-custody.md, "An
+    /// escrow certificate asked again, or abandoned"). Not among the serials `apply` gives the projection, whose
+    /// supersession is of a workload's `Certificate` node.
+    fn record_escrow_certificate(&mut self, identity: &str, record: AgentEscrowCertificateRecord) {
+        if let Some(old) = self.agent_escrow_certificates.get(identity)
+            && old.serial != record.serial
+            && !self.revoked_serials.contains(&old.serial)
+        {
+            if let Some(end) = cert_issuer_common::serial::not_after_from_pem(&old.certificate_pem)
+            {
+                self.revoked_until.insert(old.serial.clone(), end);
+            }
+            self.revoked_serials.insert(old.serial.clone());
+        }
+        self.agent_escrow_certificates
+            .insert(identity.to_string(), record);
+    }
+
     /// Records a client or server certificate, issued or reported, and returns the serials it supersedes.
     #[allow(clippy::too_many_arguments)]
     fn record_workload_certificate(
@@ -422,12 +442,13 @@ impl CredentialsState {
         match (c.path, &c.cert_type) {
             (IssuePath::Internal, _) => Vec::new(),
             (_, CertType::Service) => {
-                self.agent_escrow_certificates.insert(
-                    c.identity.clone(),
+                self.record_escrow_certificate(
+                    &c.identity,
                     AgentEscrowCertificateRecord {
                         instance_binding: binding,
                         serial: c.serial.clone(),
-                        timestamp: c.signed_at,
+                        // cert-issuer's record says when in seconds; the ledger's times are milliseconds.
+                        timestamp: c.signed_at.saturating_mul(1000),
                         certificate_pem: c.certificate_pem.clone(),
                     },
                 );
@@ -680,8 +701,8 @@ impl CredentialsState {
                 certificate_pem,
             } => {
                 self.recorded_serials.insert(serial.clone());
-                self.agent_escrow_certificates.insert(
-                    identity.clone(),
+                self.record_escrow_certificate(
+                    identity,
                     AgentEscrowCertificateRecord {
                         instance_binding: instance_binding.clone(),
                         serial: serial.clone(),
@@ -1690,6 +1711,87 @@ pub(crate) mod tests {
         assert_eq!(record.instance_binding, "pod-uid-1");
     }
 
+    // docs/architecture/key-custody.md, "An escrow certificate asked again, or abandoned": an escrow certificate
+    // issued over the identity's live one supersedes it, as a workload's reissue does: one current escrow certificate
+    // per identity, and the one before revoked, its end kept for pruning.
+    #[test]
+    fn an_escrow_certificate_issued_over_a_live_one_supersedes_it() {
+        let mut state = CredentialsState::new();
+        let pem = |hours: i64| {
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            let mut params = rcgen::CertificateParams::new(vec!["x".to_string()]).unwrap();
+            params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(hours);
+            params.self_signed(&key).unwrap().pem()
+        };
+        let issued = |serial: &str, certificate_pem: String| {
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: "git-observer".to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: serial.to_string(),
+                timestamp: 2000,
+                certificate_pem,
+            }
+        };
+        state.apply(&issued("first", pem(1)));
+        assert!(state.revoked_serials().is_empty());
+        state.apply(&issued("second", pem(2)));
+        assert_eq!(state.revoked_serials(), vec!["first".to_string()]);
+        assert!(state.revoked_until.contains_key("first"));
+        assert_eq!(
+            state
+                .agent_escrow_certificate_for("git-observer")
+                .unwrap()
+                .serial,
+            "second"
+        );
+        // Another identity's is not touched.
+        state.apply(&agent_escrow_issued("other", "pod-uid-2", "third"));
+        assert_eq!(state.revoked_serials(), vec!["first".to_string()]);
+    }
+
+    proptest::proptest! {
+        /// For any sequence of escrow issuances and revocations over two identities: each identity's current escrow
+        /// certificate is its last issued, unless that was revoked, and every one issued before it is revoked. One
+        /// current escrow certificate per identity, however it was issued again.
+        #[test]
+        fn each_identity_s_escrow_certificate_is_its_last_and_every_earlier_one_is_revoked(
+            ops in proptest::collection::vec((0u8..2, proptest::bool::weighted(0.2)), 1..24)
+        ) {
+            let mut state = CredentialsState::new();
+            let mut last: [Option<String>; 2] = [None, None];
+            let mut earlier: Vec<String> = Vec::new();
+            let mut revoked_by_admin: Vec<String> = Vec::new();
+            for (n, (who, revoke)) in ops.into_iter().enumerate() {
+                let identity = format!("agent-{who}");
+                if revoke {
+                    if let Some(serial) = &last[who as usize] {
+                        state.apply(&revoked(serial));
+                        revoked_by_admin.push(serial.clone());
+                    }
+                    continue;
+                }
+                let serial = format!("s{n}");
+                state.apply(&agent_escrow_issued(&identity, "pod", &serial));
+                if let Some(before) = last[who as usize].replace(serial) {
+                    earlier.push(before);
+                }
+            }
+            let revoked_now = state.revoked_serials();
+            for serial in &earlier {
+                proptest::prop_assert!(revoked_now.contains(serial), "{} not revoked", serial);
+            }
+            for who in 0..2u8 {
+                let current = state
+                    .agent_escrow_certificate_for(&format!("agent-{who}"))
+                    .map(|r| r.serial.clone());
+                let expected = last[who as usize]
+                    .clone()
+                    .filter(|serial| !revoked_by_admin.contains(serial));
+                proptest::prop_assert_eq!(current, expected);
+            }
+        }
+    }
+
     #[test]
     fn agent_escrow_certificate_is_genuinely_separate_from_valid_certificates() {
         // Same identity, same instance_binding -- an ordinary mTLS
@@ -2003,6 +2105,30 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             state.last_issued(CASSINI, "pod-1", WorkloadCertType::Client),
+            Some(1001 * 1000)
+        );
+    }
+
+    // As a workload certificate's: an escrow certificate cert-issuer reported is timed in milliseconds, what the
+    // issuing custodian's window is measured in (docs/architecture/key-custody.md, "An escrow certificate asked again,
+    // or abandoned").
+    #[test]
+    fn a_reported_escrow_certificate_is_timed_in_milliseconds() {
+        let mut state = CredentialsState::default();
+        state.apply(&page(
+            "log-1",
+            1,
+            vec![reported(
+                1,
+                CASSINI,
+                cert_issuer_common::CertType::Service,
+                "e1",
+            )],
+        ));
+        assert_eq!(
+            state
+                .agent_escrow_certificate_for(CASSINI)
+                .map(|r| r.timestamp),
             Some(1001 * 1000)
         );
     }

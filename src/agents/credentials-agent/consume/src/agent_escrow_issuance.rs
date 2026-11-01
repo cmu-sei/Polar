@@ -105,26 +105,41 @@ impl Drop for Reserved {
     }
 }
 
-/// What an escrow issuance for one pod of a workload is, given the workload's current escrow certificate (`existing`,
-/// none or revoked being none), the pod asking (`requester`, its UID) and the time (Unix milliseconds): issue the first;
-/// tell another pod, while the issuing pod's custodian is in its window, that it is being issued, and it asks again and
-/// retrieves the key once escrowed (docs/architecture/authority-model.md, "Multi-instance workloads"); refuse anything
-/// else, as before (one escrow certificate per identity). Pure.
+/// Whether an escrow issuance for one pod of a workload is made, given the workload's current escrow certificate
+/// (`existing`, none or revoked being none), the pod asking (`requester`, its UID), the key its CSR asks for (`asked`,
+/// none when it does not read), whether the workload's escrow key is stored, and the time (Unix milliseconds). Pure.
+///
+/// - The first is issued.
+/// - The same key asked for again, its reply lost, is issued again (docs/architecture/deployments.md, "A retry is not a
+///   second request"); the certificate before is superseded as it is recorded.
+/// - Another pod, while the issuing pod's custodian is in its window, is told it is being issued, and asks again and
+///   retrieves the key once escrowed (docs/architecture/authority-model.md, "Multi-instance workloads").
+/// - Past that window, a certificate whose key was never stored is abandoned: its custodian can no longer store it, so
+///   no one ever will. The workload is issued another over it (docs/architecture/key-custody.md, "An escrow certificate
+///   asked again, or abandoned").
+/// - Anything else is refused, as before: one escrow certificate per identity.
 pub(crate) fn first_issuance(
     existing: Option<&crate::state::AgentEscrowCertificateRecord>,
     requester: &str,
+    asked: Option<&[u8]>,
+    stored: bool,
     now_millis: i64,
 ) -> Result<(), AgentEscrowIssuanceRefusalReason> {
     use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
-    match existing {
-        None => Ok(()),
-        Some(record)
-            if record.instance_binding != requester
-                && now_millis.saturating_sub(record.timestamp) <= CUSTODIAN_WINDOW_SECS * 1000 =>
-        {
-            Err(AgentEscrowIssuanceRefusalReason::BeingIssued)
-        }
-        Some(_) => Err(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate),
+    let Some(record) = existing else {
+        return Ok(());
+    };
+    let asked_again = asked.is_some_and(|asked| {
+        cert_issuer_common::public_key::certificate_key(&record.certificate_pem).as_deref()
+            == Some(asked)
+    });
+    let in_window = now_millis.saturating_sub(record.timestamp) <= CUSTODIAN_WINDOW_SECS * 1000;
+    if asked_again || (!in_window && !stored) {
+        Ok(())
+    } else if in_window && record.instance_binding != requester {
+        Err(AgentEscrowIssuanceRefusalReason::BeingIssued)
+    } else {
+        Err(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate)
     }
 }
 
@@ -174,25 +189,51 @@ impl AgentEscrowIssuanceHandler {
         //
         // Not the pod-instance renewal rule: a service's escrow identity isn't pod-scoped at all, one key per
         // workload shared by its instances. Its place is held until the certificate is recorded, so a concurrent
-        // request, another pod's, is told it is being issued and retrieves the key once escrowed.
+        // request, another pod's, is told it is being issued and retrieves the key once escrowed. Issued again for
+        // the same key asked again, or over one abandoned with no key stored (`first_issuance`).
         let Some(_reserved) = Reserved::take(&self.in_flight, &identity) else {
             warn!(%identity, pod = %custodian.instance_binding, "an escrow issuance is under way for this workload: told so");
             return refused(AgentEscrowIssuanceRefusalReason::BeingIssued);
         };
-        match call_check_agent_escrow_key(&self.ledger, &identity).await {
-            Ok(existing) => {
-                if let Err(reason) = first_issuance(
-                    existing.as_ref(),
-                    &custodian.instance_binding,
-                    polar::time::now_millis(),
-                ) {
-                    return refused(reason);
-                }
-            }
+        let existing = match call_check_agent_escrow_key(&self.ledger, &identity).await {
+            Ok(existing) => existing,
             Err(e) => {
                 error!("Ledger CheckAgentEscrowKey call failed: {e}");
                 return refused(AgentEscrowIssuanceRefusalReason::CredentialInvalid);
             }
+        };
+        let stored = match &existing {
+            None => false,
+            Some(_) => {
+                let name = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name(
+                    &identity,
+                );
+                match crate::retrieve_secret::call_check_secret(&self.ledger, &name).await {
+                    Ok(stored) => stored.is_some(),
+                    Err(e) => {
+                        error!("Ledger CheckSecret call failed: {e}");
+                        return refused(AgentEscrowIssuanceRefusalReason::CredentialInvalid);
+                    }
+                }
+            }
+        };
+        let asked = cert_issuer_common::public_key::csr_key(&request.csr_pem);
+        if let Err(reason) = first_issuance(
+            existing.as_ref(),
+            &custodian.instance_binding,
+            asked.as_deref(),
+            stored,
+            polar::time::now_millis(),
+        ) {
+            return refused(reason);
+        }
+        if let Some(existing) = &existing {
+            warn!(
+                %identity,
+                pod = %custodian.instance_binding,
+                serial = %existing.serial,
+                "the workload's escrow certificate is issued again, the one before superseded: asked again for its key, or abandoned with no key stored"
+            );
         }
 
         // ---- Step 3: grant lookup, defaulting to a uniform set ----
@@ -460,7 +501,8 @@ mod tests {
     #[tokio::test]
     async fn already_has_a_service_certificate_is_refused_and_cert_issuer_is_never_asked() {
         let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
-        // A prior service certificate for the same identity but another pod: the check is identity-scoped.
+        // A prior service certificate for the same identity but another pod: the check is identity-scoped. Its key is
+        // stored, so it is the workload's (one never stored is abandoned past its window, and issued over).
         call_append(
             &ledger,
             CredentialsEvent::AgentEscrowIssuanceCompleted {
@@ -474,6 +516,7 @@ mod tests {
         )
         .await
         .unwrap();
+        store_the_key(&ledger).await;
         let server = cert_issuer_signing(&["p:s2s"]).await;
         let reply = handler(ledger, &server)
             .handle(request(), Some(CUSTODIAN.to_string()))
@@ -605,8 +648,8 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
-    /// A revoked escrow certificate does not count toward the one per identity: its workload is issued another (an
-    /// orphan, issued and never stored, revoked by an administrator, is how a workload stuck without its key gets one).
+    /// A revoked escrow certificate does not count toward the one per identity: its workload is issued another, its
+    /// key stored or not (an administrator's revocation; an orphan never stored needs none, abandoned past its window).
     #[tokio::test]
     async fn a_workload_whose_only_escrow_certificate_was_revoked_is_issued_another() {
         let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
@@ -623,6 +666,7 @@ mod tests {
         )
         .await
         .unwrap();
+        store_the_key(&ledger).await;
         let server = cert_issuer_signing(&["p:s2s"]).await;
         assert_eq!(
             reason(
@@ -659,28 +703,233 @@ mod tests {
         );
     }
 
+    /// A real escrow CSR of a key of its own, as the custody daemon makes one.
+    fn escrow_csr() -> String {
+        cert_issuer_common::keypair::generate_csr(
+            X,
+            &cert_issuer_common::keypair::KeyAlgorithm::EcdsaP256,
+            &[],
+        )
+        .unwrap()
+        .csr_pem
+    }
+
+    fn with_csr(csr_pem: &str) -> AgentEscrowIssuanceRequest {
+        AgentEscrowIssuanceRequest {
+            csr_pem: csr_pem.to_string(),
+        }
+    }
+
+    /// cert-issuer signing the CSR it is sent, so the escrow certificate is of the key asked for.
+    async fn cert_issuer_signing_the_csr() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(crate::issuance::tests::SignsTheCsr::new())
+            .mount(&server)
+            .await;
+        server
+    }
+
+    // docs/architecture/key-custody.md, "An escrow certificate asked again, or abandoned": the custodian, its reply
+    // overdue, asks again for the same key (docs/architecture/deployments.md, "A retry is not a second request"), and
+    // is issued it again; the certificate before is superseded, one current per identity.
+    #[tokio::test]
+    async fn a_custodian_asking_again_for_the_same_key_is_issued_it_again_and_the_first_superseded()
+    {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        let server = cert_issuer_signing_the_csr().await;
+        let handler = handler(ledger.clone(), &server);
+        let csr = escrow_csr();
+        let ask = || handler.handle(with_csr(&csr), Some(CUSTODIAN.to_string()));
+        assert!(matches!(
+            ask().await,
+            AgentEscrowIssuanceReply::Issued { .. }
+        ));
+        let first = call_check_agent_escrow_key(&ledger, X)
+            .await
+            .unwrap()
+            .unwrap();
+        let again = ask().await;
+        assert!(
+            matches!(again, AgentEscrowIssuanceReply::Issued { .. }),
+            "{again:?}"
+        );
+        let current = call_check_agent_escrow_key(&ledger, X)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(current.serial, first.serial);
+        let revoked = ractor::call!(ledger, LedgerMessage::RevokedSerials).unwrap();
+        assert_eq!(revoked, vec![first.serial]);
+        // Another key from it is not the same request, as before.
+        assert_eq!(
+            reason(
+                &handler
+                    .handle(with_csr(&escrow_csr()), Some(CUSTODIAN.to_string()))
+                    .await
+            ),
+            Some(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    /// The ledger holding X's escrow certificate, issued to another pod `age_millis` ago, and, when `stored`, the key
+    /// it is for escrowed.
+    async fn ledger_with_an_escrow_certificate(
+        age_millis: i64,
+        stored: bool,
+    ) -> ActorRef<LedgerMessage> {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        call_append(
+            &ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: X.to_string(),
+                instance_binding: "pod-uid-0".to_string(),
+                serial: "abandoned".to_string(),
+                timestamp: polar::time::now_millis() - age_millis,
+                certificate_pem: "-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        if stored {
+            store_the_key(&ledger).await;
+        }
+        ledger
+    }
+
+    /// X's escrow key, escrowed, as its custodian stores it.
+    async fn store_the_key(ledger: &ActorRef<LedgerMessage>) {
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        call_append(
+            ledger,
+            CredentialsEvent::SecretStored {
+                name: credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name(X),
+                secret: credentials_agent_common::escrow_secret::EscrowedSecret::encrypt(
+                    b"the key",
+                    escrow_keypair.public_key_pem(),
+                )
+                .unwrap(),
+                stored_by: CUSTODIAN.to_string(),
+                timestamp: 1000,
+                labels: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // docs/architecture/key-custody.md, "An escrow certificate asked again, or abandoned" (the maintainer, 2026-11-01):
+    // past the issuing custodian's window, an escrow certificate whose key was never stored is abandoned, and the
+    // workload is issued another, the abandoned one superseded. One whose key was stored is the workload's, as before,
+    // and within the window another pod is told it is being issued, as before.
+    #[tokio::test]
+    async fn an_escrow_certificate_whose_key_was_never_stored_is_abandoned_past_the_window_and_issued_over()
+     {
+        let past = (CUSTODIAN_WINDOW_SECS + 1) * 1000;
+        let ledger = ledger_with_an_escrow_certificate(past, false).await;
+        let server = cert_issuer_signing_the_csr().await;
+        let reply = handler(ledger.clone(), &server)
+            .handle(with_csr(&escrow_csr()), Some(CUSTODIAN.to_string()))
+            .await;
+        assert!(
+            matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
+            "{reply:?}"
+        );
+        assert_ne!(
+            call_check_agent_escrow_key(&ledger, X)
+                .await
+                .unwrap()
+                .unwrap()
+                .serial,
+            "abandoned"
+        );
+        let revoked = ractor::call!(ledger, LedgerMessage::RevokedSerials).unwrap();
+        assert_eq!(revoked, vec!["abandoned".to_string()]);
+
+        for (age, stored, expected) in [
+            (
+                past,
+                true,
+                AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate,
+            ),
+            (0, false, AgentEscrowIssuanceRefusalReason::BeingIssued),
+            (0, true, AgentEscrowIssuanceRefusalReason::BeingIssued),
+        ] {
+            let ledger = ledger_with_an_escrow_certificate(age, stored).await;
+            let server = cert_issuer_signing_the_csr().await;
+            let reply = handler(ledger, &server)
+                .handle(with_csr(&escrow_csr()), Some(CUSTODIAN.to_string()))
+                .await;
+            assert_eq!(reason(&reply), Some(expected), "{age} {stored}");
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+    }
+
+    /// Two keys, each with a certificate of it and its CSR's key; and a certificate that does not read (the last).
+    fn keys() -> &'static [(String, Vec<u8>)] {
+        static KEYS: std::sync::OnceLock<Vec<(String, Vec<u8>)>> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| {
+            let mut keys: Vec<(String, Vec<u8>)> = (0..2)
+                .map(|_| {
+                    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+                    let certificate = rcgen::CertificateParams::new(vec![X.to_string()])
+                        .unwrap()
+                        .self_signed(&key)
+                        .unwrap()
+                        .pem();
+                    (
+                        certificate,
+                        rcgen::PublicKeyData::subject_public_key_info(&key),
+                    )
+                })
+                .collect();
+            keys.push((
+                "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n".to_string(),
+                Vec::new(),
+            ));
+            keys
+        })
+    }
+
     proptest::proptest! {
-        /// For any existing certificate, pod and time: one escrow certificate per identity (a second is never issued
-        /// while one is current); the pod that was issued it is never told to wait for itself; and once the issuing
-        /// custodian's window is past no one is told to wait, so no pod waits for good.
+        /// For any existing certificate (its pod, time and key), pod asking, key asked for, stored or not, and time:
+        /// - it is issued exactly when there is none, the same key is asked for again, or the existing one is past the
+        ///   issuing custodian's window with no key stored (abandoned); otherwise one escrow certificate per identity
+        ///   stands, a different key never issued over a live one that may still be stored;
+        /// - the pod that was issued it is never told to wait for itself, and once the window is past no one is told
+        ///   to wait, so no pod waits for good.
         #[test]
-        fn one_certificate_per_identity_and_no_one_waits_on_itself_or_for_good(
-            existing in proptest::option::of((0u8..3, 0i64..1_000_000)),
+        fn one_certificate_per_identity_issued_again_only_when_asked_again_or_abandoned(
+            existing in proptest::option::of((0u8..3, 0i64..1_000_000, 0usize..3)),
             requester in 0u8..3,
+            asked in 0usize..3,
+            stored in proptest::bool::ANY,
             now in 0i64..2_000_000,
         ) {
             use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
-            let record = existing.map(|(pod, at)| crate::state::AgentEscrowCertificateRecord {
+            let record = existing.map(|(pod, at, key)| crate::state::AgentEscrowCertificateRecord {
                 instance_binding: format!("pod-{pod}"),
                 serial: "s".to_string(),
                 timestamp: at,
-                certificate_pem: String::new(),
+                certificate_pem: keys()[key].0.clone(),
             });
             let requester = format!("pod-{requester}");
-            let decided = first_issuance(record.as_ref(), &requester, now);
-            proptest::prop_assert_eq!(decided.is_ok(), record.is_none());
+            // The last key does not read: a CSR that cannot be read asks for no key.
+            let asked_key = (asked < 2).then(|| keys()[asked].1.as_slice());
+            let decided = first_issuance(record.as_ref(), &requester, asked_key, stored, now);
+            let past = |r: &crate::state::AgentEscrowCertificateRecord| {
+                now - r.timestamp > CUSTODIAN_WINDOW_SECS * 1000
+            };
+            let expected = match (&existing, &record) {
+                (Some((_, _, key)), Some(r)) => (*key == asked && asked < 2) || (past(r) && !stored),
+                _ => true,
+            };
+            proptest::prop_assert_eq!(decided.is_ok(), expected);
             if let Some(r) = &record
-                && (r.instance_binding == requester || now - r.timestamp > CUSTODIAN_WINDOW_SECS * 1000)
+                && (r.instance_binding == requester || past(r))
             {
                 proptest::prop_assert_ne!(decided, Err(AgentEscrowIssuanceRefusalReason::BeingIssued));
             }

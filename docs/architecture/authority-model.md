@@ -846,7 +846,8 @@ Built test-first, a commit a step (`5886e43d` to `764cb62f`); not yet seen on a 
   The credentials agent refuses a multi-instance workload's certificate whose token carries no pod name, saying why, so
   an issuer without `instance_name_claim` shows at its first pod, not later in a thinner trail.
 - *"Being issued" lasts the issuing custodian's window* (five minutes); after it, an escrow certificate with nothing
-  stored is refused as before (an orphan now recoverable by revoking it).
+  stored is abandoned and issued over (DECIDED 2026-11-01, the maintainer; built: `key-custody.md`, "An escrow
+  certificate asked again, or abandoned"), where before it was refused, recoverable only by an administrator revoking it.
 - *A harness plan of several producers on a single-instance producer is refused* by `load-harness.nu`, naming why.
 
 ## Build order, tests first
