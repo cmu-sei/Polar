@@ -111,7 +111,7 @@ export def auth_mode [email: string] {
 # What JIRA_DEPLOYMENT says, by the agent's reading of it (src/agents/jira/observe/src/lib.rs, `JiraDeployment`).
 export def deployment_fact [value: string] {
     let v = ($value | str lowercase)
-    if ($v | is-empty) { "unset (the agent takes Cloud for an atlassian.net address, Server otherwise)" } else if $v in ["cloud" "server" "datacenter"] { $v } else { "set to something the agent does not recognise (it then follows the address)" }
+    if ($v | is-empty) { "unset (the agent follows the site's serverInfo deploymentType, else Cloud for an atlassian.net address, Server otherwise)" } else if ($v | str trim) in ["cloud" "server" "datacenter"] { $v } else { "set to something the agent does not recognise (it refuses to start)" }
 }
 
 # Whether `s` looks like base64 of text: the standard alphabet, a whole number of quanta, at least 16 characters, and

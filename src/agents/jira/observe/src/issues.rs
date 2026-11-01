@@ -148,6 +148,7 @@ impl JiraIssueObserver {
         op: &str,
         state: &mut JiraObserverState,
     ) -> Result<(), ActorProcessingErr> {
+        state.ensure_site().await?;
         state.ensure_token().await?;
         let fields: Vec<JiraField> = state
             .get_json(&format!("{}{FIELD_OP}", state.jira_url))
@@ -513,7 +514,8 @@ impl Filter {
                 let reach = u128::from(*minutes) * 60_000 + elapsed.as_millis();
                 Some(format!("updated >= -{}m", reach.div_ceil(60_000)))
             }
-            Filter::After(date) => Some(format!("updated > {date}")),
+            // Quoted, as JQL needs a date with a time to be; the date was checked at start (`settings::parse_query_date`).
+            Filter::After(date) => Some(format!("updated > \"{date}\"")),
         }
     }
 }
@@ -721,7 +723,7 @@ mod tests {
             assert_eq!(jql_filter(false, interval, start, NOW, Some("")), None);
             assert_eq!(
                 jql_filter(false, interval, start, NOW, Some("2024-01-01")),
-                Some("updated > 2024-01-01".to_string())
+                Some("updated > \"2024-01-01\"".to_string())
             );
         }
     }

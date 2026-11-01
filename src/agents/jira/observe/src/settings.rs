@@ -28,6 +28,7 @@
 //! agent's scaffold, judged with everything else, and the catalog cannot set a Jira variable that
 //! this does not name.
 
+use crate::JiraDeployment;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use polar_env::{Config, ConfigError, Described, Optional, Required, Section};
@@ -53,12 +54,14 @@ pub static JIRA_EMAIL: Optional<String> = Optional::text(
 
 pub static JIRA_DEPLOYMENT: Optional<String> = Optional::text(
     "JIRA_DEPLOYMENT",
-    "cloud, server or datacenter; when unset it follows the address (an atlassian.net site is cloud)",
+    "cloud, server or datacenter, used when the site's serverInfo does not say its deploymentType; when unset too \
+     it follows the address (an atlassian.net site is cloud). Any other value is refused at start",
 );
 
 pub static QUERY_DATE: Optional<String> = Optional::text(
     "QUERY_DATE",
-    "a date from which the first full pull asks for issues (updated > date); unset pulls all of them",
+    "a date, YYYY-MM-DD or YYYY-MM-DD HH:MM, from which the first pull asks for issues (updated > date) when the \
+     graph has none; unset pulls all of them. Any other value is refused at start",
 );
 
 static VARIABLES: &[&dyn Described] = &[
@@ -140,6 +143,108 @@ pub fn normalise_jira_url(raw: &str) -> Result<String, String> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+/// What JIRA_DEPLOYMENT may say.
+const DEPLOYMENTS: &str = "cloud, server or datacenter";
+
+/// JIRA_DEPLOYMENT as the observer reads it: `cloud`, `server` or `datacenter`, in any case. Anything else is
+/// refused, with what it may be, rather than taken for the guess from the address.
+pub fn parse_deployment(raw: &str) -> Result<JiraDeployment, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cloud" => Ok(JiraDeployment::Cloud),
+        "server" | "datacenter" => Ok(JiraDeployment::ServerOrDataCenter),
+        _ => Err(format!(
+            "JIRA_DEPLOYMENT is {raw:?}, which is not a deployment: set it to {DEPLOYMENTS}, or leave it unset \
+             for the site to say (its serverInfo) and, failing that, the address"
+        )),
+    }
+}
+
+/// A date QUERY_DATE names, as JQL takes one: a day, or a day and a time to the minute. Said back
+/// (`Display`) in the one form, `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`, which is what the JQL quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryDate {
+    day: chrono::NaiveDate,
+    time: Option<chrono::NaiveTime>,
+}
+
+impl std::fmt::Display for QueryDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.day.format("%Y-%m-%d"))?;
+        if let Some(time) = self.time {
+            write!(f, " {}", time.format("%H:%M"))?;
+        }
+        Ok(())
+    }
+}
+
+/// QUERY_DATE as the observer reads it: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`, or either with `/` for `-`, the forms
+/// JQL takes, and a date that exists. Anything else is refused, with what it may be: before, it went into the JQL
+/// as it was, unquoted, and a time (or anything else) made every search a 400, retried for ever.
+pub fn parse_query_date(raw: &str) -> Result<QueryDate, String> {
+    let refused = || {
+        format!(
+            "QUERY_DATE is {raw:?}, which is not a date as JQL takes one: set it to YYYY-MM-DD or \
+             YYYY-MM-DD HH:MM (or with / for -), or leave it unset"
+        )
+    };
+    let text = raw.trim();
+    let (day, time) = match text.split_once(' ') {
+        Some((day, time)) => (day, Some(time)),
+        None => (text, None),
+    };
+    // Exactly four, two and two digits: chrono alone takes "2024-1-1" too.
+    let shaped = |s: &str, separator: u8| {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[4] == separator
+            && b[7] == separator
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    };
+    let day = if shaped(day, b'-') {
+        chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+    } else if shaped(day, b'/') {
+        chrono::NaiveDate::parse_from_str(day, "%Y/%m/%d")
+    } else {
+        return Err(refused());
+    }
+    .map_err(|_| refused())?;
+    let time = match time {
+        None => None,
+        Some(time) => {
+            let b = time.as_bytes();
+            let shaped = b.len() == 5
+                && b[2] == b':'
+                && b.iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 2 || c.is_ascii_digit());
+            if !shaped {
+                return Err(refused());
+            }
+            Some(chrono::NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| refused())?)
+        }
+    };
+    Ok(QueryDate { day, time })
+}
+
+/// The account email the target templates ship in JIRA_EMAIL until someone sets the real one.
+const PLACEHOLDER_EMAIL: &str = "jira-user@example.org";
+
+/// Refuses the placeholder JIRA_EMAIL, as [`normalise_jira_url`] refuses the placeholder address: with any email
+/// the observer sends Basic authentication, which a Data Center or Server personal access token is refused under,
+/// for ever.
+pub fn refuse_placeholder_email(email: Option<&str>) -> Result<(), String> {
+    match email {
+        Some(email) if email.trim().eq_ignore_ascii_case(PLACEHOLDER_EMAIL) => Err(format!(
+            "JIRA_EMAIL is still the example placeholder {PLACEHOLDER_EMAIL}: leave it unset for a Data Center or \
+             Server personal access token (Bearer), or set it to the Atlassian Cloud account the API token belongs \
+             to (Basic), in workloads.jira-observer.env in the target's config.nuon"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// True if the token looks like a base64-encoded copy of a token rather than the token itself:
 /// it decodes, as standard or URL-safe base64 with or without padding, to at least 16
 /// characters of printable ASCII with no whitespace. A Data Center personal access token is
@@ -155,7 +260,7 @@ pub fn token_looks_base64(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{JiraAuth, JiraDeployment};
+    use crate::JiraAuth;
     use base64::Engine;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
@@ -355,15 +460,86 @@ mod tests {
     fn the_deployment_follows_what_is_said_and_otherwise_the_address() {
         use JiraDeployment::*;
         let url = "https://jira.example.org";
-        assert!(JiraDeployment::resolve(Some("cloud"), url) == Cloud);
-        assert!(JiraDeployment::resolve(Some("CLOUD"), url) == Cloud);
+        let said = |raw: &str| Some(parse_deployment(raw).unwrap());
+        assert!(JiraDeployment::resolve(said("cloud"), url) == Cloud);
+        assert!(JiraDeployment::resolve(said("CLOUD"), url) == Cloud);
         assert!(
-            JiraDeployment::resolve(Some("server"), "https://x.atlassian.net")
+            JiraDeployment::resolve(said("server"), "https://x.atlassian.net")
                 == ServerOrDataCenter
         );
-        assert!(JiraDeployment::resolve(Some("datacenter"), url) == ServerOrDataCenter);
+        assert!(JiraDeployment::resolve(said("datacenter"), url) == ServerOrDataCenter);
+        assert!(JiraDeployment::resolve(said(" DataCenter "), url) == ServerOrDataCenter);
         assert!(JiraDeployment::resolve(None, "https://x.atlassian.net") == Cloud);
         assert!(JiraDeployment::resolve(None, url) == ServerOrDataCenter);
-        assert!(JiraDeployment::resolve(Some("nonsense"), url) == ServerOrDataCenter);
+    }
+
+    /// A value that is not one of the three is refused, with what it may be, rather than taken for the guess.
+    #[test]
+    fn a_deployment_that_is_not_known_is_refused() {
+        for raw in ["nonsense", "data center", "dc", "on-prem", ""] {
+            let error = parse_deployment(raw).unwrap_err();
+            assert!(
+                error.contains("JIRA_DEPLOYMENT") && error.contains("cloud, server or datacenter"),
+                "{raw:?}: {error}"
+            );
+        }
+    }
+
+    /// QUERY_DATE is a date, or a date and a time to the minute, as JQL takes them; written with `-` or `/`, it
+    /// is said back with `-`.
+    #[test]
+    fn query_date_is_read_as_jql_takes_a_date() {
+        for (raw, canonical) in [
+            ("2024-01-01", "2024-01-01"),
+            (" 2024/01/31 ", "2024-01-31"),
+            ("2024-02-29 23:59", "2024-02-29 23:59"),
+            ("2024/12/01 00:00", "2024-12-01 00:00"),
+        ] {
+            assert_eq!(
+                parse_query_date(raw).map(|d| d.to_string()).as_deref(),
+                Ok(canonical),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_date_that_is_not_a_date_is_refused_with_what_it_may_be() {
+        for raw in [
+            "yesterday",
+            "2024-13-01",
+            "2023-02-29",
+            "2024-01-01T10:00",
+            "2024-01-01 24:00",
+            "2024-01-01 10:00:00",
+            "2024-1-1",
+            "-1d",
+            "\"2024-01-01\"",
+            "2024-01-01 OR project = X",
+        ] {
+            let error = parse_query_date(raw).unwrap_err();
+            assert!(
+                error.contains("QUERY_DATE") && error.contains("YYYY-MM-DD"),
+                "{raw:?}: {error}"
+            );
+        }
+    }
+
+    /// The email the target templates ship is refused as the placeholder address is: with it, a Data Center token
+    /// would be sent as Basic authentication and refused for ever.
+    #[test]
+    fn the_shipped_placeholder_email_is_refused() {
+        for raw in ["jira-user@example.org", " Jira-User@Example.org "] {
+            let error = refuse_placeholder_email(Some(raw)).unwrap_err();
+            assert!(
+                error.contains("JIRA_EMAIL") && error.contains("placeholder"),
+                "{raw:?}: {error}"
+            );
+        }
+        assert_eq!(
+            refuse_placeholder_email(Some("svc-polar@corp.example.com")),
+            Ok(())
+        );
+        assert_eq!(refuse_placeholder_email(None), Ok(()));
     }
 }

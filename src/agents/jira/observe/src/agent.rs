@@ -57,7 +57,22 @@ fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
     // Declared and judged with the rest of the configuration, so a missing address or token
     // was reported before this point, with every other problem.
     let settings = JiraSettings::read(config).map_err(|e| e.to_string())?;
+    // An address that cannot be the site's is a configuration error, with what to set; so are a deployment that is
+    // not one, a QUERY_DATE that is not a date, and the placeholder email.
     let jira_url = settings::normalise_jira_url(&settings.url)?;
+    let deployment = settings
+        .deployment
+        .as_deref()
+        .map(settings::parse_deployment)
+        .transpose()?;
+    let query_date = settings
+        .query_date
+        .as_deref()
+        .filter(|date| !date.trim().is_empty())
+        .map(settings::parse_query_date)
+        .transpose()?
+        .map(|date| date.to_string());
+    settings::refuse_placeholder_email(settings.email.as_deref())?;
     if settings::token_looks_base64(&settings.token) {
         warn!(
             "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
@@ -67,10 +82,10 @@ fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
     }
     Ok(Prepared {
         auth: JiraAuth::from_parts(settings.email, settings.token),
-        deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &jira_url),
+        deployment: JiraDeployment::resolve(deployment, &jira_url),
         jira_url,
         egress: polar::egress::Egress::read(config).map_err(|e| e.to_string())?,
-        query_date: settings.query_date,
+        query_date,
     })
 }
 

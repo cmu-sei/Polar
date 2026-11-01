@@ -299,30 +299,38 @@ impl JiraAuth {
 /// /rest/api/3/search/jql with cursor-based pagination, while
 /// Server/Data Center still uses the v2 endpoint with startAt/total
 /// offset pagination.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JiraDeployment {
     Cloud,
     ServerOrDataCenter,
 }
 
 impl JiraDeployment {
-    /// Resolve deployment type from configuration. Defaults to
-    /// ServerOrDataCenter (today's existing behavior) unless explicitly
-    /// overridden with JIRA_DEPLOYMENT=cloud, or the URL itself looks
-    /// like an Atlassian-hosted Cloud site (*.atlassian.net).
-    pub fn resolve(configured: Option<&str>, jira_url: &str) -> Self {
-        match configured {
-            Some(v) if v.eq_ignore_ascii_case("cloud") => JiraDeployment::Cloud,
-            Some(v) if v.eq_ignore_ascii_case("server") || v.eq_ignore_ascii_case("datacenter") => {
-                JiraDeployment::ServerOrDataCenter
-            }
-            _ => {
-                if jira_url.contains(".atlassian.net") {
-                    JiraDeployment::Cloud
-                } else {
-                    JiraDeployment::ServerOrDataCenter
-                }
-            }
+    /// The deployment type until the site says (`serverInfo`, [`JiraObserverState::ensure_site`]), and when it does
+    /// not: JIRA_DEPLOYMENT ([`settings::parse_deployment`]), else Cloud for an Atlassian-hosted address
+    /// (*.atlassian.net), else Server or Data Center.
+    pub fn resolve(configured: Option<JiraDeployment>, jira_url: &str) -> Self {
+        configured.unwrap_or(if jira_url.contains(".atlassian.net") {
+            JiraDeployment::Cloud
+        } else {
+            JiraDeployment::ServerOrDataCenter
+        })
+    }
+
+    /// The deployment type `serverInfo`'s `deploymentType` names: `Cloud` is Cloud, anything else (`Server`, as all
+    /// four public Data Centers answer, or `DataCenter`) is Server or Data Center. `None` when it names nothing.
+    pub fn from_server_info(deployment_type: &str) -> Option<Self> {
+        match deployment_type.trim() {
+            "" => None,
+            t if t.eq_ignore_ascii_case("cloud") => Some(JiraDeployment::Cloud),
+            _ => Some(JiraDeployment::ServerOrDataCenter),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            JiraDeployment::Cloud => "Cloud",
+            JiraDeployment::ServerOrDataCenter => "Server or Data Center",
         }
     }
 }
@@ -368,6 +376,9 @@ pub struct JiraObserverState {
     /// Whether the token was checked in the pull under way: a credential refused after that is the credential's
     /// ([`FailureKind::Credentials`]), one refused before it may be a token revoked since, checked again next.
     pub token_fresh: bool,
+    /// Whether the site has been asked what it is (`serverInfo`), so that `deployment` is what it said, or what the
+    /// setting says where it did not say.
+    pub deployment_learned: bool,
     /// The last failure, by kind, until a pull succeeds.
     pub failure: Option<Failure>,
     /// The issue observer's pull under way, kept when a page fails so the next attempt goes on from it.
@@ -417,6 +428,7 @@ impl JiraObserverState {
             retry: Retry::new(RETRY),
             token_checked: false,
             token_fresh: false,
+            deployment_learned: false,
             failure: None,
             issue_walk: None,
             user_walk: None,
@@ -546,6 +558,56 @@ impl JiraObserverState {
             self.token_checked = true;
             self.token_fresh = true;
         }
+        Ok(())
+    }
+
+    /// Asks the site what it is, once: `serverInfo`'s `deploymentType` (`Server` on all four public Data Centers)
+    /// decides how it is read, over JIRA_DEPLOYMENT and the address, which are kept where it does not say (an error
+    /// status, a body that does not decode, or no `deploymentType`). A site that cannot be reached fails the pull, and
+    /// the next asks again.
+    pub async fn ensure_site(&mut self) -> Result<(), ActorProcessingErr> {
+        if self.deployment_learned {
+            return Ok(());
+        }
+        let response = self
+            .send(&format!("{}{SERVER_INFO_OP}", self.jira_url))
+            .await?;
+        let status = response.status();
+        let said = if status.is_success() {
+            response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|info| info["deploymentType"].as_str().map(str::to_string))
+        } else {
+            None
+        };
+        match said.as_deref().and_then(JiraDeployment::from_server_info) {
+            Some(deployment) => {
+                if deployment != self.deployment {
+                    warn!(
+                        "the site says it is {} (serverInfo deploymentType {:?}), where JIRA_DEPLOYMENT or the \
+                         address said {}: reading it as the site says",
+                        deployment.as_str(),
+                        said.as_deref().unwrap_or_default(),
+                        self.deployment.as_str()
+                    );
+                } else {
+                    info!(
+                        "the site says it is {} (serverInfo deploymentType {:?})",
+                        deployment.as_str(),
+                        said.as_deref().unwrap_or_default()
+                    );
+                }
+                self.deployment = deployment;
+            }
+            None => warn!(
+                "{SERVER_INFO_OP} did not say the deployment type ({status}): reading the site as {}, as \
+                 JIRA_DEPLOYMENT or the address says",
+                self.deployment.as_str()
+            ),
+        }
+        self.deployment_learned = true;
         Ok(())
     }
 

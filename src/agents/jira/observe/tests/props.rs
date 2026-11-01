@@ -32,7 +32,7 @@ use jira_observer::issues::{
     Filter, INCREMENTAL_OVERLAP_SECS, ORDER, Start, cursor_minutes, incremental_window, issue_jql,
     jql_filter,
 };
-use jira_observer::settings::{normalise_jira_url, token_looks_base64};
+use jira_observer::settings::{normalise_jira_url, parse_query_date, token_looks_base64};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -285,6 +285,45 @@ proptest! {
         // A filter that is not relative does not move.
         for fixed in [Filter::Everything, Filter::After("2024-01-01".to_string())] {
             prop_assert_eq!(fixed.jql(Duration::from_millis(elapsed_ms)), fixed.jql(Duration::ZERO));
+        }
+    }
+
+    /// Any real date, with or without a time to the minute, written with either separator JQL takes, reads back as
+    /// itself, says itself again the same way, and is what the first pull asks after, quoted.
+    #[test]
+    fn a_query_date_round_trips_and_is_quoted_in_the_jql(
+        days in 0i64..(200 * 366),
+        time in proptest::option::of((0u32..24, 0u32..60)),
+        slash in any::<bool>(),
+    ) {
+        let date = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + chrono::Duration::days(days);
+        let separator = if slash { "/" } else { "-" };
+        let mut written = date.format(&format!("%Y{separator}%m{separator}%d")).to_string();
+        let mut canonical = date.format("%Y-%m-%d").to_string();
+        if let Some((hour, minute)) = time {
+            written.push_str(&format!(" {hour:02}:{minute:02}"));
+            canonical.push_str(&format!(" {hour:02}:{minute:02}"));
+        }
+        let read = parse_query_date(&written).unwrap();
+        prop_assert_eq!(read.to_string(), canonical.clone());
+        prop_assert_eq!(parse_query_date(&read.to_string()).unwrap(), read);
+        prop_assert_eq!(
+            jql_filter(false, Duration::from_secs(1800), None, 0, Some(&read.to_string())),
+            Some(format!("updated > \"{canonical}\""))
+        );
+    }
+
+    /// Whatever QUERY_DATE holds, it is refused or it is a date said back in the one form, which never carries a
+    /// quote or anything else into the JQL.
+    #[test]
+    fn a_query_date_is_refused_or_a_date_in_one_form(raw in prop_oneof![any::<String>(), "[0-9/: -]{0,18}"]) {
+        if let Ok(read) = parse_query_date(&raw) {
+            let said = read.to_string();
+            prop_assert!(
+                said.len() == 10 || said.len() == 16,
+                "{:?} read as {:?}", raw, said
+            );
+            prop_assert!(said.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b' ' || b == b':'), "{}", said);
         }
     }
 

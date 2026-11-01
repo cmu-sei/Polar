@@ -52,6 +52,8 @@ const PROJECTS: &str = "/rest/api/2/project";
 const SEARCH: &str = "/rest/api/2/search";
 const GROUPS: &str = "/rest/api/2/groups/picker";
 const USER_SEARCH: &str = "/rest/api/2/user/search";
+const USER_PICKER: &str = "/rest/api/2/user/picker";
+const SERVER_INFO: &str = "/rest/api/2/serverInfo";
 
 /// Stands in for the broker client and keeps the topic of every publish, and its payload.
 struct Recorder {
@@ -243,6 +245,10 @@ async fn mount_site(server: &MockServer) {
         (GROUPS, json!({ "groups": [], "total": 0 })),
         (USER_SEARCH, json!([])),
         ("/rest/api/2/field", json!([])),
+        (
+            SERVER_INFO,
+            json!({ "version": "10.3.26", "deploymentType": "Server" }),
+        ),
         (SEARCH, issues),
     ] {
         Mock::given(method("GET"))
@@ -348,7 +354,12 @@ where
         "{topic} was never published"
     );
     assert_eq!(observer.get_status(), ActorStatus::Running);
-    let paths = paths(&server).await;
+    // What the site is (serverInfo) is asked once, beside these.
+    let paths: Vec<String> = paths(&server)
+        .await
+        .into_iter()
+        .filter(|p| p != SERVER_INFO)
+        .collect();
     assert_eq!(paths[..2], [MYSELF, MYSELF], "{paths:?}");
     assert!(paths[2..].iter().all(|p| p != MYSELF), "{paths:?}");
     observer.stop(None);
@@ -562,7 +573,7 @@ async fn with_no_issue_in_the_graph_the_first_pull_is_from_query_date_or_full() 
         (None, "ORDER BY updated ASC"),
         (
             Some("2024-01-01"),
-            "updated > 2024-01-01 ORDER BY updated ASC",
+            "updated > \"2024-01-01\" ORDER BY updated ASC",
         ),
     ] {
         let server = MockServer::start().await;
@@ -956,4 +967,58 @@ async fn a_group_pull_that_fails_on_a_page_resumes_at_that_page() {
         "resumed with the three already read left out"
     );
     observer.stop(None);
+}
+
+/// What the site says it is (`serverInfo`'s `deploymentType`) decides how it is read, over the setting; a site that
+/// does not say leaves the setting. Here the users observer, whose endpoint differs: the user search on Server and
+/// Data Center, the picker on Cloud.
+#[tokio::test]
+async fn the_deployment_is_what_the_site_says_it_is_and_otherwise_the_setting() {
+    for (says, configured, endpoint) in [
+        (
+            json!({ "deploymentType": "Server" }),
+            JiraDeployment::Cloud,
+            USER_SEARCH,
+        ),
+        (
+            json!({ "deploymentType": "Cloud" }),
+            JiraDeployment::ServerOrDataCenter,
+            USER_PICKER,
+        ),
+        (
+            json!({ "version": "10.3.26" }),
+            JiraDeployment::Cloud,
+            USER_PICKER,
+        ),
+        (json!({}), JiraDeployment::ServerOrDataCenter, USER_SEARCH),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(SERVER_INFO))
+            .respond_with(ResponseTemplate::new(200).set_body_json(says.clone()))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(USER_PICKER))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "users": [], "total": 0 })),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_site(&server).await;
+        let (client, topics) = recorder().await;
+        let mut args = args(&server, client);
+        args.deployment = configured;
+        let (observer, _) = Actor::spawn(None, JiraUserObserver, args).await.unwrap();
+
+        assert!(
+            published(&topics, JIRA_USERS_CONSUMER_TOPIC, 1).await,
+            "{says}"
+        );
+        assert_eq!(asked(&server, endpoint).await.len(), 1, "{says}");
+        assert_eq!(asked(&server, SERVER_INFO).await.len(), 1, "{says}");
+        observer.stop(None);
+    }
 }

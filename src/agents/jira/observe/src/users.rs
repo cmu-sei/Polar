@@ -66,6 +66,7 @@ impl JiraUserObserver {
     /// A page that fails leaves what was read in the observer's state ([`UserWalk`]), and the next attempt goes on
     /// from that page.
     async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
+        state.ensure_site().await?;
         state.ensure_token().await?;
 
         let mut walk = state.user_walk.take().unwrap_or_default();
