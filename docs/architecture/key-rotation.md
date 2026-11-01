@@ -23,8 +23,8 @@
 
 # Key rotation
 
-Status: DIRECTION DECIDED by the maintainer 2026-11-01; the design is DRAFTED below ("Design"), for the maintainer's
-review before anything is built. Arose from the multi-instance threat model (`authority-model.md`, "Multi-instance
+Status: DESIGN CLEARED by the maintainer 2026-11-01, every question below answered as recommended ("All as
+recommended"); not built, and to be built after custody part B (the credentials agent's own key in its daemon). Arose from the multi-instance threat model (`authority-model.md`, "Multi-instance
 workloads").
 
 ## Why

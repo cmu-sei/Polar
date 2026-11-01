@@ -754,6 +754,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   stores (a `BackupActor` its sibling), observable through pulled health; the credentials agent's store is its first user;
   document-carried secrets are re-delivered by the credentials agent after a workload's key rotates, never rewritten. The
   design is to be written and cleared before building.
+  DESIGN CLEARED 2026-11-01 (all twelve questions as recommended): a daemon `Rewrap`, the stores as their own progress, a
+  signed `Keys { retiring, retired }` authority kind, wrapped keys shreddable outside the hash chain. Build after custody
+  part B; the credentials agent's signing half is designed separately before first real use.
 - [ ] MULTI-INSTANCE: WHAT LETS ONE CONSUME (later; `authority-model.md`, "Multi-instance workloads", "Later"): shared
   subscriptions (a "load balancer") and commands to one instance; the encryption model already fits them.
 - [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; DECIDED 2026-11-01, `docs/architecture/authority-model.md`,
