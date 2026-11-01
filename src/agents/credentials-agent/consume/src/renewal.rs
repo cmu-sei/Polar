@@ -36,9 +36,6 @@ use std::collections::HashMap;
 /// is (`deployments.md`, item 2).
 pub const RENEWAL_BOUND_MILLIS: i64 = 5 * 60 * 1000;
 
-/// The asks admitted that the ledger may not have recorded yet: an issuance in flight, or one vouched for that
-/// cert-issuer's record has not reported. Held in memory by the ledger actor, which answers one ask at a time; lost at
-/// a restart, which only lifts a bound, since what was issued is in the ledger.
 /// An identity's pod and a certificate type: what one admission is of.
 type Admitted = (String, String, WorkloadCertType);
 
@@ -46,6 +43,9 @@ type Admitted = (String, String, WorkloadCertType);
 /// read).
 type Admission = (i64, Option<Vec<u8>>);
 
+/// The asks admitted that the ledger may not have recorded yet: an issuance in flight, or one vouched for that
+/// cert-issuer's record has not reported. Held in memory by the ledger actor, which answers one ask at a time; lost at
+/// a restart, which only lifts a bound, since what was issued is in the ledger.
 #[derive(Debug, Default)]
 pub struct Admissions {
     /// The last admission of each pod and type.
