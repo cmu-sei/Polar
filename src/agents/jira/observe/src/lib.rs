@@ -24,6 +24,7 @@
 */
 
 pub mod agent;
+pub mod credentials;
 pub mod groups;
 pub mod issues;
 pub mod projects;
@@ -36,7 +37,9 @@ use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use jira_common::types::JiraData;
 use polar::cassini::TcpClient;
-use polar_agent_builder::{HealthHandle, HoldReason};
+use polar_agent_builder::{CryptoClient, HealthHandle, HoldReason};
+use polar_crypto::CryptoError;
+use polar_crypto::registry::{HttpCredential, UseRefusal};
 use ractor::concurrency::Duration;
 use ractor::{ActorProcessingErr, ActorRef};
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
@@ -63,9 +66,9 @@ const MYSELF_OP: &str = "/rest/api/2/myself";
 
 /// What is logged when Jira does not accept the token.
 const TOKEN_REJECTED: &str = "Jira did not accept the token: the request was treated as \
-    anonymous. Check that the token is the raw token (not base64-encoded) and that the auth mode \
-    matches the site: Data Center/Server personal access token = no JIRA_EMAIL (Bearer); Jira \
-    Cloud API token = JIRA_EMAIL set (Basic)";
+    anonymous. Check that the credentials section holds the raw token (not base64-encoded) and \
+    that its kind matches the site: a Data Center/Server personal access token is a `token` \
+    (Bearer); a Jira Cloud API token is a `user-password` with the account's email (Basic)";
 
 /// The endpoints that describe the site rather than hold its data: a body from one of them that does not decode is
 /// not a moment's trouble but a site (or something in front of it, such as a sign-in page) that is not the Jira this
@@ -293,52 +296,90 @@ impl Retry {
     }
 }
 
-/// Authentication mode for the Jira REST API.
+/// How the observer authenticates to the Jira REST API.
 ///
-/// - `Basic` is what Atlassian Cloud expects: HTTP Basic Auth with the
-///   account email as username and an API token as password.
-/// - `Bearer` covers on-prem / Server / Data Center deployments (and
-///   Cloud OAuth 2.0 3LO access tokens), which use a plain
-///   `Authorization: Bearer <token>` header. This preserves today's
-///   behavior for existing on-prem deployments.
+/// - `Credential` is the one credential of the `credentials` runtime section ([`credentials`]), held by the
+///   CryptoActor under `name` and asked of it for `host` (JIRA_URL's) on each request: a `token` is sent as
+///   `Authorization: Bearer` (a Data Center or Server personal access token), a `user-password` as Basic (a Jira
+///   Cloud account's email and API token). The observer never keeps it.
 /// - `Anonymous` sends no credential at all (JIRA_ANONYMOUS, an explicit opt-in): the observer reads only what the
 ///   site shows anonymous users, and there is no token to check.
 #[derive(Clone)]
 pub enum JiraAuth {
-    Basic { email: String, token: String },
-    Bearer { token: String },
+    Credential {
+        name: String,
+        host: String,
+        crypto: std::sync::Arc<dyn CryptoClient>,
+    },
     Anonymous,
 }
 
-impl JiraAuth {
-    /// The mode, as a log names it, with the setting that chose it.
-    fn mode(&self) -> &'static str {
-        match self {
-            JiraAuth::Basic { .. } => "Basic, since JIRA_EMAIL is set",
-            JiraAuth::Bearer { .. } => "Bearer, since JIRA_EMAIL is not set",
-            JiraAuth::Anonymous => "no credential, since JIRA_ANONYMOUS is true",
-        }
-    }
+/// How a request's credential was sent, and whether the secret looks like a base64 copy of a token, for the log.
+pub struct SentWith {
+    pub mode: &'static str,
+    pub looks_base64: bool,
+}
 
+/// A request with the credential on it, how it was sent, and whether the secret looks like a base64 copy of a token.
+pub struct Authorised {
+    pub request: RequestBuilder,
+    pub mode: &'static str,
+    pub looks_base64: bool,
+}
+
+impl JiraAuth {
     pub fn is_anonymous(&self) -> bool {
         matches!(self, JiraAuth::Anonymous)
     }
 
-    /// Resolve auth mode from configuration. An email present => Basic (Cloud-style); absent
-    /// or empty => Bearer (on-prem/Server/DC-style).
-    pub fn from_parts(email: Option<String>, token: String) -> Self {
-        match email {
-            Some(email) if !email.is_empty() => JiraAuth::Basic { email, token },
-            _ => JiraAuth::Bearer { token },
-        }
-    }
-
-    /// Apply this auth mode to a reqwest RequestBuilder.
-    pub fn apply(&self, req: RequestBuilder) -> RequestBuilder {
-        match self {
-            JiraAuth::Basic { email, token } => req.basic_auth(email, Some(token)),
-            JiraAuth::Bearer { token } => req.bearer_auth(token),
-            JiraAuth::Anonymous => req,
+    /// The request with the credential on it. A credential the CryptoActor will not give (none registered under the
+    /// name, one not bound to the site's host, one that is not text) is a [`FailureKind::Credentials`] failure,
+    /// known at once; a CryptoActor that does not answer is one that may pass.
+    pub async fn apply(&self, req: RequestBuilder) -> Result<Authorised, JiraError> {
+        let JiraAuth::Credential { name, host, crypto } = self else {
+            return Ok(Authorised {
+                request: req,
+                mode: "no credential, since JIRA_ANONYMOUS is true",
+                looks_base64: false,
+            });
+        };
+        let refused = |why: String| {
+            JiraError::rejected_token(
+                format!(
+                    "{why}: sign a credentials section for jira-observer bound to the site's host"
+                ),
+                why,
+            )
+        };
+        match crypto.http_credential(name.clone(), host.clone()).await {
+            Ok(HttpCredential::Bearer(token)) => {
+                let token = std::str::from_utf8(&token)
+                    .map_err(|_| refused(format!("the credential `{name}` is not text")))?;
+                Ok(Authorised {
+                    looks_base64: settings::token_looks_base64(token),
+                    request: req.bearer_auth(token),
+                    mode: "Bearer, since the credential is a token",
+                })
+            }
+            Ok(HttpCredential::Basic { username, password }) => {
+                let password = std::str::from_utf8(&password)
+                    .map_err(|_| refused(format!("the credential `{name}` is not text")))?;
+                Ok(Authorised {
+                    looks_base64: settings::token_looks_base64(password),
+                    request: req.basic_auth(username, Some(password)),
+                    mode: "Basic, since the credential is a user-password",
+                })
+            }
+            Err(CryptoError::SecretNotRegistered(_)) => Err(refused(format!(
+                "the credential `{name}` is not registered (withdrawn, or not yet arrived)"
+            ))),
+            Err(CryptoError::Use(UseRefusal::HostNotBound)) => Err(refused(format!(
+                "the credential `{name}` is not bound to JIRA_URL's host"
+            ))),
+            Err(CryptoError::Use(why)) => Err(refused(format!("the credential `{name}`: {why}"))),
+            Err(other) => Err(JiraError::new(format!(
+                "the CryptoActor did not give the credential `{name}`: {other}"
+            ))),
         }
     }
 }
@@ -531,10 +572,23 @@ impl JiraObserverState {
     /// Sends a GET with this agent's credentials. A failure to send is a [`JiraError`] naming
     /// the request by its path; the whole error, address included, is logged at debug.
     async fn send(&self, url: &str) -> Result<reqwest::Response, JiraError> {
-        self.auth
-            .apply(self.web_client.get(url))
+        self.send_authorised(url)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// [`send`](Self::send), and how the credential was sent and whether it looks base64-encoded.
+    async fn send_authorised(&self, url: &str) -> Result<(reqwest::Response, SentWith), JiraError> {
+        let authorised = self.auth.apply(self.web_client.get(url)).await?;
+        let about = SentWith {
+            mode: authorised.mode,
+            looks_base64: authorised.looks_base64,
+        };
+        authorised
+            .request
             .send()
             .await
+            .map(|response| (response, about))
             .map_err(|e| {
                 debug!("GET {url} failed: {}", error_chain(&e));
                 JiraError::new(format!(
@@ -578,7 +632,13 @@ impl JiraObserverState {
     /// the log; never who it is.
     pub async fn check_token(&self) -> Result<String, JiraError> {
         let url = format!("{}{MYSELF_OP}", self.jira_url);
-        let response = self.send(&url).await?;
+        let (response, about) = self.send_authorised(&url).await?;
+        if about.looks_base64 {
+            warn!(
+                "the credential's secret looks like a base64-encoded copy of a token: it decodes to printable text. \
+                 Jira expects the token itself; sign the credentials section again with the raw token"
+            );
+        }
 
         let status = response.status();
         let anonymous = response
@@ -590,7 +650,7 @@ impl JiraObserverState {
             JiraError::rejected_token(
                 format!(
                     "{TOKEN_REJECTED}. This observer sends it as {}; {MYSELF_OP} {why}",
-                    self.auth.mode()
+                    about.mode
                 ),
                 format!("{MYSELF_OP} {why}: the token was not accepted"),
             )
@@ -810,10 +870,10 @@ impl JiraObserverState {
     fn what_to_set(&self, kind: FailureKind) -> &'static str {
         match kind {
             FailureKind::Credentials if self.auth.is_anonymous() => {
-                "the site does not show this to anonymous users: set JIRA_TOKEN, and JIRA_ANONYMOUS false, to read it"
+                "the site does not show this to anonymous users: set JIRA_ANONYMOUS false and sign a credential to read it"
             }
             FailureKind::Credentials => {
-                "check JIRA_TOKEN (raw, not base64), JIRA_EMAIL (Cloud only) and the account's permissions"
+                "check the credentials section (the raw token, its kind, its host) and the account's permissions"
             }
             _ => "check JIRA_URL, and that the site is a Jira Server, Data Center or Cloud",
         }
@@ -930,6 +990,131 @@ pub enum JiraObserverMessage {
     Resync,
 }
 
+/// A stand-in for the agent's CryptoActor, for the tests of this crate: it gives one credential as it is told, and
+/// keeps what it was asked.
+#[cfg(test)]
+pub(crate) mod test_crypto {
+    use polar_agent_builder::CryptoClient;
+    use polar_crypto::registry::{HttpCredential, SecretBinding, UseRefusal};
+    use polar_crypto::{CryptoError, Zeroizing};
+    use std::sync::{Arc, Mutex};
+
+    /// What the stand-in gives for a credential.
+    #[derive(Clone)]
+    pub(crate) enum Gives {
+        Bearer(&'static str),
+        Basic(&'static str, &'static str),
+        NotRegistered,
+        HostNotBound,
+    }
+
+    /// A registration: name, section, binding, context.
+    pub(crate) type Registered = (String, String, SecretBinding, Vec<u8>);
+    /// A section replaced, with the names kept.
+    pub(crate) type Replaced = (String, Vec<String>);
+
+    #[derive(Clone)]
+    pub(crate) struct FakeCrypto {
+        pub(crate) gives: Gives,
+        /// Every `(name, host)` a credential was asked for.
+        pub(crate) asked: Arc<Mutex<Vec<(String, String)>>>,
+        /// Every name registered, with its section, binding and context.
+        pub(crate) registered: Arc<Mutex<Vec<Registered>>>,
+        /// Every section replaced, with the names kept.
+        pub(crate) replaced: Arc<Mutex<Vec<Replaced>>>,
+    }
+
+    impl FakeCrypto {
+        pub(crate) fn giving(gives: Gives) -> Self {
+            Self {
+                gives,
+                asked: Arc::default(),
+                registered: Arc::default(),
+                replaced: Arc::default(),
+            }
+        }
+    }
+
+    #[ractor::async_trait]
+    impl CryptoClient for FakeCrypto {
+        async fn store_secret(&self, _: String, _: Vec<u8>) -> Result<(), CryptoError> {
+            Err(CryptoError::NoReply)
+        }
+        async fn encrypt_for_recipient(
+            &self,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, CryptoError> {
+            Err(CryptoError::NoReply)
+        }
+        async fn retrieve_secret(
+            &self,
+            _: String,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, CryptoError> {
+            Err(CryptoError::NoReply)
+        }
+        async fn register_secret(
+            &self,
+            name: String,
+            section: String,
+            _secret: Vec<u8>,
+            context: Vec<u8>,
+            binding: SecretBinding,
+        ) -> Result<(), CryptoError> {
+            self.registered
+                .lock()
+                .unwrap()
+                .push((name, section, binding, context));
+            Ok(())
+        }
+        async fn load_secret(&self, _: String, _: String) -> Result<bool, CryptoError> {
+            Ok(false)
+        }
+        async fn replace_section(
+            &self,
+            section: String,
+            keep: Vec<String>,
+        ) -> Result<Vec<String>, CryptoError> {
+            self.replaced.lock().unwrap().push((section, keep));
+            Ok(Vec::new())
+        }
+        async fn git_credential(
+            &self,
+            name: String,
+            _: String,
+        ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
+            Err(CryptoError::SecretNotRegistered(name))
+        }
+        async fn http_credential(
+            &self,
+            name: String,
+            host: String,
+        ) -> Result<HttpCredential, CryptoError> {
+            self.asked.lock().unwrap().push((name.clone(), host));
+            match &self.gives {
+                Gives::Bearer(token) => Ok(HttpCredential::Bearer(Zeroizing::new(
+                    token.as_bytes().to_vec(),
+                ))),
+                Gives::Basic(user, password) => Ok(HttpCredential::Basic {
+                    username: user.to_string(),
+                    password: Zeroizing::new(password.as_bytes().to_vec()),
+                }),
+                Gives::NotRegistered => Err(CryptoError::SecretNotRegistered(name)),
+                Gives::HostNotBound => Err(CryptoError::Use(UseRefusal::HostNotBound)),
+            }
+        }
+    }
+
+    /// The observers' authentication with a credential the stand-in gives as `gives`.
+    pub(crate) fn auth(gives: Gives) -> crate::JiraAuth {
+        crate::JiraAuth::Credential {
+            name: "jira".to_string(),
+            host: "jira.example.org".to_string(),
+            crypto: Arc::new(FakeCrypto::giving(gives)),
+        }
+    }
+}
+
 /// A stand-in for the agent's health actor, for the tests of this crate that see what the observers hold.
 #[cfg(test)]
 pub(crate) mod test_health {
@@ -1008,6 +1193,8 @@ pub(crate) mod test_health {
 mod tests {
     use super::*;
     use crate::test_health::{Told, health_recorder, told};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as STANDARD_B64;
     use cassini_client::TcpClientMessage;
     use ractor::{Actor, async_trait};
     use serde_json::json;
@@ -1047,7 +1234,7 @@ mod tests {
     }
 
     fn bearer() -> JiraAuth {
-        JiraAuth::from_parts(None, "t0ken".into())
+        crate::test_crypto::auth(crate::test_crypto::Gives::Bearer("t0ken"))
     }
 
     /// A site whose `/myself` answers with `response`.
@@ -1065,6 +1252,71 @@ mod tests {
         server.uri().trim_start_matches("http://").to_string()
     }
 
+    /// The header each kind of credential makes, asked of the CryptoActor for the site's host: a token as Bearer, a
+    /// user and password as Basic, and nothing reading anonymously.
+    #[tokio::test]
+    async fn the_credential_is_asked_for_the_site_s_host_and_sent_as_its_kind_says() {
+        use crate::test_crypto::{FakeCrypto, Gives};
+        let get = || reqwest::Client::new().get("https://jira.example.org/rest/api/2/project");
+        let header = |a: Authorised| {
+            a.request
+                .build()
+                .unwrap()
+                .headers()
+                .get("authorization")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+
+        let anonymous = JiraAuth::Anonymous.apply(get()).await.unwrap();
+        assert_eq!(header(anonymous), None);
+
+        let crypto = Arc::new(FakeCrypto::giving(Gives::Bearer("pat-token")));
+        let auth = JiraAuth::Credential {
+            name: "jira".into(),
+            host: "jira.example.org".into(),
+            crypto: crypto.clone(),
+        };
+        let sent = auth.apply(get()).await.unwrap();
+        assert_eq!(sent.mode, "Bearer, since the credential is a token");
+        assert_eq!(header(sent).as_deref(), Some("Bearer pat-token"));
+        assert_eq!(
+            *crypto.asked.lock().unwrap(),
+            [("jira".to_string(), "jira.example.org".to_string())]
+        );
+
+        let cloud = crate::test_crypto::auth(Gives::Basic("me@example.org", "api-token"));
+        let sent = cloud.apply(get()).await.unwrap();
+        assert_eq!(sent.mode, "Basic, since the credential is a user-password");
+        let expected = format!("Basic {}", STANDARD_B64.encode("me@example.org:api-token"));
+        assert_eq!(header(sent), Some(expected));
+    }
+
+    /// A credential the CryptoActor will not give is the credentials' failure at once, with what to do, never the
+    /// secret: none registered, or one not bound to the site's host.
+    #[tokio::test]
+    async fn a_credential_the_crypto_actor_will_not_give_is_a_credentials_failure() {
+        use crate::test_crypto::Gives;
+        for (gives, said) in [
+            (Gives::NotRegistered, "is not registered"),
+            (Gives::HostNotBound, "is not bound to JIRA_URL's host"),
+        ] {
+            let error = match crate::test_crypto::auth(gives)
+                .apply(reqwest::Client::new().get("https://jira.example.org/"))
+                .await
+            {
+                Ok(_) => panic!("a request went out"),
+                Err(e) => e,
+            };
+            assert_eq!(error.kind(), FailureKind::Credentials);
+            assert!(error.token_rejected(), "known now, not after a recheck");
+            assert!(error.to_string().contains(said), "{error}");
+            assert!(
+                error.to_string().contains("sign a credentials section"),
+                "{error}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_token_treated_as_anonymous_is_refused_with_what_to_check() {
         let server =
@@ -1080,7 +1332,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.starts_with(TOKEN_REJECTED), "{message}");
         assert!(
-            message.contains("Bearer, since JIRA_EMAIL is not set"),
+            message.contains("Bearer, since the credential is a token"),
             "{message}"
         );
         assert!(message.contains("401"), "{message}");
@@ -1476,7 +1728,7 @@ mod tests {
                 token_error,
                 host_of(&refused_token),
                 HoldReason::Credentials,
-                "check JIRA_TOKEN",
+                "check the credentials section",
             ),
             (
                 bearer(),
@@ -1490,7 +1742,7 @@ mod tests {
                 anonymous_refusal,
                 "jira.invalid".to_string(),
                 HoldReason::Credentials,
-                "set JIRA_TOKEN, and JIRA_ANONYMOUS false",
+                "set JIRA_ANONYMOUS false and sign a credential",
             ),
         ] {
             let ticked = Arc::new(AtomicU64::new(0));

@@ -24,16 +24,16 @@
 //! What the Jira observer is, as the infrastructure asks to be told: see
 //! `polar_agent_builder::PolarAgent`.
 
+use crate::JiraDeployment;
 use crate::settings::{self, JiraSettings};
 use crate::supervisor::{ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET};
-use crate::{JiraAuth, JiraDeployment};
 use polar_agent_builder::{
     Cause, Configured, GraphDecl, HoldReason, PolarAgent, StartError, TopicDecl,
 };
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
 
@@ -42,23 +42,30 @@ const BASE_INTERVAL_SECS: u64 = 1800;
 
 pub struct JiraObserver;
 
-/// What the observers are started with, made from the configuration.
-struct Prepared {
-    jira_url: String,
-    auth: JiraAuth,
-    deployment: JiraDeployment,
-    egress: polar::egress::Egress,
-    query_date: Option<String>,
+/// What the observers are started with, made from the configuration. The credential is not here: it is the signed
+/// `credentials` runtime section, which the supervisor hands to the CryptoActor (`crate::credentials`).
+#[derive(Clone)]
+pub struct Prepared {
+    pub jira_url: String,
+    /// Read without a credential (JIRA_ANONYMOUS).
+    pub anonymous: bool,
+    /// The host the credential is asked for: JIRA_URL's, which must then be https and a name. None reading
+    /// anonymously.
+    pub credential_host: Option<String>,
+    pub deployment: JiraDeployment,
+    pub egress: polar::egress::Egress,
+    pub query_date: Option<String>,
 }
 
 /// The observers' settings from `config`, or why they cannot work: an address that cannot be the site's (the
-/// placeholder), or any other configuration error. Never a secret's value: polar-env never shows one.
-fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
-    // Declared and judged with the rest of the configuration, so a missing address or token
-    // was reported before this point, with every other problem.
+/// placeholder; one that is not https for a credential), or any other configuration error. Never a secret's value:
+/// polar-env never shows one.
+pub fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
+    // Declared and judged with the rest of the configuration, so a missing address was reported before this point,
+    // with every other problem.
     let settings = JiraSettings::read(config).map_err(|e| e.to_string())?;
     // An address that cannot be the site's is a configuration error, with what to set; so are a deployment that is
-    // not one, a QUERY_DATE that is not a date, and the placeholder email.
+    // not one and a QUERY_DATE that is not a date.
     let jira_url = settings::normalise_jira_url(&settings.url)?;
     let deployment = settings
         .deployment
@@ -72,36 +79,14 @@ fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
         .map(settings::parse_query_date)
         .transpose()?
         .map(|date| date.to_string());
-    settings::refuse_placeholder_email(settings.email.as_deref())?;
-    // The configuration's judgement holds a token exactly when the observer is not reading anonymously.
-    let auth = match (settings.anonymous, settings.token) {
-        (true, _) => {
-            info!(
-                "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows \
-                 the public (anonymous users); what it hides from them is not read"
-            );
-            JiraAuth::Anonymous
-        }
-        (false, Some(token)) => {
-            if settings::token_looks_base64(&token) {
-                warn!(
-                    "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
-                     text. Jira expects the token itself; check that the Secret was not encoded twice \
-                     (a Secret's data is base64 already, its stringData is not)"
-                );
-            }
-            JiraAuth::from_parts(settings.email, token)
-        }
-        (false, None) => {
-            return Err(
-                "JIRA_TOKEN is not set: set it, or set JIRA_ANONYMOUS to true to read the site without a \
-                 credential"
-                    .to_string(),
-            );
-        }
+    let credential_host = if settings.anonymous {
+        None
+    } else {
+        Some(crate::credentials::credential_host(&jira_url)?)
     };
     Ok(Prepared {
-        auth,
+        anonymous: settings.anonymous,
+        credential_host,
         deployment: JiraDeployment::resolve(deployment, &jira_url),
         jira_url,
         egress: polar::egress::Egress::read(config).map_err(|e| e.to_string())?,
@@ -113,7 +98,9 @@ impl PolarAgent for JiraObserver {
     const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str =
         "Polls a Jira site for projects, groups, users and issues and publishes them to Cassini";
-    const NEEDS: &'static [polar_agent_builder::Capability] = &[];
+    // The CryptoActor holds the credential of the `credentials` runtime section and gives it for the site's host only.
+    const NEEDS: &'static [polar_agent_builder::Capability] =
+        &[polar_agent_builder::Capability::Encryption];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const TOPICS: &'static [TopicDecl] = &[
         TopicDecl::publish(
@@ -145,12 +132,15 @@ impl PolarAgent for JiraObserver {
         "the newest updated_ms of an issue, where its first issue pull starts",
     )];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
+        &[&crate::credentials::CREDENTIALS];
     const HELP: Option<&'static str> = Some(
         "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
          projects, groups, users and issues for jira-processor to write into the graph. \
-         JIRA_TOKEN is the credential; with JIRA_EMAIL as well it is Atlassian Cloud's basic \
-         authentication, without it a bearer token. JIRA_ANONYMOUS=true reads without a credential, \
-         only what the site shows the public, and then JIRA_TOKEN and JIRA_EMAIL are refused. The site's \
+         The credential comes in the `credentials` runtime section, as ciphertext only this agent can open, \
+         used only for the hosts it is bound to: a `token` (a Data Center or Server personal access token) is \
+         sent as Bearer, a `user-password` (a Jira Cloud account's email and API token) as Basic. \
+         JIRA_ANONYMOUS=true reads without a credential, only what the site shows the public. The site's \
          serverInfo says whether it is Cloud; JIRA_DEPLOYMENT is used where it does not say, and the \
          address where neither does. Before its first issue pull it asks the state agent for the newest update of an \
          issue in the graph and starts there; QUERY_DATE starts the first pull from a date only when the graph \
@@ -178,12 +168,14 @@ impl PolarAgent for JiraObserver {
                 .await;
             }
         };
+        if prepared.anonymous {
+            info!(
+                "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows \
+                 the public (anonymous users); what it hides from them is not read"
+            );
+        }
         let args = ObserverSupervisorArgs {
-            auth: prepared.auth,
-            deployment: prepared.deployment,
-            jira_url: prepared.jira_url,
-            egress: prepared.egress,
-            query_date: prepared.query_date,
+            prepared,
             // TODO: read this from configuration
             base_interval: BASE_INTERVAL_SECS,
             configured,
@@ -214,11 +206,14 @@ mod tests {
     polar_agent_builder::polar_agent_tests!(JiraObserver);
 
     fn config(url: &str) -> polar_env::Config {
-        let env: std::collections::HashMap<String, String> =
-            [("JIRA_URL", url), ("JIRA_TOKEN", "t0ken-not-shown")]
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+        config_of(&[("JIRA_URL", url)])
+    }
+
+    fn config_of(pairs: &[(&str, &str)]) -> polar_env::Config {
+        let env: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         polar_env::Config::builder(&env)
             .register(&settings::SECTION)
             .register(&polar::egress::SECTION)
@@ -234,9 +229,49 @@ mod tests {
         };
         assert!(why.contains("example placeholder"), "{why}");
         assert!(why.contains("workloads.jira-observer.env"), "{why}");
-        assert!(!why.contains("t0ken-not-shown"));
         let prepared = prepare(&config("https://jira.example.org")).unwrap();
         assert_eq!(prepared.jira_url, "https://jira.example.org");
+    }
+
+    /// A site read with a credential is https and a host name, and the credential is asked for that host; one read
+    /// anonymously needs neither.
+    #[test]
+    fn a_credential_is_asked_for_the_site_s_host_and_only_over_https() {
+        let prepared = prepare(&config("https://Jira.Example.org/jira")).unwrap();
+        assert!(!prepared.anonymous);
+        assert_eq!(
+            prepared.credential_host.as_deref(),
+            Some("jira.example.org")
+        );
+
+        let why = match prepare(&config("http://jira.example.org")) {
+            Ok(_) => panic!("a credential would go over http"),
+            Err(why) => why,
+        };
+        assert!(
+            why.contains("https") && why.contains("JIRA_ANONYMOUS"),
+            "{why}"
+        );
+
+        let anonymous = prepare(&config_of(&[
+            ("JIRA_URL", "http://jira.example.org"),
+            ("JIRA_ANONYMOUS", "true"),
+        ]))
+        .unwrap();
+        assert!(anonymous.anonymous);
+        assert_eq!(anonymous.credential_host, None);
+    }
+
+    /// The credential is the `credentials` runtime section, opened by the CryptoActor: the agent needs encryption,
+    /// and declares the section.
+    #[test]
+    fn the_agent_needs_encryption_and_declares_the_credentials_section() {
+        assert!(JiraObserver::NEEDS.contains(&polar_agent_builder::Capability::Encryption));
+        assert!(
+            JiraObserver::RUNTIME
+                .iter()
+                .any(|section| section.name == crate::credentials::SECTION_NAME)
+        );
     }
 
     /// The render writes the target's egress setting only into an agent that declares the section.

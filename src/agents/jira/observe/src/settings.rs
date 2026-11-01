@@ -31,10 +31,7 @@
 use crate::JiraDeployment;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
-use polar_env::{
-    Config, ConfigError, Defaulted, Described, Env, EnvError, Optional, Problem, Readable,
-    Required, Section, VarDesc,
-};
+use polar_env::{Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section};
 use url::Url;
 
 /// The address of the Jira site.
@@ -43,77 +40,12 @@ pub static JIRA_URL: Required<String> = Required::text(
     "the Jira site's address, for example https://jira.example.org (a context path such as https://host/jira is kept)",
 );
 
-/// The credential the observer presents to Jira: required, unless [`JIRA_ANONYMOUS`] opts out of presenting one.
-pub static JIRA_TOKEN: TokenUnlessAnonymous = TokenUnlessAnonymous(
-    Optional::text(
-        "JIRA_TOKEN",
-        "the API token (Atlassian Cloud) or the bearer token (Server, Data Center) the observer presents to Jira; \
-         required unless JIRA_ANONYMOUS is true, and refused if it is",
-    )
-    .secret(),
-);
-
 /// The explicit opt-in to read the site without a credential, as the public sees it.
 pub static JIRA_ANONYMOUS: Defaulted<bool> = Defaulted::flag(
     "JIRA_ANONYMOUS",
-    "true to read the site without a credential, only what it shows anonymous users (no JIRA_TOKEN, no \
-     JIRA_EMAIL); false needs JIRA_TOKEN",
+    "true to read the site without a credential, only what it shows anonymous users; false reads it with the \
+     credential of the observer's signed `credentials` runtime section",
     "false",
-);
-
-/// JIRA_TOKEN, judged with JIRA_ANONYMOUS by its own check, so that it is reported with every other problem
-/// (a section's relations run only once every variable parses): missing without the opt-in, or given with it.
-pub struct TokenUnlessAnonymous(Optional<String>);
-
-impl TokenUnlessAnonymous {
-    fn error(&self, problem: Problem) -> EnvError {
-        let desc = self.0.desc();
-        EnvError {
-            name: desc.name,
-            doc: desc.doc,
-            problem,
-        }
-    }
-}
-
-impl Described for TokenUnlessAnonymous {
-    fn desc(&self) -> VarDesc {
-        self.0.desc()
-    }
-
-    fn validate(&self, env: &dyn Env) -> Result<(), EnvError> {
-        // A JIRA_ANONYMOUS that does not parse is its own problem, reported by its own check.
-        let anonymous = JIRA_ANONYMOUS.read(env).unwrap_or(false);
-        match (self.0.read(env)?, anonymous) {
-            (None, false) => Err(self.error(Problem::Missing)),
-            (Some(_), true) => Err(self.error(Problem::Malformed {
-                shown: "<hidden>".to_string(),
-                reason:
-                    "must not be set when JIRA_ANONYMOUS is true: reading anonymously sends no \
-                         credential, so a token says the opposite; unset one of them"
-                        .to_string(),
-            })),
-            _ => Ok(()),
-        }
-    }
-}
-
-impl Readable for TokenUnlessAnonymous {
-    type Out = Option<String>;
-
-    fn name(&self) -> &'static str {
-        self.0.name()
-    }
-
-    fn read_from(&self, env: &dyn Env) -> Result<Option<String>, EnvError> {
-        self.validate(env)?;
-        self.0.read(env)
-    }
-}
-
-pub static JIRA_EMAIL: Optional<String> = Optional::text(
-    "JIRA_EMAIL",
-    "the account email, which with the token makes Atlassian Cloud's basic authentication; leave it unset for a bearer token",
 );
 
 pub static JIRA_DEPLOYMENT: Optional<String> = Optional::text(
@@ -128,29 +60,12 @@ pub static QUERY_DATE: Optional<String> = Optional::text(
      graph has none; unset pulls all of them. Any other value is refused at start",
 );
 
-static VARIABLES: &[&dyn Described] = &[
-    &JIRA_URL,
-    &JIRA_TOKEN,
-    &JIRA_ANONYMOUS,
-    &JIRA_EMAIL,
-    &JIRA_DEPLOYMENT,
-    &QUERY_DATE,
-];
+static VARIABLES: &[&dyn Described] = &[&JIRA_URL, &JIRA_ANONYMOUS, &JIRA_DEPLOYMENT, &QUERY_DATE];
 
-/// What must hold between the variables once each parses: an email is half of Cloud's credential, so it too says
-/// the opposite of reading anonymously.
-fn relations(env: &dyn Env) -> Vec<String> {
-    let anonymous = JIRA_ANONYMOUS.read(env).unwrap_or(false);
-    let email = JIRA_EMAIL.read(env).ok().flatten();
-    if anonymous && email.is_some() {
-        vec![
-            "JIRA_EMAIL must not be set when JIRA_ANONYMOUS is true: reading anonymously sends no credential, \
-             and an email is half of one; unset one of them"
-                .to_string(),
-        ]
-    } else {
-        Vec::new()
-    }
+/// Nothing holds between the variables: the credential is not a variable but the signed `credentials` runtime
+/// section (`crate::credentials`), which reading anonymously does without.
+fn relations(_env: &dyn Env) -> Vec<String> {
+    Vec::new()
 }
 
 /// The section the Jira observer registers.
@@ -163,11 +78,8 @@ pub static SECTION: Section = Section {
 /// The observer's settings, read from the snapshot the builder took.
 pub struct JiraSettings {
     pub url: String,
-    /// `None` only when reading anonymously.
-    pub token: Option<String>,
     /// Read without a credential (JIRA_ANONYMOUS).
     pub anonymous: bool,
-    pub email: Option<String>,
     pub deployment: Option<String>,
     pub query_date: Option<String>,
 }
@@ -176,9 +88,7 @@ impl JiraSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
             url: config.read(&JIRA_URL)?,
-            token: config.read(&JIRA_TOKEN)?,
             anonymous: config.read(&JIRA_ANONYMOUS)?,
-            email: config.read(&JIRA_EMAIL)?,
             deployment: config.read(&JIRA_DEPLOYMENT)?,
             query_date: config.read(&QUERY_DATE)?,
         })
@@ -313,23 +223,6 @@ pub fn parse_query_date(raw: &str) -> Result<QueryDate, String> {
     Ok(QueryDate { day, time })
 }
 
-/// The account email the target templates ship in JIRA_EMAIL until someone sets the real one.
-const PLACEHOLDER_EMAIL: &str = "jira-user@example.org";
-
-/// Refuses the placeholder JIRA_EMAIL, as [`normalise_jira_url`] refuses the placeholder address: with any email
-/// the observer sends Basic authentication, which a Data Center or Server personal access token is refused under,
-/// for ever.
-pub fn refuse_placeholder_email(email: Option<&str>) -> Result<(), String> {
-    match email {
-        Some(email) if email.trim().eq_ignore_ascii_case(PLACEHOLDER_EMAIL) => Err(format!(
-            "JIRA_EMAIL is still the example placeholder {PLACEHOLDER_EMAIL}: leave it unset for a Data Center or \
-             Server personal access token (Bearer), or set it to the Atlassian Cloud account the API token belongs \
-             to (Basic), in workloads.jira-observer.env in the target's config.nuon"
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// True if the token looks like a base64-encoded copy of a token rather than the token itself:
 /// it decodes, as standard or URL-safe base64 with or without padding, to at least 16
 /// characters of printable ASCII with no whitespace. A Data Center personal access token is
@@ -345,7 +238,6 @@ pub fn token_looks_base64(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::JiraAuth;
     use base64::Engine;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
@@ -483,10 +375,7 @@ mod tests {
         Config::builder(&env).register(&SECTION).build()
     }
 
-    const MINIMUM: &[(&str, &str)] = &[
-        ("JIRA_URL", "https://jira.example.org"),
-        ("JIRA_TOKEN", "t0ken"),
-    ];
+    const MINIMUM: &[(&str, &str)] = &[("JIRA_URL", "https://jira.example.org")];
 
     #[test]
     fn the_section_is_sound_and_its_defaults_parse() {
@@ -494,119 +383,38 @@ mod tests {
     }
 
     #[test]
-    fn a_url_and_a_token_are_enough() {
+    fn a_url_is_enough() {
         let settings = JiraSettings::read(&config(MINIMUM)).unwrap();
         assert_eq!(settings.url, "https://jira.example.org");
-        assert_eq!(settings.token.as_deref(), Some("t0ken"));
         assert!(!settings.anonymous);
-        assert_eq!(settings.email, None);
         assert_eq!(settings.deployment, None);
         assert_eq!(settings.query_date, None);
     }
 
     #[test]
-    fn a_missing_url_or_token_is_named_with_what_it_is_for() {
+    fn a_missing_url_is_named_with_what_it_is_for() {
         let error = config(&[]).check().join(" | ");
         assert!(
             error.contains("JIRA_URL") && error.contains("address"),
             "{error}"
         );
-        assert!(error.contains("JIRA_TOKEN"), "{error}");
         assert!(JiraSettings::read(&config(&[])).is_err());
     }
 
-    /// JIRA_ANONYMOUS=true is the explicit opt-in to read without a credential: no token is needed then, and one
-    /// given as well is refused as contradictory (as is an email), without showing it.
+    /// The token and the email are not settings any more: the credential is the signed `credentials` runtime
+    /// section. A document that still gives either is refused by name, as any variable the agent does not declare.
     #[test]
-    fn anonymous_reading_needs_no_token_and_refuses_one() {
+    fn the_token_and_the_email_are_not_settings() {
+        let names: Vec<&str> = VARIABLES.iter().map(|v| v.desc().name).collect();
+        assert!(!names.contains(&"JIRA_TOKEN"), "{names:?}");
+        assert!(!names.contains(&"JIRA_EMAIL"), "{names:?}");
         let anonymous = [
             ("JIRA_URL", "https://issues.apache.org/jira"),
             ("JIRA_ANONYMOUS", "true"),
         ];
         let settings = JiraSettings::read(&config(&anonymous)).unwrap();
         assert!(settings.anonymous);
-        assert_eq!(settings.token, None);
         assert_eq!(config(&anonymous).check(), Vec::<String>::new());
-
-        let both = [anonymous.as_slice(), &[("JIRA_TOKEN", "t0ken")]].concat();
-        let problems = config(&both).check().join(" | ");
-        assert!(
-            problems.contains("JIRA_TOKEN") && problems.contains("JIRA_ANONYMOUS"),
-            "{problems}"
-        );
-        assert!(!problems.contains("t0ken"), "{problems}");
-
-        let with_email = [anonymous.as_slice(), &[("JIRA_EMAIL", "me@example.com")]].concat();
-        let problems = config(&with_email).check().join(" | ");
-        assert!(
-            problems.contains("JIRA_EMAIL") && problems.contains("JIRA_ANONYMOUS"),
-            "{problems}"
-        );
-    }
-
-    /// Leaving the token out without the opt-in is still a configuration error, which says how to opt in.
-    #[test]
-    fn no_token_without_the_opt_in_is_a_configuration_error() {
-        for given in [
-            vec![("JIRA_URL", "https://jira.example.org")],
-            vec![
-                ("JIRA_URL", "https://jira.example.org"),
-                ("JIRA_ANONYMOUS", "false"),
-            ],
-        ] {
-            let problems = config(&given).check().join(" | ");
-            assert!(
-                problems.contains("JIRA_TOKEN is not set") && problems.contains("JIRA_ANONYMOUS"),
-                "{problems}"
-            );
-            assert!(JiraSettings::read(&config(&given)).is_err());
-        }
-    }
-
-    #[test]
-    fn anonymous_reading_sends_no_credential() {
-        let request = JiraAuth::Anonymous
-            .apply(reqwest::Client::new().get("https://jira.example.org/rest/api/2/project"))
-            .build()
-            .unwrap();
-        assert!(request.headers().get("authorization").is_none());
-        for auth in [
-            JiraAuth::from_parts(None, "t".into()),
-            JiraAuth::from_parts(Some("me@example.org".into()), "t".into()),
-        ] {
-            let request = auth
-                .apply(reqwest::Client::new().get("https://jira.example.org/rest/api/2/project"))
-                .build()
-                .unwrap();
-            assert!(request.headers().get("authorization").is_some());
-        }
-    }
-
-    #[test]
-    fn the_token_is_never_shown_in_a_report() {
-        let c = config(MINIMUM);
-        let report = c.report();
-        let token = report.iter().find(|r| r.name == "JIRA_TOKEN").unwrap();
-        assert_eq!(token.value.as_deref(), Some("<hidden>"));
-    }
-
-    #[test]
-    fn an_email_makes_basic_authentication_and_no_email_a_bearer_token() {
-        assert!(matches!(
-            JiraAuth::from_parts(Some("me@example.org".into()), "t".into()),
-            JiraAuth::Basic { .. }
-        ));
-        assert!(matches!(
-            JiraAuth::from_parts(None, "t".into()),
-            JiraAuth::Bearer { .. }
-        ));
-        assert!(
-            matches!(
-                JiraAuth::from_parts(Some("".into()), "t".into()),
-                JiraAuth::Bearer { .. }
-            ),
-            "an empty email is no email"
-        );
     }
 
     #[test]
@@ -676,23 +484,5 @@ mod tests {
                 "{raw:?}: {error}"
             );
         }
-    }
-
-    /// The email the target templates ship is refused as the placeholder address is: with it, a Data Center token
-    /// would be sent as Basic authentication and refused for ever.
-    #[test]
-    fn the_shipped_placeholder_email_is_refused() {
-        for raw in ["jira-user@example.org", " Jira-User@Example.org "] {
-            let error = refuse_placeholder_email(Some(raw)).unwrap_err();
-            assert!(
-                error.contains("JIRA_EMAIL") && error.contains("placeholder"),
-                "{raw:?}: {error}"
-            );
-        }
-        assert_eq!(
-            refuse_placeholder_email(Some("svc-polar@corp.example.com")),
-            Ok(())
-        );
-        assert_eq!(refuse_placeholder_email(None), Ok(()));
     }
 }

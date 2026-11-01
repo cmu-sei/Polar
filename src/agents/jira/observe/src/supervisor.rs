@@ -20,20 +20,22 @@
 
    DM26-0670
 */
+use crate::agent::Prepared;
+use crate::credentials;
 use crate::groups::JiraGroupObserver;
 use crate::issues::JiraIssueObserver;
 use crate::projects::JiraProjectObserver;
 use crate::users::JiraUserObserver;
 use crate::{
     BROKER_CLIENT_NAME, JIRA_GROUP_OBSERVER, JIRA_ISSUE_OBSERVER, JIRA_PROJECT_OBSERVER,
-    JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage, RETRY,
+    JIRA_USER_OBSERVER, JiraAuth, JiraObserverArgs, JiraObserverMessage, RETRY,
 };
 use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;
 use polar::egress::Egress;
 use polar_agent_builder::{
-    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage, StateClient,
+    AgentBuilder, ConfigurationHandle, Configured, CryptoClient, HealthClient, HealthHandle,
+    HoldReason, InfrastructureEvent, InfrastructureSupervisorMessage, StateClient,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -72,21 +74,36 @@ pub enum ObserverSupervisorMessage {
     /// terminated for rejuvenation. Stop the observers, then send
     /// InfrastructureSupervisorMessage::ProceedWithShutdown.
     PrepareShutdown,
+    /// A runtime section was replaced: the `credentials` section brings a new credential, or withdraws it.
+    RuntimeChanged {
+        section: String,
+    },
 }
 
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
-    jira_url: String,
-    auth: JiraAuth,
-    deployment: JiraDeployment,
+    /// The settings the observers are started with.
+    prepared: Prepared,
     base_interval: u64,
-    query_date: Option<String>,
     web_client: Client,
     tcp_client: TcpClient,
     /// The agent's soft state, which the issue observer's cursor is read from (its state actor).
     state: Option<Arc<dyn StateClient>>,
     healthcheck: HealthHandle,
+    /// The CryptoActor, which holds the credential and gives it for the site's host only.
+    crypto: Option<Arc<dyn CryptoClient>>,
+    /// The live configuration: the `credentials` runtime section is read from it.
+    configuration: Option<ConfigurationHandle>,
+    /// The name of the credential registered from the latest `credentials` section; none until one arrives, or
+    /// once it is withdrawn.
+    credential: Option<String>,
+    /// Why the latest `credentials` section gave no credential, when it was refused.
+    credential_problem: Option<String>,
+    /// Cassini has registered this agent: nothing calls Jira before.
+    registered: bool,
+    /// The standing problem the supervisor itself holds (no credential), apart from the observers' own.
+    held: Option<HoldReason>,
     /// Sent ProceedWithShutdown once the observers have stopped.
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     projects: Option<ActorRef<JiraObserverMessage>>,
@@ -98,25 +115,38 @@ pub struct ObserverSupervisorState {
 pub struct ObserverSupervisorArgs {
     /// The configuration `run` judged; the builder is made from it.
     pub configured: Configured,
-    pub jira_url: String,
-    pub auth: JiraAuth,
-    pub deployment: JiraDeployment,
-    /// How the site is reached: the proxy, the hosts that bypass it, and the CA trusted beside the system's.
-    pub egress: Egress,
-    pub query_date: Option<String>,
+    /// The settings `prepare` made of it.
+    pub prepared: Prepared,
     pub base_interval: u64,
 }
 
+/// What the supervisor holds when it has no credential to start the observers with.
+const NO_CREDENTIAL: &str = "jira-observer: no credential: sign a `credentials` runtime section for jira-observer \
+     (polar-sign), or set JIRA_ANONYMOUS to true";
+
 impl ObserverSupervisorState {
-    fn observer_args(&self) -> JiraObserverArgs {
+    /// How the observers authenticate: anonymously, or with the registered credential for the site's host. None while
+    /// a credential is needed and none is registered.
+    fn auth(&self) -> Option<JiraAuth> {
+        if self.prepared.anonymous {
+            return Some(JiraAuth::Anonymous);
+        }
+        Some(JiraAuth::Credential {
+            name: self.credential.clone()?,
+            host: self.prepared.credential_host.clone()?,
+            crypto: self.crypto.clone()?,
+        })
+    }
+
+    fn observer_args(&self, auth: JiraAuth) -> JiraObserverArgs {
         JiraObserverArgs {
-            jira_url: self.jira_url.clone(),
-            auth: self.auth.clone(),
-            deployment: self.deployment,
+            jira_url: self.prepared.jira_url.clone(),
+            auth,
+            deployment: self.prepared.deployment,
             tcp_client: self.tcp_client.clone(),
             web_client: self.web_client.clone(),
             base_interval: self.base_interval,
-            query_date: self.query_date.clone(),
+            query_date: self.prepared.query_date.clone(),
             retry: RETRY,
             clock: std::time::Instant::now,
             cursor: self.state.clone(),
@@ -159,9 +189,106 @@ impl ObserverSupervisorState {
             }
         }
     }
+
+    /// Holds `reason` with `message` for the supervisor itself.
+    fn hold(&mut self, reason: HoldReason, message: String) {
+        error!("{message}");
+        self.healthcheck.hold(reason, message);
+        self.held = Some(reason);
+    }
 }
 
 impl ObserverSupervisor {
+    /// Starts the observers once Cassini has registered the agent, with the credential if one is needed: without
+    /// one, nothing is pulled and the supervisor holds `Credentials` until a `credentials` section brings one.
+    async fn start_observers(
+        myself: &ActorRef<ObserverSupervisorMessage>,
+        state: &mut ObserverSupervisorState,
+    ) -> Result<(), ActorProcessingErr> {
+        if !state.registered {
+            return Ok(());
+        }
+        match state.auth() {
+            None => {
+                let message = match &state.credential_problem {
+                    Some(why) => format!("jira-observer: {why}"),
+                    None => NO_CREDENTIAL.to_string(),
+                };
+                state.hold(HoldReason::Credentials, message);
+                Ok(())
+            }
+            Some(auth) => {
+                if let Some(reason) = state.held.take() {
+                    state.healthcheck.release(reason);
+                }
+                ObserverSupervisor::spawn_observers(myself, state, auth).await
+            }
+        }
+    }
+
+    /// Stops the observers and starts them again with what is in force now. A standing problem an observer held goes
+    /// with it, so every hold is released first; an observer that meets it again holds it again.
+    async fn restart_observers(
+        myself: &ActorRef<ObserverSupervisorMessage>,
+        state: &mut ObserverSupervisorState,
+        why: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("OBSERVER_SUPERVISOR: starting the observers again: {why}");
+        state.stop_observers(why).await;
+        state.healthcheck.release(HoldReason::Credentials);
+        state.healthcheck.release(HoldReason::Configuration);
+        state.held = None;
+        ObserverSupervisor::start_observers(myself, state).await
+    }
+
+    /// Reads the latest `credentials` section and hands it to the CryptoActor; the name registered is the credential
+    /// the observers use. A body that does not read, or an entry the CryptoActor refuses, leaves no credential, and
+    /// says why.
+    async fn apply_credentials(state: &mut ObserverSupervisorState) {
+        let Some(configuration) = &state.configuration else {
+            return;
+        };
+        let value = match configuration.runtime(credentials::SECTION_NAME).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("could not read the credentials section: {e}");
+                return;
+            }
+        };
+        ObserverSupervisor::use_credentials(state, value.version, &value.body).await;
+    }
+
+    /// Version `version` of the `credentials` section, `body`: its entry registered with the CryptoActor is the
+    /// credential the observers use, or there is none, and why.
+    async fn use_credentials(
+        state: &mut ObserverSupervisorState,
+        version: u64,
+        body: &serde_json::Value,
+    ) {
+        let Some(crypto) = state.crypto.clone() else {
+            return;
+        };
+        let applied = match credentials::parse(body) {
+            Ok(entry) => credentials::apply(crypto.as_ref(), version, entry.as_ref()).await,
+            Err(problems) => Err(format!(
+                "the credentials section version {version} does not read: {}",
+                problems.join("; ")
+            )),
+        };
+        match applied {
+            Ok(name) => {
+                state.credential = name;
+                state.credential_problem = None;
+            }
+            Err(why) => {
+                error!(version, "{why}");
+                state.credential = None;
+                state.credential_problem = Some(why);
+            }
+        }
+    }
+
     /// The reqwest client: the way out of the cluster the egress settings give (polar::egress), with
     /// a bound on opening a connection and on each request.
     async fn get_client(
@@ -190,8 +317,9 @@ impl ObserverSupervisor {
     async fn spawn_observers(
         myself: &ActorRef<ObserverSupervisorMessage>,
         state: &mut ObserverSupervisorState,
+        auth: JiraAuth,
     ) -> Result<(), ActorProcessingErr> {
-        let args = state.observer_args();
+        let args = state.observer_args(auth);
 
         if state.projects.is_none() {
             let (observer, _) = Actor::spawn_linked(
@@ -252,9 +380,10 @@ impl Actor for ObserverSupervisor {
 
         // Fail on an egress CA that cannot be used before anything is started.
         let web_client =
-            ObserverSupervisor::get_client(&args.egress, CONNECT_TIMEOUT, REQUEST_TIMEOUT).await?;
+            ObserverSupervisor::get_client(&args.prepared.egress, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                .await?;
 
-        // Health check, router and broker client in one call. Observers only
+        // Health check, router, broker client and CryptoActor in one call. Observers only
         // depend on Cassini, which is the default capability; the issue
         // observer's soft state comes with the state actor the builder starts.
         let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
@@ -270,25 +399,48 @@ impl Actor for ObserverSupervisor {
                     Some(ObserverSupervisorMessage::PrepareShutdown)
                 }
             });
+        resources
+            .configuration
+            .runtime_changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(ObserverSupervisorMessage::RuntimeChanged {
+                    section: changed.section,
+                })
+            });
 
         Ok(ObserverSupervisorState {
-            jira_url: args.jira_url,
-            auth: args.auth,
-            deployment: args.deployment,
+            prepared: args.prepared,
             base_interval: args.base_interval,
-            query_date: args.query_date,
             web_client,
             tcp_client: resources.tcp_client,
             state: resources
                 .state
                 .map(|handle| Arc::new(handle) as Arc<dyn StateClient>),
             healthcheck: resources.healthcheck,
+            crypto: resources
+                .crypto
+                .map(|handle| Arc::new(handle) as Arc<dyn CryptoClient>),
+            configuration: Some(resources.configuration),
+            credential: None,
+            credential_problem: None,
+            registered: false,
+            held: None,
             infrastructure: resources.infrastructure,
             projects: None,
             groups: None,
             users: None,
             issues: None,
         })
+    }
+
+    async fn post_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // A section that arrived before the subscription.
+        ObserverSupervisor::apply_credentials(state).await;
+        Ok(())
     }
 
     async fn handle(
@@ -309,10 +461,22 @@ impl Actor for ObserverSupervisor {
                     .infrastructure
                     .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
             }
+            ObserverSupervisorMessage::RuntimeChanged { section } => {
+                if section == credentials::SECTION_NAME {
+                    ObserverSupervisor::apply_credentials(state).await;
+                    ObserverSupervisor::restart_observers(
+                        &myself,
+                        state,
+                        "a new version of the credentials section",
+                    )
+                    .await?;
+                }
+            }
             ObserverSupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cassini_connected();
-                    ObserverSupervisor::spawn_observers(&myself, state).await?;
+                    state.registered = true;
+                    ObserverSupervisor::start_observers(&myself, state).await?;
                 }
                 ClientEvent::MessagePublished { .. } => {
                     warn!("OBSERVER_SUPERVISOR: unexpected MessagePublished event, ignoring");
@@ -391,6 +555,7 @@ impl Actor for ObserverSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_crypto::{FakeCrypto, Gives};
     use crate::test_health::{Told, health_recorder, told};
     use polar::egress::testing::{TestCa, given, https_server, rerun};
     use polar_agent_builder::HoldReason;
@@ -426,28 +591,182 @@ mod tests {
             .0
     }
 
-    /// The supervisor's state as `pre_start` makes it, for a site at `url` read with `auth`, its health `health`.
+    /// The supervisor's state as `pre_start` makes it, for a site at `url`, read anonymously or with the credential
+    /// `credential` that `crypto` gives, its health `health`, Cassini registered.
     async fn supervisor_state(
         url: String,
-        auth: JiraAuth,
+        anonymous: bool,
+        credential: Option<&str>,
+        crypto: FakeCrypto,
         health: ActorRef<polar_health::HealthCheckMessage>,
     ) -> ObserverSupervisorState {
         ObserverSupervisorState {
-            jira_url: url,
-            auth,
-            deployment: JiraDeployment::ServerOrDataCenter,
+            prepared: Prepared {
+                jira_url: url,
+                anonymous,
+                credential_host: (!anonymous).then(|| "jira.example.org".to_string()),
+                deployment: crate::JiraDeployment::ServerOrDataCenter,
+                egress: Egress::default(),
+                query_date: None,
+            },
             base_interval: 3600,
-            query_date: None,
             web_client: Client::new(),
             tcp_client: TcpClient::from_actor_ref(sink().await),
             state: None,
             healthcheck: HealthHandle::new(health),
+            crypto: Some(Arc::new(crypto)),
+            configuration: None,
+            credential: credential.map(str::to_string),
+            credential_problem: None,
+            registered: true,
+            held: None,
             infrastructure: sink().await,
             projects: None,
             groups: None,
             users: None,
             issues: None,
         }
+    }
+
+    /// The observers are registered by name, so the tests that start them take turns.
+    static NAMED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn running(state: &ObserverSupervisorState) -> usize {
+        [&state.projects, &state.groups, &state.users, &state.issues]
+            .iter()
+            .filter(|slot| slot.is_some())
+            .count()
+    }
+
+    /// Without a credential, and not reading anonymously, nothing is asked of Jira: the supervisor starts no observer
+    /// and holds `Credentials`, saying to sign a credentials section. One arriving releases it, and the observers
+    /// start with it, asking the CryptoActor for the site's host.
+    #[tokio::test]
+    async fn without_a_credential_it_holds_and_a_credential_arriving_starts_the_observers() {
+        let _turn = NAMED.lock().await;
+        let server = site_without_data().await;
+        let (health, recorded) = health_recorder().await;
+        let crypto = FakeCrypto::giving(Gives::Bearer("t0ken"));
+        let mut state =
+            supervisor_state(server.uri(), false, None, crypto.clone(), health.clone()).await;
+        let myself = sink::<ObserverSupervisorMessage>().await;
+
+        ObserverSupervisor::start_observers(&myself, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(running(&state), 0);
+        assert_eq!(
+            told(&health, &recorded).await,
+            [Told::Hold(
+                HoldReason::Credentials,
+                NO_CREDENTIAL.to_string()
+            )]
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        state.credential = Some("jira".to_string());
+        ObserverSupervisor::restart_observers(&myself, &mut state, "a new credential")
+            .await
+            .unwrap();
+        assert_eq!(running(&state), 4);
+        let after = told_at_least(&health, &recorded, 3).await;
+        assert_eq!(after[1], Told::Release(HoldReason::Credentials));
+        assert!(
+            crypto
+                .asked
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(name, host)| name == "jira" && host == "jira.example.org")
+        );
+        assert!(!crypto.asked.lock().unwrap().is_empty());
+        state.stop_observers("the test is over").await;
+    }
+
+    /// Starting again (a new credential, new settings) stops every observer first, releases every hold, since the
+    /// observers that held are gone, and starts new ones, which hold again what they meet again.
+    #[tokio::test]
+    async fn starting_again_releases_every_hold_and_starts_new_observers() {
+        let _turn = NAMED.lock().await;
+        let server = site_without_data().await;
+        let (health, recorded) = health_recorder().await;
+        let mut state = supervisor_state(
+            server.uri(),
+            false,
+            Some("jira"),
+            FakeCrypto::giving(Gives::Bearer("t0ken")),
+            health.clone(),
+        )
+        .await;
+        let myself = sink::<ObserverSupervisorMessage>().await;
+        ObserverSupervisor::start_observers(&myself, &mut state)
+            .await
+            .unwrap();
+        let before: Vec<ActorId> = [&state.projects, &state.issues]
+            .iter()
+            .map(|o| o.as_ref().unwrap().get_id())
+            .collect();
+        // Each of the four is told 404 on what it pulls, and holds it.
+        told_at_least(&health, &recorded, 4).await;
+
+        ObserverSupervisor::restart_observers(&myself, &mut state, "new settings")
+            .await
+            .unwrap();
+        let after: Vec<ActorId> = [&state.projects, &state.issues]
+            .iter()
+            .map(|o| o.as_ref().unwrap().get_id())
+            .collect();
+        assert!(before.iter().all(|id| !after.contains(id)), "new observers");
+        let told = told_at_least(&health, &recorded, 10).await;
+        assert_eq!(
+            told[4..6],
+            [
+                Told::Release(HoldReason::Credentials),
+                Told::Release(HoldReason::Configuration)
+            ]
+        );
+        assert!(
+            told[6..]
+                .iter()
+                .all(|t| matches!(t, Told::Hold(HoldReason::Configuration, _))),
+            "{told:?}"
+        );
+        state.stop_observers("the test is over").await;
+    }
+
+    /// The credentials section a signed version brings is registered and becomes the credential the observers use;
+    /// one that does not read leaves none, and the supervisor says why when it holds.
+    #[tokio::test]
+    async fn the_credentials_section_gives_the_credential_or_says_why_not() {
+        let (health, recorded) = health_recorder().await;
+        let crypto = FakeCrypto::giving(Gives::Bearer("t0ken"));
+        let mut state = supervisor_state(
+            "http://jira.invalid".into(),
+            false,
+            None,
+            crypto.clone(),
+            health.clone(),
+        )
+        .await;
+        let body = json!({"credentials": [{
+            "name": "jira-dc", "host_pattern": "jira.example.org", "kind": "token",
+            "secret": crate::credentials::tests_support::ciphertext(b"pat",
+                &crate::credentials::context(3, "jira-dc").unwrap())}]});
+        ObserverSupervisor::use_credentials(&mut state, 3, &body).await;
+        assert_eq!(state.credential.as_deref(), Some("jira-dc"));
+        assert_eq!(crypto.registered.lock().unwrap().len(), 1);
+
+        ObserverSupervisor::use_credentials(&mut state, 4, &json!({"credentials": "no"})).await;
+        assert_eq!(state.credential, None);
+        let myself = sink::<ObserverSupervisorMessage>().await;
+        ObserverSupervisor::start_observers(&myself, &mut state)
+            .await
+            .unwrap();
+        let [Told::Hold(HoldReason::Credentials, message)] = &told(&health, &recorded).await[..]
+        else {
+            panic!("one hold");
+        };
+        assert!(message.contains("version 4 does not read"), "{message}");
     }
 
     /// A site that answers who the token is and what it is, and 404 to everything else.
@@ -496,16 +815,19 @@ mod tests {
     /// `resources.healthcheck`.
     #[tokio::test]
     async fn the_observers_hold_through_the_agent_s_health() {
+        let _turn = NAMED.lock().await;
         let server = site_without_data().await;
         let (health, recorded) = health_recorder().await;
         let mut state = supervisor_state(
             server.uri(),
-            JiraAuth::from_parts(None, "t0ken".into()),
+            false,
+            Some("jira"),
+            FakeCrypto::giving(Gives::Bearer("t0ken")),
             health.clone(),
         )
         .await;
         let myself = sink::<ObserverSupervisorMessage>().await;
-        ObserverSupervisor::spawn_observers(&myself, &mut state)
+        ObserverSupervisor::start_observers(&myself, &mut state)
             .await
             .unwrap();
 

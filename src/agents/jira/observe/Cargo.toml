@@ -37,7 +37,10 @@ jira_common.workspace = true
 log.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
+# The credential: the CryptoActor's answers (polar-crypto) and the escrowed secret a section carries (polar-escrow).
+polar-crypto.workspace = true
 polar-env.workspace = true
+polar-escrow.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true
@@ -56,6 +59,9 @@ polar = { workspace = true, features = ["testing"] }
 # What the observers tell the agent's health (a hold, a release), recorded by a stand-in health actor in the tests.
 polar-health.workspace = true
 proptest.workspace = true
+# A real escrowed secret for the credentials section's tests (an RSA recipient, as git's tests make).
+rand.workspace = true
+rsa.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
 

@@ -118,7 +118,6 @@
       issuer: "credentials-agent"
       env: [
         { name: "JIRA_URL", value: "https://example.atlassian.net" }
-        { name: "JIRA_EMAIL", value: "jira-user@example.org" }
       ]
     }
   }

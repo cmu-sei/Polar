@@ -745,10 +745,13 @@ def main [] {
         "only an agent that needs encryption escrows a key in init, and the escrow authority does not": {
             # The escrowed keypair is read only by a crypto actor, so the bootstrap follows the `encryption` need
             # the scaffold declares (docs/architecture/policy-enforcement.md, "Decisions", 2026-10-22).
-            let consumer = (resolve "kube-consumer")
-            assert equal (init_env_value $consumer "POLAR_INIT_ESCROW_BOOTSTRAP") "true"
-            assert ("encryption" in $consumer.needs)
-            for name in ["kube-observer" "jira-observer" "credentials-agent" "credentials-agent-observer"] {
+            # jira-observer since 3.0.0: its credential is an escrowed secret its crypto actor opens (jira.md, "The credential").
+            for name in ["kube-consumer" "jira-observer"] {
+                let r = (resolve $name)
+                assert equal (init_env_value $r "POLAR_INIT_ESCROW_BOOTSTRAP") "true" $"($name) escrows its key"
+                assert ("encryption" in $r.needs) $"($name) needs encryption"
+            }
+            for name in ["kube-observer" "credentials-agent" "credentials-agent-observer"] {
                 let r = (resolve $name)
                 assert ("encryption" not-in $r.needs) $"($name) does not need encryption"
                 assert equal (init_env_value $r "POLAR_INIT_ESCROW_BOOTSTRAP") null $"($name) escrows nothing"
@@ -990,7 +993,6 @@ def main [] {
             let jira = {
                 jira-observer: { env: [
                     { name: "JIRA_URL", value: "https://example.atlassian.net" }
-                    { name: "JIRA_EMAIL", value: "someone@example.com" }
                 ] }
                 cert-issuer: { env: [
                     { name: "CERT_ISSUER_ISSUERS", value: [{

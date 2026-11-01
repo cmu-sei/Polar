@@ -39,8 +39,9 @@ use jira_observer::users::JiraUserObserver;
 use jira_observer::{JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage};
 use polar::cassini::TcpClient;
 use polar_agent_builder::{
-    HealthHandle, HoldReason, SoftValue, StateClient, StateError, StateQuery,
+    CryptoClient, HealthHandle, HoldReason, SoftValue, StateClient, StateError, StateQuery,
 };
+use polar_crypto::CryptoError;
 use polar_health::HealthCheckMessage;
 use ractor::{Actor, ActorProcessingErr, ActorRef, ActorStatus, async_trait};
 use serde_json::json;
@@ -162,7 +163,11 @@ async fn asked(server: &MockServer, endpoint: &str) -> Vec<Request> {
 async fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserverArgs {
     JiraObserverArgs {
         jira_url: server.uri(),
-        auth: JiraAuth::from_parts(None, "t0ken".into()),
+        auth: JiraAuth::Credential {
+            name: "jira".to_string(),
+            host: "jira.example.org".to_string(),
+            crypto: Arc::new(GivesToken),
+        },
         deployment: JiraDeployment::ServerOrDataCenter,
         tcp_client: TcpClient::from_actor_ref(client),
         web_client: reqwest::Client::new(),
@@ -179,6 +184,57 @@ async fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraOb
         wall_clock: || NOW_MS,
         // Heard by nobody; a test of holding gives its own.
         health: HealthHandle::new(health_recorder().await.0),
+    }
+}
+
+/// Stands in for the agent's CryptoActor: it gives the bearer token `t0ken` for any credential and host.
+struct GivesToken;
+
+#[async_trait]
+impl CryptoClient for GivesToken {
+    async fn store_secret(&self, _: String, _: Vec<u8>) -> Result<(), CryptoError> {
+        Err(CryptoError::NoReply)
+    }
+    async fn encrypt_for_recipient(&self, _: String, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+        Err(CryptoError::NoReply)
+    }
+    async fn retrieve_secret(
+        &self,
+        _: String,
+    ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
+        Err(CryptoError::NoReply)
+    }
+    async fn register_secret(
+        &self,
+        _: String,
+        _: String,
+        _: Vec<u8>,
+        _: Vec<u8>,
+        _: polar_crypto::registry::SecretBinding,
+    ) -> Result<(), CryptoError> {
+        Err(CryptoError::NoReply)
+    }
+    async fn load_secret(&self, _: String, _: String) -> Result<bool, CryptoError> {
+        Ok(false)
+    }
+    async fn replace_section(&self, _: String, _: Vec<String>) -> Result<Vec<String>, CryptoError> {
+        Ok(Vec::new())
+    }
+    async fn git_credential(
+        &self,
+        name: String,
+        _: String,
+    ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
+        Err(CryptoError::SecretNotRegistered(name))
+    }
+    async fn http_credential(
+        &self,
+        _: String,
+        _: String,
+    ) -> Result<polar_crypto::registry::HttpCredential, CryptoError> {
+        Ok(polar_crypto::registry::HttpCredential::Bearer(
+            polar_crypto::Zeroizing::new(b"t0ken".to_vec()),
+        ))
     }
 }
 
@@ -493,7 +549,10 @@ where
         panic!("{name}: one Credentials hold: {told:?}");
     };
     assert!(message.starts_with(&format!("{name}: ")), "{message}");
-    assert!(message.contains("check JIRA_TOKEN"), "{message}");
+    assert!(
+        message.contains("check the credentials section"),
+        "{message}"
+    );
     assert!(!message.contains("t0ken"), "{message}");
     assert_eq!(asked(&server, MYSELF).await.len(), 1, "{name} asked again");
     assert!(topics.lock().unwrap().is_empty(), "{name} published");

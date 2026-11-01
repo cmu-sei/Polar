@@ -23,20 +23,22 @@
 
 # infra/jira-check.nu
 #
-# Whether jira-observer can reach its Jira site and is let in, asked from inside the cluster, and said in facts that
-# are safe to share: no hostname, URL, address, email or token is printed. A short-lived pod in `polar`, on
-# jira-observer's node pool, is given jira-observer's settings from the same sources (the literal values in its
-# ConfigMap's document, and the token from its Secret as an environment variable, never on a command line) and asks
-# Jira as the agent does: the URL as it is, the same authentication. The pod runs the nu-init image the cluster
+# Whether jira-observer can reach its Jira site, asked from inside the cluster, and said in facts that are safe to
+# share: no hostname, URL or address is printed. A short-lived pod in `polar`, on jira-observer's node pool, is given
+# jira-observer's settings from the same source (the literal values in its ConfigMap's document) and asks Jira as the
+# agent does, the URL as it is, but anonymously: since 3.0.0 the credential is the agent's signed `credentials`
+# runtime section, which only its CryptoActor opens (docs/architecture/jira.md, "The credential"), so no pod but the
+# agent's can present it. Whether the site accepts the credential is in jira-observer's health: a refused token is
+# held as `Credentials`, with what to check (docs/architecture/soft-state.md, "As built: pulled health"). The pod
+# runs the nu-init image the cluster
 # already runs (Neo4j's init container's), and this file, from a ConfigMap. The pod and its ConfigMap are deleted at
 # the end, whether the check succeeded, failed or was interrupted; a pod an interrupted run left behind ends by its
 # deadline and is deleted by the next run.
 #
-# It prints: the shape of JIRA_URL; the auth mode (Basic with JIRA_EMAIL, Bearer without, as the agent chooses); the
-# token's length, whether it has whitespace and whether it looks base64-encoded; the class of the address the pod
+# It prints: the shape of JIRA_URL; whether the agent reads anonymously; the class of the address the pod
 # connected to (100.64/10 "ZPA-style", RFC 1918 "private", "public"), which nu cannot say, so openssl's when it
 # connects and the pod's socket's when a connection never completes; and the HTTP status of serverInfo, myself
-# (whether Jira took the caller as anonymous) and project (how many it returned). Then what those facts mean.
+# (whether Jira took the caller as anonymous) and project (how many it shows the public). Then what those facts mean.
 #
 # Self-contained: the pod runs this file, so it uses no other module.
 #
@@ -48,8 +50,6 @@ const INFRA = (path self | path dirname)
 const POLAR = "polar"
 const WORKLOAD = "jira-observer"
 const CONFIG_MAP = "jira-observer-config"
-# Where jira-observer's token comes from when its Deployment does not say (it does: the catalog's `env` entry).
-const TOKEN_SECRET = { name: "jira-secret", key: "token" }
 # The image that has nu: nu-init, which the cluster runs as Neo4j's init container. Found by name in what runs.
 const NU_IMAGE = "polar-nu-init"
 const SCRATCH_LABEL = "polar.dev/scratch"
@@ -103,33 +103,10 @@ export def url_facts [url: string] {
     }
 }
 
-# The agent's choice: Basic (Atlassian Cloud's email and API token) when JIRA_EMAIL is set, a bearer token otherwise.
-export def auth_mode [email: string] {
-    if ($email | is-empty) { "Bearer" } else { "Basic" }
-}
-
 # What JIRA_DEPLOYMENT says, by the agent's reading of it (src/agents/jira/observe/src/lib.rs, `JiraDeployment`).
 export def deployment_fact [value: string] {
     let v = ($value | str lowercase)
     if ($v | is-empty) { "unset (the agent follows the site's serverInfo deploymentType, else Cloud for an atlassian.net address, Server otherwise)" } else if ($v | str trim) in ["cloud" "server" "datacenter"] { $v } else { "set to something the agent does not recognise (it refuses to start)" }
-}
-
-# Whether `s` looks like base64 of text: the standard alphabet, a whole number of quanta, at least 16 characters, and
-# decoding to printable ASCII without whitespace (a trailing newline allowed, as `echo token | base64` leaves). A raw
-# Atlassian token has `-` and `_`, outside the alphabet; a Data Center token decodes to bytes that are not text.
-export def looks_base64 [s: string] {
-    let t = ($s | str trim)
-    let n = ($t | str length)
-    if $n < 16 or ($n mod 4) != 0 or not ($t =~ '^[A-Za-z0-9+/]+={0,2}$') { return false }
-    let hex = (try { $t | decode base64 | encode hex } catch { null })
-    if $hex == null { return false }
-    let bytes = ($hex | split chars | chunks 2 | each {|c| $c | str join | into int --radix 16 })
-    let text = ($bytes | reverse | skip while {|b| $b == 10 or $b == 13 } | reverse)
-    ($text | is-not-empty) and ($text | all {|b| $b >= 33 and $b <= 126 })
-}
-
-export def token_facts [token: string] {
-    { length: ($token | str length), whitespace: ($token =~ '\s'), base64: (looks_base64 $token) }
 }
 
 # The literal values of the Jira settings in jira-observer's document (`.sections[].variables[]`, each { name, value }):
@@ -140,7 +117,12 @@ export def settings_of_document [doc: record] {
         let v = ($vars | where name == $name | get -o 0.value)
         if ($v | describe) == "string" { $v } else { "" }
     }
-    { url: (do $literal "JIRA_URL"), email: (do $literal "JIRA_EMAIL"), deployment: (do $literal "JIRA_DEPLOYMENT") }
+    let anonymous = ($vars | where name == "JIRA_ANONYMOUS" | get -o 0.value)
+    {
+        url: (do $literal "JIRA_URL")
+        deployment: (do $literal "JIRA_DEPLOYMENT")
+        anonymous: (($anonymous | describe) == "string" and ($anonymous | str trim | str lowercase) == "true")
+    }
 }
 
 # ── The address (pure) ───────────────────────────────────────────────────────
@@ -231,15 +213,12 @@ export def error_detail [debug: string] {
 
 def regex_escape [s: string] { $s | str replace --all --regex '([\\.^$|?*+()\[\]{}])' '\$1' }
 
-# A line with every setting it could hold replaced: the token and the credential made from it, the URL, the email
-# and the host (whatever their case), then anything else shaped like a URL, an email or an address.
+# A line with every setting it could hold replaced: the URL and the host (whatever their case), then anything else
+# shaped like a URL, an email or an address.
 export def mask [text: string, secrets: record] {
     let named = (
         [
-            { value: ($secrets.credential? | default ""), label: "JIRA-TOKEN" }
-            { value: ($secrets.token? | default ""), label: "JIRA-TOKEN" }
             { value: ($secrets.url? | default "" | str trim), label: "JIRA-URL" }
-            { value: ($secrets.email? | default ""), label: "JIRA-EMAIL" }
             { value: ($secrets.host? | default ""), label: "JIRA-HOST" }
         ] | where {|s| $s.value | is-not-empty }
     )
@@ -293,13 +272,11 @@ def endpoint_line [e: record] {
 # The facts, one line each.
 export def fact_lines [facts: record] {
     let u = $facts.url
-    let t = $facts.token
     [
         $"  nu         ($facts.nu)"
         $"  JIRA_URL   set: (yes_no $u.set), https: (yes_no $u.https), trailing slash: (yes_no $u.trailing_slash), contains /rest: (yes_no $u.rest), atlassian.net: (yes_no $u.atlassian), example placeholder: (yes_no $u.placeholder)"
         $"  deployment ($facts.deployment)"
-        $"  auth       ($facts.auth)(if $facts.auth == 'Basic' { $', JIRA_EMAIL the example placeholder: (yes_no $facts.email_placeholder)' } else { ', JIRA_EMAIL unset' })"
-        $"  token      length ($t.length), whitespace: (yes_no $t.whitespace), looks base64-encoded: (yes_no $t.base64)"
+        $"  reads      (if $facts.anonymous { 'anonymously (JIRA_ANONYMOUS)' } else { 'with its credential (the signed credentials section); asked here anonymously' })"
         $"  address    ($facts.address.class) \(($facts.address.source)\)"
         $"  TLS        (if $facts.tls_verify == null { 'not checked' } else { $'openssl verify ($facts.tls_verify)' })"
         ...($facts.endpoints | each {|e| endpoint_line $e })
@@ -309,7 +286,6 @@ export def fact_lines [facts: record] {
 # What the facts mean, one line for each pattern they match.
 export def interpret [facts: record] {
     let u = $facts.url
-    let t = $facts.token
     let answered = ($facts.endpoints | where status != null)
     let failed = ($facts.endpoints | where error != null and error != "not tried")
     let statuses = ($answered | get status)
@@ -322,21 +298,15 @@ export def interpret [facts: record] {
     if $u.placeholder {
         $out = ($out | append "JIRA_URL is still the example placeholder: set the target's JIRA_URL (targets/<target>/config.nuon, workloads.jira-observer.env) to the Jira site and deploy again.")
     }
-    if not $u.https { $out = ($out | append "JIRA_URL is not https: Jira Cloud answers only https, and a token sent over http is in the clear.") }
+    if not $u.https and not $facts.anonymous { $out = ($out | append "JIRA_URL is not https: jira-observer sends a credential only over https, so it holds Configuration until JIRA_URL is the site's https:// address (or JIRA_ANONYMOUS is true).") }
     if $u.trailing_slash { $out = ($out | append "JIRA_URL ends with '/': the agent appends /rest/api/..., so it asks for '//rest/...'. Drop the slash.") }
     if $u.rest { $out = ($out | append "JIRA_URL contains /rest: give the site's address alone; the agent appends the REST path itself.") }
-    if $facts.auth == "Basic" and not $u.atlassian {
-        $out = ($out | append "JIRA_EMAIL is set, so the agent uses Basic authentication, which is Atlassian Cloud's, and the host is not atlassian.net: for Server or Data Center with a personal access token, unset JIRA_EMAIL (Bearer).")
-    }
-    if $facts.auth == "Bearer" and $u.atlassian {
-        $out = ($out | append "The host is atlassian.net and JIRA_EMAIL is unset, so the agent sends a bearer token: Atlassian Cloud wants Basic, the account's email with an API token. Set JIRA_EMAIL.")
-    }
-    if $facts.auth == "Basic" and $facts.email_placeholder { $out = ($out | append "JIRA_EMAIL is still the example placeholder: set it to the account the token belongs to.") }
-    if $t.length == 0 { $out = ($out | append "The token is empty: put it in the Secret's key the Deployment names.") }
-    if $t.whitespace { $out = ($out | append "The token has whitespace (often a newline from `echo` when the Secret was made): make the Secret again from the token alone.") }
-    if $t.base64 { $out = ($out | append "The token decodes as base64 to text: it may be stored encoded twice (kubectl encodes a --from-literal value itself), or be base64 of email:token. Store the raw token.") }
     if (401 in $statuses) or ($myself.anonymous? == true) {
-        $out = ($out | append "Jira did not accept the token (401, or the caller taken as anonymous): check that the Secret holds the raw token, not base64 of it, and that the auth mode fits the site (Basic with JIRA_EMAIL for Cloud, Bearer for a Server or Data Center personal access token).")
+        $out = ($out | append (if $facts.anonymous {
+            "The site does not let anonymous users in where it answered 401: what it hides from them is not read. A credential (JIRA_ANONYMOUS false, and a signed credentials section) reads it."
+        } else {
+            "The site answers an anonymous caller as such (401, or x-ausername anonymous), as it should: this check has no credential. Whether it accepts jira-observer's is in jira-observer's health (a refused token is held as Credentials, with what to check)."
+        }))
     }
     if 403 in $statuses { $out = ($out | append "Jira refused the account (403): it lacks the permission, or Server asks for a CAPTCHA after failed logins (log in once in a browser).") }
     if (404 in $statuses) and not $u.placeholder { $out = ($out | append "Jira answered 404: there is no Jira REST API at this address. Check the URL's path (a Server site may live under a context path, such as /jira).") }
@@ -354,14 +324,10 @@ export def interpret [facts: record] {
     }
     if "other" in $kinds { $out = ($out | append "A request failed in a way this check does not recognise; the kind above is nu's.") }
     # Every answer a 200, and nothing above said: a failed request, or an anonymous caller, was.
-    let good = ($statuses | is-not-empty) and ($statuses | all {|s| $s == 200 })
-    if $good and ($out | is-empty) {
+    let good = ($statuses | is-not-empty) and ($statuses | all {|s| $s == 200 or $s == 401 })
+    if $good and ($failed | is-empty) and not ($out | any {|l| $l | str starts-with "JIRA_URL" }) {
         let n = ($project.projects? | default 0)
-        if $n == 0 {
-            $out = ($out | append "Jira let the account in, but it sees no projects: give it the Browse projects permission on the ones to observe.")
-        } else {
-            $out = ($out | append $"All good: the address, the token and the auth mode are accepted, and the account sees ($n) projects.")
-        }
+        $out = ($out | append $"The site is reached and answers: it shows the public ($n) projects.")
     }
     if ($out | is-empty) { $out = ($out | append "Nothing this check knows explains the answers above.") }
     $out
@@ -372,12 +338,9 @@ export def report_lines [facts: record] {
     ["facts:" ...(fact_lines $facts) "what they mean:" ...(interpret $facts | each {|l| $"  - ($l)" })]
 }
 
-# What the pod prints: the report, each line masked of the URL, the host, the email and the credential. Not of the
-# token: nothing the report says comes from it, so it could be in a line only as a word the check says anyway, and
-# masking that word would show it (a token "placeholder" would turn "example placeholder" into "example JIRA-TOKEN").
+# What the pod prints: the report, each line masked of the URL and the host.
 export def printed [facts: record, secrets: record] {
-    let shown = ($secrets | reject -o token)
-    report_lines $facts | each {|l| mask $l $shown }
+    report_lines $facts | each {|l| mask $l $secrets }
 }
 
 # ── In the pod ───────────────────────────────────────────────────────────────
@@ -410,10 +373,10 @@ def connect_facts [host: string, port: int] {
     { address: $address, verify: (openssl_verify $text) }
 }
 
-# One request, as the agent makes it: the URL as it is, with the path appended.
-def ask [url: string, path: string, authorization: string] {
+# One request, as the agent makes it (the URL as it is, with the path appended), with no credential.
+def ask [url: string, path: string] {
     let r = (try {
-        { response: (http get --full --allow-errors --max-time $REQUEST_LIMIT -H [Accept application/json Authorization $authorization] $"($url)($path)"), error: null }
+        { response: (http get --full --allow-errors --max-time $REQUEST_LIMIT -H [Accept application/json] $"($url)($path)"), error: null }
     } catch {|e|
         { response: null, error: { msg: ($e.msg? | default ""), debug: ($e.debug? | default "") } }
     })
@@ -426,11 +389,6 @@ def ask [url: string, path: string, authorization: string] {
 # The check, in the pod: the settings from the environment, the facts, what they mean; every line masked.
 export def probe [] {
     let url = ($env.JIRA_URL? | default "" | str trim)
-    let email = ($env.JIRA_EMAIL? | default "")
-    let token = ($env.JIRA_TOKEN? | default "")
-    let auth = (auth_mode $email)
-    let credential = if $auth == "Basic" { $"($email):($token)" | encode base64 } else { "" }
-    let authorization = if $auth == "Basic" { $"Basic ($credential)" } else { $"Bearer ($token)" }
     let host = (url_host $url)
     let connection = if $host == null {
         { address: { class: "no connection", source: "JIRA_URL has no host" }, verify: null }
@@ -445,30 +403,28 @@ export def probe [] {
         $endpoints = ($endpoints | append (if $host == null or $unreachable {
             { path: $p, status: null, error: "not tried", detail: null, anonymous: null, projects: null, deployment_type: null }
         } else {
-            ask $url $p $authorization
+            ask $url $p
         }))
     }
     let facts = {
         nu: (version | get version)
         url: (url_facts $url)
         deployment: (deployment_fact ($env.JIRA_DEPLOYMENT? | default ""))
-        auth: $auth
-        email_placeholder: (is_example_host ($email | split row "@" | last))
-        token: (token_facts $token)
+        anonymous: (($env.JIRA_ANONYMOUS? | default "") == "true")
         address: $connection.address
         tls_verify: $connection.verify
         endpoints: $endpoints
     }
-    let secrets = { url: $url, host: ($host | default ""), email: $email, token: $token, credential: $credential }
+    let secrets = { url: $url, host: ($host | default "") }
     for l in (printed $facts $secrets) { print $l }
 }
 
 # ── The pod (pure) ───────────────────────────────────────────────────────────
 
-# The pod that runs the check: jira-observer's settings as values, its token from its Secret, nothing on a command line
-# (the image's entrypoint runs /scripts/init.nu). `placement` is jira-observer's pod's nodeSelector, tolerations and
+# The pod that runs the check: jira-observer's settings as values, no credential, nothing on a command line (the
+# image's entrypoint runs /scripts/init.nu). `placement` is jira-observer's pod's nodeSelector, tolerations and
 # imagePullSecrets, those it has.
-export def check_pod [name: string, image: string, settings: record, token: record, placement: record] {
+export def check_pod [name: string, image: string, settings: record, placement: record] {
     {
         apiVersion: "v1"
         kind: "Pod"
@@ -487,9 +443,8 @@ export def check_pod [name: string, image: string, settings: record, token: reco
                     { name: "HOME", value: "/tmp" }
                     { name: "XDG_CONFIG_HOME", value: "/tmp" }
                     { name: "JIRA_URL", value: $settings.url }
-                    { name: "JIRA_EMAIL", value: $settings.email }
                     { name: "JIRA_DEPLOYMENT", value: $settings.deployment }
-                    { name: "JIRA_TOKEN", valueFrom: { secretKeyRef: { name: $token.name, key: $token.key } } }
+                    { name: "JIRA_ANONYMOUS", value: (if $settings.anonymous { "true" } else { "false" }) }
                 ]
                 securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
                 volumeMounts: [{ name: "scripts", mountPath: "/scripts", readOnly: true } { name: "tmp", mountPath: "/tmp" }]
@@ -559,9 +514,9 @@ def wait_for [name: string] {
     kube "-n" $POLAR "logs" $name "-c" "check"
 }
 
-def run_check [name: string, image: string, settings: record, token: record, placement: record] {
+def run_check [name: string, image: string, settings: record, placement: record] {
     let map = (apply (scripts_config_map $name (open --raw $SELF)))
-    let pod = (apply (check_pod $name $image $settings $token $placement))
+    let pod = (apply (check_pod $name $image $settings $placement))
     # The ConfigMap goes with the pod.
     let owner = { metadata: { ownerReferences: [{ apiVersion: "v1", kind: "Pod", name: $name, uid: $pod.metadata.uid }] } }
     kube "-n" $POLAR "patch" "configmap" $map.metadata.name "--type" "merge" "-p" ($owner | to json --raw) | ignore
@@ -579,10 +534,6 @@ def main [target: string] {
     let settings = (settings_of_document $document)
     let deployment = (kube "-n" $POLAR "get" "deployment" $WORKLOAD "-o" "json" | from json)
     let pod_spec = $deployment.spec.template.spec
-    let token = ($pod_spec.containers | where name == $WORKLOAD | get -o 0.env | default [] | where name == "JIRA_TOKEN" | get -o 0.valueFrom.secretKeyRef | default $TOKEN_SECRET)
-    # Only the Secret's key names are read here; its value goes to the pod alone.
-    let keys = (kube "-n" $POLAR "get" "secret" $token.name "-o" "go-template={{range $k, $v := .data}}{{$k}} {{end}}" | split row " " | where {|k| $k | is-not-empty })
-    if $token.key not-in $keys { error make --unspanned { msg: $"the Secret ($token.name) has no key ($token.key), which jira-observer's token comes from" } }
     let image = (nu_image_of (kube "get" "deployments,statefulsets" "-A" "-o" "json" | from json | get items))
     if $image == null { error make --unspanned { msg: $"nothing in the cluster runs ($NU_IMAGE), the image the check runs in" } }
     let placement = (["nodeSelector" "tolerations" "imagePullSecrets"] | reduce --fold {} {|k, acc|
@@ -590,13 +541,13 @@ def main [target: string] {
         if $v == null { $acc } else { $acc | insert $k $v }
     })
     let declared = ((open ($INFRA | path join "targets" $target "config.nuon")).workloads?."jira-observer"?.env? | default [] | where name == "JIRA_URL" | get -o 0.value)
-    let secrets = { url: $settings.url, host: (url_host $settings.url | default ""), email: $settings.email }
+    let secrets = { url: $settings.url, host: (url_host $settings.url | default "") }
 
     delete_ended_checks
     let name = $"jira-check-(random chars --length 6 | str lowercase)"
     print $"jira-observer's Jira connection, checked from a pod on its node pool \(($target)\)"
     print $"  the cluster's JIRA_URL is the target's: (if $declared == null { 'the target does not set it' } else { yes_no ($declared == $settings.url) })"
-    let result = (try { { log: (run_check $name $image $settings $token $placement), error: null } } catch {|e| { log: "", error: $e.msg } })
+    let result = (try { { log: (run_check $name $image $settings $placement), error: null } } catch {|e| { log: "", error: $e.msg } })
     ^kubectl -n $POLAR delete pod $name --ignore-not-found --wait=false | complete | ignore
     ^kubectl -n $POLAR delete configmap $name --ignore-not-found --wait=false | complete | ignore
     for l in ($result.log | lines | where {|l| not ($l | str starts-with "[nu-init]") }) { print (mask $l $secrets) }

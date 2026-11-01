@@ -55,9 +55,8 @@ gitlab_endpoint: "https://gitlab.com"
 # Jira
 # =============================================================================
 
-# Jira API token.
-# Used to create: jira-secret (polar namespace)
-jira_token: ""
+# No Jira token here since 3.0.0: jira-observer's credential is its signed `credentials` runtime
+# section, which polar-sign seals from what you type (docs/architecture/jira.md, "The credential").
 
 # =============================================================================
 # OCI Registry

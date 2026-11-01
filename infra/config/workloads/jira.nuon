@@ -24,8 +24,11 @@
 # Jira agents. The observer polls the Jira REST API and publishes what it finds
 # to Cassini; the processor reads those topics and writes to the graph.
 #
-# The Jira site itself (JIRA_URL, JIRA_EMAIL) is a fact about the target, not
-# about the agent, so it lives in targets/<target>/config.nuon.
+# The Jira site itself (JIRA_URL, JIRA_DEPLOYMENT, JIRA_ANONYMOUS) is a fact about the
+# target, not about the agent, so it lives in targets/<target>/config.nuon. The
+# credential is not here: since 3.0.0 it is the observer's signed `credentials`
+# runtime section, an escrowed secret only its CryptoActor opens
+# (docs/architecture/jira.md, "The credential"); no Secret is given to the pod.
 [
   {
     name: "jira-observer"
@@ -34,10 +37,6 @@
     pool: "observers"
     image: "jira-observer"
     config: "document"
-    # The agent declares JIRA_TOKEN as a secret, so it can only be given from a Secret.
-    env: [
-      { name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }
-    ]
   }
 
   {

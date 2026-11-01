@@ -804,15 +804,18 @@ Secrets are encrypted per target and are not rendered by the chart pipeline.
   Each Secret is one of two kinds (`infra/secrets-lib.nu`, tests in `infra/tests/secrets.nu`):
   - **From the SOPS files** (`kubectl_sops_secret`): created when missing; when it exists, compared with what the files give and
     left alone (`unchanged`) or its data replaced, its type, labels and annotations kept. An update names the workloads to restart,
-    since a pod reads a Secret when it starts: `secret/jira-secret in polar: updated from the sops files (restart the pods that read it:
-    kubectl -n polar rollout restart deployment/jira-observer)`. When the files have no value (`token=placeholder`, `oci-registry-auth={}`)
+    since a pod reads a Secret when it starts: `secret/gitlab-secret in polar: updated from the sops files (restart the pods that read
+    it: kubectl -n polar rollout restart deployment/<workload>)`. When the files have no value (`token=placeholder`, `oci-registry-auth={}`)
     the placeholder is made only if the Secret is missing, and never replaces a value the cluster holds, which may have been set by hand.
     Neo4j takes its password from `neo4j-secret` on its first start only, so a changed `neo4j_auth` updates the Secret and not the
     database's password (`up.nu`'s Neo4j check says when they differ).
   - **Made here** (`kubectl_generated_secret`, the random `cassini-shutdown-token`): created once, never compared, never made again.
   A value stored base64-encoded would reach the workload still encoded, since Kubernetes encodes Secret values itself: the step warns
   when one looks so (it decodes to 16 or more printable characters with no whitespace), naming the key and the file, never the value.
-- Manifests only *reference* secrets by name (`secretKeyRef`); they never contain secret values. A catalog workload's env entry does the same: `{ name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }`.
+- Manifests only *reference* secrets by name (`secretKeyRef`); they never contain secret values. A catalog workload's env entry does the same: `{ name: "FOO_TOKEN", secret: "foo-secret", key: "token" }`.
+- An agent's credential for an outside service (the git observer's, jira-observer's since 3.0.0) is not a Secret at all: it is a signed
+  runtime section carrying an `EscrowedSecret` for that agent, which `polar-sign` seals from what is typed and only the agent's CryptoActor
+  opens (`docs/architecture/signed-configuration.md`, "Secrets in a document"; `docs/architecture/jira.md`, "The credential").
 - Never `git add` certificates or keys.
 
 (The `infra/secrets/` directory tree that the first version of this pipeline

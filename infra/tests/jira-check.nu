@@ -23,9 +23,10 @@
 
 # infra/tests/jira-check.nu
 #
-# The Jira check's pure parts: what it says of a URL, a token and an address, how it reads nu's and openssl's answers,
-# that its masking leaves no host, URL, email, address or token in a line, what the facts are taken to mean, and the
-# pod it makes (the token from the Secret, nothing on a command line). Examples, and loops over generated cases. Every
+# The Jira check's pure parts: what it says of a URL and an address, how it reads nu's and openssl's answers, that its
+# masking leaves no host, URL, email or address in a line, what the facts are taken to mean, and the pod it makes (no
+# credential, nothing on a command line: since 3.0.0 the credential is jira-observer's signed section, which only its
+# CryptoActor opens). Examples, and loops over generated cases. Every
 # value is made up; nothing reaches a cluster or a Jira.
 #
 #   nu infra/tests/jira-check.nu
@@ -35,9 +36,6 @@ use ../jira-check.nu *
 
 # Generated cases per loop.
 const CASES = 200
-
-# A random printable ASCII string (33..126, no space) of `n` characters.
-def printable [n: int] { 1..$n | each { random int 33..126 | char --integer $in } | str join }
 
 # A random host: two to four lowercase labels and a top-level name, at least one dot.
 def random_host [] {
@@ -54,14 +52,12 @@ def sound [] {
         nu: "0.115.1"
         url: (url_facts "https://site.atlassian.net")
         deployment: (deployment_fact "")
-        auth: "Basic"
-        email_placeholder: false
-        token: (token_facts "ATATT3xFfGF0-made_up-token")
+        anonymous: false
         address: { class: "public", source: "the address openssl connected to" }
         tls_verify: "0 (ok)"
         endpoints: [
             { path: "/rest/api/2/serverInfo", status: 200, error: null, detail: null, anonymous: null, projects: null, deployment_type: "Cloud" }
-            { path: "/rest/api/2/myself", status: 200, error: null, detail: null, anonymous: false, projects: null, deployment_type: null }
+            { path: "/rest/api/2/myself", status: 401, error: null, detail: null, anonymous: true, projects: null, deployment_type: null }
             { path: "/rest/api/2/project", status: 200, error: null, detail: null, anonymous: null, projects: 3, deployment_type: null }
         ]
     }
@@ -98,45 +94,6 @@ def main [] {
             assert equal (url_port "https://jira.corp.test:8443/jira") 8443
             assert equal (url_port "http://jira.corp.test") 80
             assert equal (url_port "https://jira.corp.test") 443
-        }
-
-        "the auth mode is the agent's: Basic with an email, Bearer without": {
-            assert equal (auth_mode "") "Bearer"
-            assert equal (auth_mode "jira-user@corp.test") "Basic"
-        }
-
-        "a token's length and whitespace are told, not the token": {
-            assert equal (token_facts "abc def") { length: 7, whitespace: true, base64: false }
-            assert equal (token_facts "abcdef\n").whitespace true
-            assert equal (token_facts "") { length: 0, whitespace: false, base64: false }
-        }
-
-        "base64 of text is flagged, a raw token is not": {
-            assert (looks_base64 ("jira-user@corp.test:made-up-token" | encode base64))
-            # `echo token | base64` leaves a newline inside
-            assert (looks_base64 ("made-up-token-123\n" | encode base64))
-            # a raw Atlassian token has - and _, outside the alphabet
-            assert (not (looks_base64 "ATATT3xFfGF0-made_up-token-T8sH4="))
-            # too short to say
-            assert (not (looks_base64 ("abcdefghi" | encode base64)))
-            # not whole quanta
-            assert (not (looks_base64 "YWJjZGVmZ2hpamtsbW5vcA"))
-            # space or a tab inside the decoded text is not a token
-            assert (not (looks_base64 ("made up token 12345" | encode base64)))
-        }
-
-        "for any printable text, its base64 is flagged": {
-            for _ in 1..$CASES {
-                let s = (printable (random int 12..60))
-                assert (looks_base64 ($s | encode base64)) $"base64 of a printable string of ($s | str length)"
-            }
-        }
-
-        "random bytes, base64-encoded, are not flagged": {
-            for _ in 1..$CASES {
-                let b = (random binary 33 | encode base64)
-                assert (not (looks_base64 $b)) "33 random bytes"
-            }
         }
 
         "an address is classed, never printed": {
@@ -208,12 +165,11 @@ def main [] {
             }
         }
 
-        "masking leaves no host, URL, email, address or token, whatever its case": {
-            let s = { url: "https://jira.corp.test/", host: "jira.corp.test", email: "jira-user@corp.test", token: "made-up-token-0123", credential: ("jira-user@corp.test:made-up-token-0123" | encode base64) }
+        "masking leaves no host, URL, email or address, whatever its case": {
+            let s = { url: "https://jira.corp.test/", host: "jira.corp.test" }
             assert equal (mask "GET https://jira.corp.test//rest/api/2/myself" $s) "GET JIRA-URL/rest/api/2/myself"
             assert equal (mask "cannot resolve JIRA.CORP.TEST:443" $s) "cannot resolve JIRA-HOST:443"
-            assert equal (mask "as jira-user@corp.test with made-up-token-0123" $s) "as JIRA-EMAIL with JIRA-TOKEN"
-            assert equal (mask $"Basic ($s.credential)" $s) "Basic JIRA-TOKEN"
+            assert equal (mask "as jira-user@corp.test" $s) "as EMAIL"
             assert equal (mask "redirected to https://other.corp.test/x from 10.1.2.3 and 2600:1f18::9 by ops@corp.test" $s) "redirected to URL from IP and IP by EMAIL"
             # what the check prints is left alone
             for l in (report_lines (sound)) { assert equal (mask $l $s) $l $l }
@@ -223,7 +179,7 @@ def main [] {
             for _ in 1..$CASES {
                 let host = (random_host)
                 let url = $"https://($host)(['' '/' '/jira' '/rest/api/2'] | get (random int 0..3))"
-                let s = { url: $url, host: $host, email: $"someone@($host)", token: (printable 24), credential: "" }
+                let s = { url: $url, host: $host }
                 let lines = [
                     $url
                     $"GET ($url)/rest/api/2/myself"
@@ -237,22 +193,8 @@ def main [] {
                 for l in $lines {
                     let m = (mask $l $s)
                     assert (not ($m | str lowercase | str contains $host)) $"($host) left in: ($m)"
-                    assert (not ($m | str contains $s.token)) "the token left in a line"
                 }
             }
-        }
-
-        # On u7c the placeholder token is a word the check says: masked, it showed where it was.
-        "a token that is a word the check says is not masked into view": {
-            let facts = (sound | update url (url_facts "https://example.atlassian.net") | update email_placeholder true)
-            let s = { url: "https://example.atlassian.net", host: "example.atlassian.net", email: "jira-user@example.org", token: "placeholder", credential: ("jira-user@example.org:placeholder" | encode base64) }
-            let lines = (printed $facts $s)
-            assert (says $lines "example placeholder: yes") $"($lines)"
-            assert (not (says $lines "JIRA-TOKEN"))
-            assert equal $lines (report_lines $facts)
-            # and the host, the URL and the email still are
-            let leaky = (printed ($facts | update tls_verify "0 (https://example.atlassian.net jira-user@example.org)") $s)
-            assert (says $leaky "0 (JIRA-URL JIRA-EMAIL)") $"($leaky)"
         }
 
         "the settings are the document's literal values": {
@@ -261,14 +203,13 @@ def main [] {
                     { name: "builder", variables: [{ name: "POLAR_CAPABILITIES", value: "cassini" }] }
                     { name: "jira", variables: [
                         { name: "JIRA_URL", value: "https://site.atlassian.net" }
-                        { name: "JIRA_TOKEN", value: { env: "JIRA_TOKEN" } }
-                        { name: "JIRA_EMAIL", value: "jira-user@corp.test" }
+                        { name: "JIRA_ANONYMOUS", value: "true" }
                         { name: "JIRA_DEPLOYMENT", value: null }
                     ] }
                 ]
             }
-            assert equal (settings_of_document $doc) { url: "https://site.atlassian.net", email: "jira-user@corp.test", deployment: "" }
-            assert equal (settings_of_document {}) { url: "", email: "", deployment: "" }
+            assert equal (settings_of_document $doc) { url: "https://site.atlassian.net", deployment: "", anonymous: true }
+            assert equal (settings_of_document {}) { url: "", deployment: "", anonymous: false }
         }
 
         "an endpoint's answer: its status, whether the caller was anonymous, how many projects": {
@@ -291,10 +232,9 @@ def main [] {
         }
 
         "the placeholder URL is called out": {
-            let f = (sound | update url (url_facts "https://example.atlassian.net") | update email_placeholder true | with_statuses $in [404 404 404])
+            let f = (sound | update url (url_facts "https://example.atlassian.net") | with_statuses $in [404 404 404])
             let l = (interpret $f)
             assert (says $l "JIRA_URL is still the example placeholder") $"($l)"
-            assert (says $l "JIRA_EMAIL is still the example placeholder")
             # the 404 is the placeholder's, not a wrong path
             assert (not (says $l "Jira answered 404"))
         }
@@ -304,26 +244,18 @@ def main [] {
             assert (says (interpret (sound | update url (url_facts "https://site.atlassian.net/rest"))) "contains /rest")
         }
 
-        "Basic on a site that is not atlassian.net, and Bearer on one that is, are called out": {
-            let server = (sound | update url (url_facts "https://jira.corp.test"))
-            assert (says (interpret $server) "unset JIRA_EMAIL (Bearer)")
-            assert (not (says (interpret ($server | update auth "Bearer")) "unset JIRA_EMAIL"))
-            assert (says (interpret (sound | update auth "Bearer")) "Set JIRA_EMAIL")
+        "an anonymous caller is expected; reading anonymously, a 401 is what the site hides": {
+            let l = (interpret (sound))
+            assert (says $l "as it should: this check has no credential") $"($l)"
+            assert (says $l "jira-observer's health")
+            let anonymous = (interpret (sound | update anonymous true))
+            assert (says $anonymous "does not let anonymous users in") $"($anonymous)"
         }
 
-        "a 401, or an anonymous caller, is a token Jira did not accept": {
-            let refused = (interpret (sound | with_statuses $in [200 401 401]))
-            assert (says $refused "did not accept the token") $"($refused)"
-            assert (says $refused "base64")
-            let anonymous = (sound | update endpoints.1.anonymous true)
-            assert (says (interpret $anonymous) "did not accept the token")
-            assert (not (says (interpret $anonymous) "All good"))
-        }
-
-        "a token with whitespace, or encoded, or empty, is called out": {
-            assert (says (interpret (sound | update token (token_facts "made-up-token\n"))) "whitespace")
-            assert (says (interpret (sound | update token (token_facts ("jira-user@corp.test:made-up" | encode base64)))) "decodes as base64")
-            assert (says (interpret (sound | update token (token_facts ""))) "token is empty")
+        "a site read with a credential over http is called out; read anonymously it is not": {
+            let http = (sound | update url (url_facts "http://jira.corp.test"))
+            assert (says (interpret $http) "sends a credential only over https") $"(interpret $http)"
+            assert (not (says (interpret ($http | update anonymous true)) "only over https"))
         }
 
         "DNS, connection and TLS failures are told apart": {
@@ -335,23 +267,23 @@ def main [] {
             assert (says $zpa "the node must reach ZPA's connector")
             assert (says (interpret (failing (sound) "connection refused")) "could not connect (connection refused)")
             assert (says (interpret (failing (sound) "TLS")) "TLS failed")
-            for k in ["DNS" "timeout" "TLS"] { assert (not (says (interpret (failing (sound) $k)) "All good")) $k }
+            for k in ["DNS" "timeout" "TLS"] { assert (not (says (interpret (failing (sound) $k)) "The site is reached")) $k }
         }
 
-        "all good says so, with the projects the account sees": {
-            assert equal (interpret (sound)) ["All good: the address, the token and the auth mode are accepted, and the account sees 3 projects."]
+        "a site reached says so, with the projects it shows the public": {
+            assert (says (interpret (sound)) "The site is reached and answers: it shows the public 3 projects.")
             let none = (sound | update endpoints.2.projects 0)
-            assert (says (interpret $none) "sees no projects")
+            assert (says (interpret $none) "shows the public 0 projects")
             # an answer this check has no reading of is not taken for good
-            assert equal (interpret (sound | with_statuses $in [200 500 200])) ["Nothing this check knows explains the answers above."]
+            assert equal (interpret (sound | update endpoints.1.anonymous null | with_statuses $in [200 500 200])) ["Nothing this check knows explains the answers above."]
         }
 
         "the facts are printed in full, nothing withheld or added": {
             let l = (fact_lines (sound))
-            assert (says $l "length 26, whitespace: no, looks base64-encoded: no")
+            assert (says $l "reads      with its credential (the signed credentials section); asked here anonymously")
             assert (says $l "atlassian.net: yes, example placeholder: no")
             assert (says $l "address    public (the address openssl connected to)")
-            assert (says $l "myself     HTTP 200, x-ausername: a user")
+            assert (says $l "myself     HTTP 401, x-ausername: anonymous")
             assert (says $l "project    HTTP 200, 3 projects")
             assert (says $l "serverInfo HTTP 200, deploymentType Cloud")
             let dns = (fact_lines (failing (sound) "DNS" | update endpoints.0.detail "NoName"))
@@ -359,13 +291,14 @@ def main [] {
             assert (says $dns "myself     not tried")
         }
 
-        "the pod is given the token from the Secret and nothing on a command line": {
-            let settings = { url: "https://site.atlassian.net", email: "jira-user@corp.test", deployment: "" }
+        "the pod is given no credential and nothing on a command line": {
+            let settings = { url: "https://site.atlassian.net", deployment: "", anonymous: false }
             let placement = { nodeSelector: { "polar.dev/pool": "observers" }, tolerations: [{ key: "polar.dev/pool", operator: "Equal", value: "observers", effect: "NoSchedule" }] }
-            let pod = (check_pod "jira-check-abcdef" "localhost:30500/polar-nu-init:latest@sha256:00" $settings { name: "jira-secret", key: "token" } $placement)
+            let pod = (check_pod "jira-check-abcdef" "localhost:30500/polar-nu-init:latest@sha256:00" $settings $placement)
             let c = ($pod.spec.containers | first)
-            assert equal ($c.env | where name == "JIRA_TOKEN" | first | get valueFrom.secretKeyRef) { name: "jira-secret", key: "token" }
-            assert equal ($c.env | where name == "JIRA_TOKEN" | first | get -o value) null
+            assert ($c.env | all {|e| $e.valueFrom? == null }) "nothing from a Secret"
+            assert equal ($c.env | where name == "JIRA_TOKEN") []
+            assert equal ($c.env | where name == "JIRA_ANONYMOUS" | first | get value) "false"
             assert equal ($c.env | where name == "JIRA_URL" | first | get value) $settings.url
             assert equal ($c.command? | default null) null
             assert equal ($c.args? | default null) null

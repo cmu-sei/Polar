@@ -78,12 +78,8 @@ def main [target_dir: string, repo_root: string] {
         kubectl_sops_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]
     }
 
-    let jira_token = ($secrets | get -o jira_token | default "")
-    if ($jira_token | is-not-empty) {
-        kubectl_sops_secret "jira-secret" "polar" [$"token=($jira_token)"]
-    } else {
-        kubectl_sops_secret "jira-secret" "polar" ["token=placeholder"] --placeholder
-    }
+    # No jira-secret since 3.0.0: jira-observer's credential is its signed `credentials` runtime section
+    # (docs/architecture/jira.md, "The credential"). A `jira_token` left in the sops files is read by nothing.
 
     # Registry credentials for the OCI resolver: an empty Docker credential file, so registries are
     # asked anonymously. Put real ones in the Secret to pull from a private registry; a re-run keeps them.

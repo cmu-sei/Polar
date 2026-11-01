@@ -83,12 +83,8 @@ def main [target_dir: string, repo_root: string] {
         kubectl_sops_secret "gitlab-secret" "polar" ["token=placeholder"] --placeholder
     }
 
-    let jira_token = ($secrets | get -o jira_token | default "")
-    if ($jira_token | is-not-empty) {
-        kubectl_sops_secret "jira-secret" "polar" [$"token=($jira_token)"]
-    } else {
-        kubectl_sops_secret "jira-secret" "polar" ["token=placeholder"] --placeholder
-    }
+    # No jira-secret since 3.0.0: jira-observer's credential is its signed `credentials` runtime section
+    # (docs/architecture/jira.md, "The credential"). A `jira_token` left in the sops files is read by nothing.
 
     let docker_auth_json = ($secrets | get -o docker_auth_json | default "")
     if ($docker_auth_json | is-not-empty) {
