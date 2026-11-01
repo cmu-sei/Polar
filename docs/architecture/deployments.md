@@ -205,6 +205,56 @@ its certificate has expired is a follow-up (`remaining-work.md`).
   the rule.
 - *Not run:* `infra/tests/resolve.nu` and `render-determinism.nu` need a cluster (they validate against an apiserver).
 
+## A retry is not a second request (decided by the maintainer 2026-11-01; built the same day)
+
+*Why.* The rule above, keyed on the pod and the type, cannot tell a request asked again from a second request. A
+request is asked again when its reply is lost, and a lost reply is ordinary: a broker restart, a session that ended, an
+observer that timed out. Three places met it:
+- `polar-init` through the observer asked again after a 504 with a new key, which was `TooSoon` until the bound passed
+  (five minutes of waiting, `polar-crypto` counting it as temporary);
+- the custodian asked again after `REPLY_TIMEOUT` with a new key (the daemon made a CSR for each ask), so its re-ask
+  was `TooSoon`, and that is final for a custodian;
+- the voucher refused an offer made again after its answer was lost, until it was given a memory of the answers it
+  gave (`core-restarts.md`, "3 in detail", 2026-11-01): one fix for one of the three.
+
+*The rule.* The renewal rule is keyed on the request itself, the key its CSR asks to be certified (its
+SubjectPublicKeyInfo, `cert_issuer_common::public_key::csr_key`). Within the bound:
+- the same key is the same request asked again: it is admitted again, and signed again, an equivalent answer (the
+  certificate signed before is superseded, as any reissue of the pod's is, and its serial published as revoked);
+- another key is a second request, `TooSoon` as before;
+- a key that cannot be read is another key to every key.
+
+The admission records the key with the time (`renewal.rs`, `Admissions`), and the ledger's record gives the key of the
+last certificate issued (`state.rs`, `last_issued_key`), so a restarted credentials agent tells the two apart too. The
+requester makes the key once for each request and asks with it every time:
+- `polar-init` through the observer: `polar_crypto::workload_certificates::KeyedRequest`, made once in
+  `obtain_via_observer`, each attempt in a session of its own;
+- the custodian: the daemon's `Bootstrap` keeps the CSR in the step it asked with, and asks again with it, for a
+  workload certificate and for the escrow key's certificate alike (the escrow path's rule is "An escrow certificate
+  asked again, or abandoned", in `key-custody.md`);
+- cert-issuer's held requests already carried the same CSR. The voucher's memory (`Decisions`) is gone: an offer made
+  again is decided again, and the rule admits it.
+
+*Decided here, by the rules, marked for review:*
+- *The equivalent answer is a new signature, not the certificate recorded before.* Handing back the recorded
+  certificate would save a serial, but the voucher's path cannot (cert-issuer signs there), and the token and custodian
+  replies carry a CA chain the ledger does not hold. Signing again keeps one path for all three. A key asked again only
+  when a reply was lost costs one superseded serial for each lost reply.
+- *The same key is the same request whatever names it carries.* Every other rule still judges the names; the bound
+  limits how many certificates a pod is issued, and a certificate is of use only to the holder of its key.
+- *The bound runs from the latest admission of the key,* so a request asked again also holds back another key that
+  long.
+- *The voucher decides a transient failure again.* Its memory kept a "could not check its ledger" refusal for good; now
+  the next offer is decided afresh.
+
+*Tests:* the renewal rule's property extended with keys (two keys and an unreadable one: each ask admitted exactly when
+nothing of its kind within the bound was for another key), and examples (the same key again within the bound, after a
+restart from the ledger's record, two at once in the ledger); the token path and the custodian's path, each signed
+twice for one key and `TooSoon` for another, against a cert-issuer that signs the CSR; `polar-init` asking again after
+two 504s with one CSR; `KeyedRequest`'s attempts with one key and their own sessions; the daemon asking again with the
+same CSR for a workload certificate and for the escrow key's; the voucher's tests and property, unchanged in what they
+assert, on real CSRs; `cert-issuer`'s `broker_restarts_test` with the voucher's memory gone.
+
 ## Build order, each tests first
 
 1. The custody daemon (`key-custody.md`), which item 4 puts first.

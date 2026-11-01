@@ -31,7 +31,10 @@
 //!
 //! One call is one attempt at one certificate, on the existing flow of several separate requests per pod:
 //!
-//! 1. generate the keypair and CSR (the private key never leaves this process);
+//! 1. generate the keypair and CSR (the private key never leaves this process), once for the certificate: every
+//!    attempt at it asks for the same key ([`KeyedRequest`]), so one asked again after its reply was lost is the same
+//!    request, which the credentials agent admits again (docs/architecture/deployments.md, "A retry is not a second
+//!    request");
 //! 2. ask the observer for an ephemeral session, check that the credentials agent signed the offer (the
 //!    signature holds under the CA the pod was given, from a signing certificate naming the credentials agent), and
 //!    only then seal the service-account token to it, so the token is not on the pod network in the clear and is
@@ -120,7 +123,8 @@ fn is_temporary(reason: &IssuanceRefusalReason) -> bool {
 }
 
 /// One attempt at one certificate for `identity` (the DNS-form identity the CSR carries), asking the observer, and
-/// sealing the token only to an offer that `offers` believes.
+/// sealing the token only to an offer that `offers` believes. Its own key: a request asked again is
+/// [`KeyedRequest::attempt`] again.
 pub async fn request_certificate(
     observer: &ObserverClient,
     token: &str,
@@ -128,24 +132,56 @@ pub async fn request_certificate(
     request: &CertificateRequest,
     offers: &OfferCheck,
 ) -> Result<IssuedCertificate, RequestError> {
-    let csr = generate_csr(identity, &request.key_algorithm, &request.names)
-        .map_err(|e| RequestError::Failed(format!("cannot generate the CSR: {e}")))?;
-    let private_key_pem = Zeroizing::new(csr.private_key_pem);
-    let issued = request_certificate_with_csr(
-        observer,
-        token,
-        request.cert_type,
-        &request.names,
-        &csr.csr_pem,
-        offers,
-    )
-    .await?;
-    Ok(IssuedCertificate {
-        certificate_pem: issued.certificate_pem,
-        ca_chain_pem: issued.ca_chain_pem,
-        private_key_pem,
-        escrow_public_key_pem: issued.escrow_public_key_pem,
-    })
+    KeyedRequest::new(identity, request)?
+        .attempt(observer, token, offers)
+        .await
+}
+
+/// One certificate's request with its key, made once: every [`attempt`](Self::attempt) asks for that key, with a session
+/// of its own.
+pub struct KeyedRequest {
+    cert_type: WorkloadCertType,
+    names: Vec<String>,
+    csr_pem: String,
+    private_key_pem: Zeroizing<String>,
+}
+
+impl KeyedRequest {
+    /// The key and CSR for `request`, for `identity` (the DNS-form identity the CSR carries).
+    pub fn new(identity: &str, request: &CertificateRequest) -> Result<Self, RequestError> {
+        let csr = generate_csr(identity, &request.key_algorithm, &request.names)
+            .map_err(|e| RequestError::Failed(format!("cannot generate the CSR: {e}")))?;
+        Ok(Self {
+            cert_type: request.cert_type,
+            names: request.names.clone(),
+            csr_pem: csr.csr_pem,
+            private_key_pem: Zeroizing::new(csr.private_key_pem),
+        })
+    }
+
+    /// One attempt, asking the observer for this key's certificate as [`request_certificate_with_csr`] asks.
+    pub async fn attempt(
+        &self,
+        observer: &ObserverClient,
+        token: &str,
+        offers: &OfferCheck,
+    ) -> Result<IssuedCertificate, RequestError> {
+        let issued = request_certificate_with_csr(
+            observer,
+            token,
+            self.cert_type,
+            &self.names,
+            &self.csr_pem,
+            offers,
+        )
+        .await?;
+        Ok(IssuedCertificate {
+            certificate_pem: issued.certificate_pem,
+            ca_chain_pem: issued.ca_chain_pem,
+            private_key_pem: self.private_key_pem.clone(),
+            escrow_public_key_pem: issued.escrow_public_key_pem,
+        })
+    }
 }
 
 /// A certificate issued for a CSR made elsewhere, whose key this side never held.
@@ -463,6 +499,26 @@ mod tests {
         assert_ne!(*first.private_key_pem, *second.private_key_pem);
         let sent = consumer.requests_it_answered.lock().unwrap();
         assert_ne!(sent[0].session_id, sent[1].session_id);
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": every attempt at one request asks for its
+    // one key, each in a session of its own, and is given back with that key.
+    #[tokio::test]
+    async fn every_attempt_at_one_keyed_request_asks_for_its_one_key_in_a_session_of_its_own() {
+        let (_server, consumer, client) = observer().await;
+        let keyed = KeyedRequest::new(IDENTITY, &client_request()).unwrap();
+        let first = keyed.attempt(&client, TOKEN, &offers()).await.unwrap();
+        let second = keyed.attempt(&client, TOKEN, &offers()).await.unwrap();
+        assert_eq!(*first.private_key_pem, *second.private_key_pem);
+        let sent = consumer.requests_it_answered.lock().unwrap();
+        assert_eq!(sent[0].csr_pem, sent[1].csr_pem);
+        assert_ne!(sent[0].session_id, sent[1].session_id);
+        let key = rcgen::KeyPair::from_pem(&first.private_key_pem).unwrap();
+        assert_eq!(
+            cert_issuer_common::public_key::csr_key(&sent[0].csr_pem),
+            Some(rcgen::PublicKeyData::subject_public_key_info(&key)),
+            "the key given back is the one asked for"
+        );
     }
 
     #[tokio::test]

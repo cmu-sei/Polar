@@ -807,7 +807,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
       `polar-init` run again in the same pod reuses what the daemon's slots hold if still good, the same plan is taken
       again, and a daemon whose custodian failed ends to start again empty. Never unsealed by request. Not yet on a
       cluster; the u7c pods stuck now need replacing once.
-    - [ ] The same shape remains elsewhere: a request asked again after its reply was lost meets the renewal rule as a
+    - [x] (Built 2026-11-01, not yet on a cluster: `deployments.md`, "A retry is not a second request". The renewal
+      rule is keyed on the CSR's key; `polar-init` and the custodian ask again with the same CSR; the voucher's memory
+      is gone.) The same shape remains elsewhere: a request asked again after its reply was lost meets the renewal rule as a
       second request. `polar-init` through the observer asks again after a 504 (a lost `Issue` reply comes back
       `TooSoon`, final for `polar-init`; its pod recovers after five minutes of init backoff), and the custodian asks
       again after `REPLY_TIMEOUT` with a new key (`Bootstrap::next` makes a new CSR), so its re-ask is `TooSoon` and

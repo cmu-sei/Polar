@@ -223,13 +223,15 @@ impl CustodianIssuanceHandler {
             }
         };
         let identity = custodian.workload.clone();
-        // ---- Step 3: the renewal rule, for the workload's pod instance: once of each type ----
+        // ---- Step 3: the renewal rule, for the workload's pod instance: once of each type, a request asked again, for
+        // the same key, admitted again ----
         let admitted_at = polar::time::now_millis();
         match call_admit(
             &self.ledger,
             &identity,
             &custodian.instance_binding,
             request.cert_type,
+            &request.csr_pem,
             admitted_at,
         )
         .await
@@ -491,6 +493,45 @@ pub(crate) mod tests {
             .await;
         assert_eq!(reason(&again), Some(IssuanceRefusalReason::TooSoon));
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": the custodian, its reply overdue, asks
+    // again with the same CSR, and is answered again; another key from it within the bound is too soon.
+    #[tokio::test]
+    async fn a_custodian_asking_again_for_the_same_key_is_answered_again_and_another_key_is_not() {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Client], 0).await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(crate::issuance::tests::SignsTheCsr::new())
+            .mount(&server)
+            .await;
+        let handler = handler(ledger, &server);
+        let csr = || {
+            cert_issuer_common::keypair::generate_csr(
+                X,
+                &cert_issuer_common::keypair::KeyAlgorithm::EcdsaP256,
+                &[],
+            )
+            .unwrap()
+            .csr_pem
+        };
+        let (asked, other) = (csr(), csr());
+        let with = |csr_pem: &str| CustodianIssuanceRequest {
+            csr_pem: csr_pem.to_string(),
+            ..asking(WorkloadCertType::Client)
+        };
+        for _ in 0..2 {
+            let reply = handler
+                .handle(with(&asked), Some(CUSTODIAN.to_string()))
+                .await;
+            assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+        }
+        let reply = handler
+            .handle(with(&other), Some(CUSTODIAN.to_string()))
+            .await;
+        assert_eq!(reason(&reply), Some(IssuanceRefusalReason::TooSoon));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     /// docs/architecture/authority-model.md, "Multi-instance workloads": a multi-instance workload's client certificate

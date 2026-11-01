@@ -335,13 +335,15 @@ impl IssuanceHandler {
         // ---- Step 5: the renewal rule (docs/architecture/deployments.md, "The renewal rule") ----
         //
         // A pod restarted in place asks again under its UID, and is issued again, but not more than one certificate
-        // of a type within the bound. Asked last, just before signing, so only a signing that fails gives it back.
+        // of a type within the bound; the same request asked again, its reply lost, asks for the same key and is
+        // signed again. Asked last, just before signing, so only a signing that fails gives it back.
         let admitted_at = polar::time::now_millis();
         match call_admit(
             &self.ledger,
             &identity,
             &instance_binding,
             request.cert_type,
+            &request.csr_pem,
             admitted_at,
         )
         .await
@@ -453,11 +455,14 @@ pub(crate) async fn call_check_grant(
     }
 }
 
+/// The renewal rule asked for a request whose CSR is `csr_pem`: keyed on the key it asks for, so the same request asked
+/// again is admitted again (docs/architecture/deployments.md, "A retry is not a second request").
 pub(crate) async fn call_admit(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
     instance_binding: &str,
     cert_type: WorkloadCertType,
+    csr_pem: &str,
     now: i64,
 ) -> Result<bool, String> {
     match ractor::rpc::call(
@@ -466,6 +471,7 @@ pub(crate) async fn call_admit(
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
             cert_type,
+            key: cert_issuer_common::public_key::csr_key(csr_pem),
             now,
             reply,
         },
@@ -1325,6 +1331,45 @@ pub(crate) mod tests {
         );
     }
 
+    /// A cert-issuer that signs the CSR it is sent, as the real one does, so the certificate is of the key asked for,
+    /// each under a serial of its own.
+    pub(crate) struct SignsTheCsr {
+        ca: (rcgen::CertificateParams, rcgen::KeyPair),
+        signed: std::sync::atomic::AtomicU32,
+    }
+
+    impl SignsTheCsr {
+        pub(crate) fn new() -> Self {
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            Self {
+                ca: (params, key),
+                signed: Default::default(),
+            }
+        }
+    }
+
+    impl wiremock::Respond for SignsTheCsr {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let csr =
+                rcgen::CertificateSigningRequestParams::from_pem(body["csr_pem"].as_str().unwrap())
+                    .unwrap();
+            let certificate = csr
+                .signed_by(&rcgen::Issuer::from_params(&self.ca.0, &self.ca.1))
+                .unwrap();
+            let n = self
+                .signed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(cert_issuer_common::IssueResponse {
+                certificate_pem: certificate.pem(),
+                serial_number: format!("signed-{n}"),
+                ..fake_issue_response()
+            })
+        }
+    }
+
     pub(crate) fn response_with_serial(serial: &str) -> cert_issuer_common::IssueResponse {
         cert_issuer_common::IssueResponse {
             serial_number: serial.to_string(),
@@ -1425,6 +1470,49 @@ pub(crate) mod tests {
                 "{reply:?}"
             );
         }
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": a request asked again, its reply lost, asks
+    // for the same key and is signed again within the bound; another key is too soon, and is never signed.
+    #[tokio::test]
+    async fn the_same_request_asked_again_is_signed_again_and_another_key_is_too_soon() {
+        let server = MockServer::start().await;
+        kubernetes_pod(&server, "pod-1").await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(SignsTheCsr::new())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let handler = handler_for(&server, spawn_test_ledger().await).await;
+        let csr = || {
+            cert_issuer_common::keypair::generate_csr(
+                "git-server.polar.serviceaccount.cluster.local",
+                &cert_issuer_common::keypair::KeyAlgorithm::Ed25519,
+                &[],
+            )
+            .unwrap()
+            .csr_pem
+        };
+        let (asked, other) = (csr(), csr());
+        let with = |csr_pem: &str| IssuanceRequest {
+            csr_pem: csr_pem.to_string(),
+            ..request_for(Client, &[])
+        };
+        for _ in 0..2 {
+            let reply = handler.handle(with(&asked)).await;
+            assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+        }
+        let reply = handler.handle(with(&other)).await;
+        assert!(
+            matches!(
+                reply,
+                IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TooSoon
+                }
+            ),
+            "{reply:?}"
+        );
     }
 
     // docs/architecture/deployments.md, "The renewal rule": a pod restarted in place, its certificate still valid, is

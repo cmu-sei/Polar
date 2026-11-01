@@ -99,10 +99,59 @@ pub fn extract_escrow_public_key_pem(
     extract_public_key_pem(certificate_pem)
 }
 
+/// The key a certificate signing request asks to be certified, as its SubjectPublicKeyInfo (DER); none when `csr_pem`
+/// is not a CSR. What makes a request asked again the same request: the same key, whatever else it carries
+/// (docs/architecture/deployments.md, "A retry is not a second request").
+pub fn csr_key(csr_pem: &str) -> Option<Vec<u8>> {
+    use x509_parser::certification_request::X509CertificationRequest;
+    use x509_parser::prelude::FromDer;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).ok()?;
+    let (_, csr) = X509CertificationRequest::from_der(&pem.contents).ok()?;
+    Some(csr.certification_request_info.subject_pki.raw.to_vec())
+}
+
+/// The key `certificate_pem` certifies, as its SubjectPublicKeyInfo (DER), comparable with [`csr_key`]; none when it is
+/// not a certificate.
+pub fn certificate_key(certificate_pem: &str) -> Option<Vec<u8>> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes()).ok()?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).ok()?;
+    Some(cert.tbs_certificate.subject_pki.raw.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rsa::pkcs8::EncodePrivateKey;
+
+    #[test]
+    fn a_csr_and_the_certificate_of_its_key_read_as_one_key_and_two_keys_do_not() {
+        use crate::keypair::{KeyAlgorithm, generate_csr};
+        for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::EcdsaP256] {
+            let csr =
+                generate_csr("x.polar.serviceaccount.cluster.local", &algorithm, &[]).unwrap();
+            let key = rcgen::KeyPair::from_pem(&csr.private_key_pem).unwrap();
+            let certificate = rcgen::CertificateParams::new(vec!["x".to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .pem();
+            let asked = csr_key(&csr.csr_pem).expect("a CSR's key");
+            assert_eq!(certificate_key(&certificate), Some(asked.clone()));
+            assert_eq!(
+                asked,
+                rcgen::PublicKeyData::subject_public_key_info(&key),
+                "its SubjectPublicKeyInfo"
+            );
+            let other =
+                generate_csr("x.polar.serviceaccount.cluster.local", &algorithm, &[]).unwrap();
+            assert_ne!(csr_key(&other.csr_pem), Some(asked), "another key");
+            // Neither reads as the other, and text that is neither is no key.
+            assert_eq!(csr_key(&certificate), None);
+            assert_eq!(certificate_key(&csr.csr_pem), None);
+        }
+        assert_eq!(csr_key("csr"), None);
+        assert_eq!(certificate_key("pem"), None);
+    }
 
     #[test]
     fn extracted_public_key_matches_the_original_key_used_to_sign_the_certificate() {

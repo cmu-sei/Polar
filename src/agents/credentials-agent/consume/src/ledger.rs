@@ -177,13 +177,16 @@ pub enum LedgerMessage {
         reply: RpcReplyPort<bool>,
     },
     /// The renewal rule (docs/architecture/deployments.md, "The renewal rule"): whether `identity`'s pod
-    /// `instance_binding` may be issued a certificate of `cert_type` at `now`, which it may unless it was issued one, or
-    /// admitted to be, within the bound. Admitting records `now`; asks are answered one at a time, so two at once are
-    /// never both admitted.
+    /// `instance_binding` may be issued a certificate of `cert_type` for `key` (the SubjectPublicKeyInfo its CSR asks
+    /// for, none when it does not read) at `now`, which it may unless it was issued one, or admitted to be, within the
+    /// bound for another key; the same key is the same request asked again ("A retry is not a second request").
+    /// Admitting records `now`; asks are answered one at a time, so two at once for different keys are never both
+    /// admitted.
     Admit {
         identity: String,
         instance_binding: String,
         cert_type: WorkloadCertType,
+        key: Option<Vec<u8>>,
         now: i64,
         reply: RpcReplyPort<bool>,
     },
@@ -446,6 +449,7 @@ impl Actor for LedgerActor {
                 identity,
                 instance_binding,
                 cert_type,
+                key,
                 now,
                 reply,
             } => {
@@ -454,6 +458,7 @@ impl Actor for LedgerActor {
                     &identity,
                     &instance_binding,
                     cert_type,
+                    key.as_deref(),
                     now,
                 );
                 let _ = reply.send(admitted);
@@ -769,10 +774,21 @@ pub(crate) mod tests {
         instance_binding: &str,
         now: i64,
     ) -> bool {
+        admit_for(ledger, identity, instance_binding, None, now).await
+    }
+
+    pub(crate) async fn admit_for(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+        instance_binding: &str,
+        key: Option<&[u8]>,
+        now: i64,
+    ) -> bool {
         ractor::call!(ledger, |reply| LedgerMessage::Admit {
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
             cert_type: WorkloadCertType::Client,
+            key: key.map(<[u8]>::to_vec),
             now,
             reply,
         })
@@ -800,6 +816,25 @@ pub(crate) mod tests {
             .unwrap();
         assert!(admit(&ledger, "alice", "pod-1", 2000).await, "given back");
         assert!(!admit(&ledger, "alice", "pod-1", 3000).await);
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": the same key asked twice at once is one
+    // request asked again, and both are admitted; two keys at once are two requests, and one is.
+    #[tokio::test]
+    async fn the_ledger_admits_the_same_key_twice_at_once_and_one_of_two_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = spawn_ledger(dir.path().join("events.jsonl").to_str().unwrap()).await;
+        let (same, other) = (b"one key".as_slice(), b"another key".as_slice());
+        let (a, b) = tokio::join!(
+            admit_for(&ledger, "alice", "pod-1", Some(same), 1000),
+            admit_for(&ledger, "alice", "pod-1", Some(same), 1000)
+        );
+        assert!(a && b, "the same request: {a} {b}");
+        let (c, d) = tokio::join!(
+            admit_for(&ledger, "bob", "pod-1", Some(same), 1000),
+            admit_for(&ledger, "bob", "pod-1", Some(other), 1000)
+        );
+        assert!(c ^ d, "one of the two: {c} {d}");
     }
 
     pub(crate) async fn check_agent_escrow_renewal(

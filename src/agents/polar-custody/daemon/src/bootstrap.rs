@@ -77,10 +77,13 @@ pub const REPLY_TOPICS: [&str; 4] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Step {
-    /// One of the workload's certificates, with a server certificate's names.
-    Certificate(Slot, Vec<String>),
+    /// One of the workload's certificates, with a server certificate's names, and once asked the CSR it was asked
+    /// with: asked again with the same, so the same request is admitted again (docs/architecture/deployments.md, "A
+    /// retry is not a second request").
+    Certificate(Slot, Vec<String>, Option<String>),
     RetrieveEscrow,
-    IssueEscrow,
+    /// The escrow key's certificate, and once asked the CSR it was asked with, as a certificate's.
+    IssueEscrow(Option<String>),
     StoreEscrow,
 }
 
@@ -152,10 +155,10 @@ impl Bootstrap {
     pub fn new(plan: &Plan) -> Self {
         let mut steps = VecDeque::new();
         if plan.client {
-            steps.push_back(Step::Certificate(Slot::Client, Vec::new()));
+            steps.push_back(Step::Certificate(Slot::Client, Vec::new(), None));
         }
         if let Some(names) = &plan.server {
-            steps.push_back(Step::Certificate(Slot::Server, names.clone()));
+            steps.push_back(Step::Certificate(Slot::Server, names.clone(), None));
         }
         if plan.escrow {
             steps.push_back(Step::RetrieveEscrow);
@@ -211,13 +214,26 @@ impl Bootstrap {
             info!("the custodian has fetched everything it was asked to");
             return Progress::Done;
         };
+        // A key is made once for each request: one asked again is asked with the CSR it was asked with first.
+        let step = match step {
+            Step::Certificate(slot, names, None) => {
+                match write(custody).workload_csr(slot, names.clone()) {
+                    Ok(csr) => Step::Certificate(slot, names, Some(csr)),
+                    Err(refusal) => return self.fail(custody, format!("{slot:?}: {refusal}")),
+                }
+            }
+            Step::IssueEscrow(None) => match write(custody).escrow_csr() {
+                Ok(csr) => Step::IssueEscrow(Some(csr)),
+                Err(refusal) => return self.fail(custody, format!("the escrow key: {refusal}")),
+            },
+            step => step,
+        };
         let correlation_id = uuid::Uuid::new_v4().to_string();
         let started = match &step {
-            Step::Certificate(slot, names) => {
-                let csr = match write(custody).workload_csr(*slot, names.clone()) {
-                    Ok(csr) => csr,
-                    Err(refusal) => return self.fail(custody, format!("{slot:?}: {refusal}")),
-                };
+            Step::Certificate(_, _, None) | Step::IssueEscrow(None) => {
+                return self.fail(custody, format!("{step:?}: asked with no CSR"));
+            }
+            Step::Certificate(slot, names, Some(csr)) => {
                 let cert_type = match slot {
                     Slot::Server => WorkloadCertType::Server,
                     _ => WorkloadCertType::Client,
@@ -225,7 +241,7 @@ impl Bootstrap {
                 encode(
                     &correlation_id,
                     CustodianIssuanceRequest {
-                        csr_pem: csr,
+                        csr_pem: csr.clone(),
                         cert_type,
                         names: names.clone(),
                     },
@@ -256,24 +272,20 @@ impl Bootstrap {
                     )
                 })
             }
-            Step::IssueEscrow => {
-                let csr = match write(custody).escrow_csr() {
-                    Ok(csr) => csr,
-                    Err(refusal) => {
-                        return self.fail(custody, format!("the escrow key: {refusal}"));
-                    }
-                };
-                encode(&correlation_id, AgentEscrowIssuanceRequest { csr_pem: csr }).map(
-                    |payload| {
-                        (
-                            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-                            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
-                            payload,
-                            None,
-                        )
-                    },
+            Step::IssueEscrow(Some(csr)) => encode(
+                &correlation_id,
+                AgentEscrowIssuanceRequest {
+                    csr_pem: csr.clone(),
+                },
+            )
+            .map(|payload| {
+                (
+                    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+                    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+                    payload,
+                    None,
                 )
-            }
+            }),
             Step::StoreEscrow => {
                 // Sealed to the key the daemon pinned under the CA, and to nothing a caller names.
                 let Some(pinned) = pinned else {
@@ -343,7 +355,7 @@ impl Bootstrap {
         // Each reply topic is every requester's: only the one awaited, by its correlation id, is this custodian's.
         let ours = |id: &str| id == waiting.correlation_id;
         let outcome: Result<Option<Step>, String> = match &waiting.step {
-            Step::Certificate(slot, _) => match decode::<IssuanceReply>(payload) {
+            Step::Certificate(slot, _, _) => match decode::<IssuanceReply>(payload) {
                 Some(envelope) if ours(&envelope.correlation_id) => match envelope.payload {
                     IssuanceReply::Issued {
                         certificate_pem, ..
@@ -379,7 +391,7 @@ impl Bootstrap {
                         }
                     }
                     // Nothing escrowed yet: one is made here.
-                    RetrieveAgentEscrowKeypairReply::NotFound => Ok(Some(Step::IssueEscrow)),
+                    RetrieveAgentEscrowKeypairReply::NotFound => Ok(Some(Step::IssueEscrow(None))),
                     RetrieveAgentEscrowKeypairReply::Refused { reason } => Err(format!(
                         "the escrow key: the credentials agent refused: {reason:?}"
                     )),
@@ -391,7 +403,7 @@ impl Bootstrap {
                 },
                 _ => return Progress::Wait,
             },
-            Step::IssueEscrow => match decode::<AgentEscrowIssuanceReply>(payload) {
+            Step::IssueEscrow(_) => match decode::<AgentEscrowIssuanceReply>(payload) {
                 Some(envelope) if ours(&envelope.correlation_id) => match envelope.payload {
                     AgentEscrowIssuanceReply::Issued { .. } => Ok(Some(Step::StoreEscrow)),
                     // Another pod of this workload is being issued the one key the workload has: asked for again shortly,
@@ -847,6 +859,9 @@ mod tests {
             start + REPLY_TIMEOUT + Duration::from_secs(1),
         )));
         assert_ne!(again.correlation_id, first.correlation_id);
+        // docs/architecture/deployments.md, "A retry is not a second request": asked again for the same key, so the
+        // credentials agent's renewal rule admits it again.
+        assert_eq!(again.payload.csr_pem, first.payload.csr_pem);
         // The first one's answer, arriving late, is not taken.
         let late = reply(
             &first.correlation_id,
@@ -875,6 +890,67 @@ mod tests {
                 start
             ),
             Progress::Done
+        );
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": the escrow key's certificate, its reply
+    // overdue, is asked for again for the same key, and the key it is issued for is the one stored.
+    #[test]
+    fn an_escrow_issuance_whose_reply_never_comes_is_asked_again_for_the_same_key() {
+        let custody = custody_planned(false, None, true);
+        let plan = read(&custody).plan().unwrap();
+        let mut bootstrap = Bootstrap::new(&plan);
+        let now = Instant::now();
+        let pinned = credentials_agent_key().to_public_key();
+        let retrieve = request::<RetrieveAgentEscrowKeypairRequest>(&sent(bootstrap.next(
+            &custody,
+            Some(&pinned),
+            now,
+        )));
+        let first = request::<AgentEscrowIssuanceRequest>(&sent(bootstrap.on_reply(
+            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+            &reply(
+                &retrieve.correlation_id,
+                RetrieveAgentEscrowKeypairReply::NotFound,
+            ),
+            &custody,
+            Some(&pinned),
+            now,
+        )));
+        let later = now + REPLY_TIMEOUT + Duration::from_secs(1);
+        let again = request::<AgentEscrowIssuanceRequest>(&sent(bootstrap.next(
+            &custody,
+            Some(&pinned),
+            later,
+        )));
+        assert_ne!(again.correlation_id, first.correlation_id);
+        assert_eq!(again.payload.csr_pem, first.payload.csr_pem);
+        let store = request::<StoreSecretRequest>(&sent(bootstrap.on_reply(
+            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+            &reply(
+                &again.correlation_id,
+                AgentEscrowIssuanceReply::Issued {
+                    certificate_pem: String::new(),
+                    ca_chain_pem: String::new(),
+                    escrow_public_key_pem: String::new(),
+                },
+            ),
+            &custody,
+            Some(&pinned),
+            later,
+        )));
+        // What is stored is the key both requests asked for.
+        let stored = store
+            .payload
+            .secret
+            .decrypt(credentials_agent_key())
+            .unwrap();
+        let stored =
+            polar_custody::escrow::EscrowKey::from_pkcs8_pem(std::str::from_utf8(&stored).unwrap())
+                .unwrap();
+        assert_eq!(
+            cert_issuer_common::public_key::csr_key(&stored.csr(&plan.identity).unwrap()),
+            cert_issuer_common::public_key::csr_key(&first.payload.csr_pem)
         );
     }
 

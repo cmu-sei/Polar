@@ -36,10 +36,11 @@
 //! type for that pod within the bound (docs/architecture/deployments.md, "The renewal rule"). The attestation agent's
 //! instance check joins them once it exists (step 6).
 //!
-//! A request is given one answer, however often it is offered ([`Decisions`]). cert-issuer offers what it holds again
-//! each time it hears this agent, and lists it over mTLS while the session is lost, so an answer lost with a session
-//! that ended is asked for again; deciding it again would find the pod admitted by the first answer and refuse it as
-//! too soon, and cert-issuer takes a refusal as final (docs/architecture/broker-baseline.md, "The fifth set").
+//! A request offered again is given its answer again. cert-issuer offers what it holds again each time it hears this
+//! agent, and lists it over mTLS while the session is lost, so an answer lost with a session that ended is asked for
+//! again (docs/architecture/broker-baseline.md, "The fifth set"). It is decided again, and the renewal rule, keyed on
+//! the key its CSR asks for, admits the same request again; another CSR from the pod within the bound is refused
+//! (docs/architecture/deployments.md, "A retry is not a second request").
 
 use crate::ledger::LedgerMessage;
 use cassini_client::TcpClientMessage;
@@ -48,59 +49,13 @@ use cert_issuer_common::CertType;
 use cert_issuer_common::held::{HELD_REPLIES_TOPIC, HeldDecision, HeldOffer, HeldReply};
 use credentials_agent_common::issuance::WorkloadCertType;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::time::Duration;
 use tracing::{info, warn};
 
 /// How often the held requests are asked for over mTLS while the Cassini session is lost: well inside cert-issuer's
 /// presence bound, so it keeps hearing this agent.
 pub const HELD_POLL_EVERY: Duration = Duration::from_secs(10);
-
-/// How many answers are remembered: four times what cert-issuer holds at once (`MAX_HELD`, 64).
-pub const DECISIONS_KEPT: usize = 256;
-
-/// What makes two offers one request, as cert-issuer keys what it holds: the identity, the pod, the type and the CSR.
-/// Not the offer's id, which a cert-issuer that restarted gives anew.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Request {
-    identity: String,
-    instance_binding: Option<String>,
-    cert_type: CertType,
-    csr_pem: String,
-}
-
-impl Request {
-    fn of(offer: &HeldOffer) -> Self {
-        Self {
-            identity: offer.identity.clone(),
-            instance_binding: offer.instance_binding.clone(),
-            cert_type: offer.cert_type.clone(),
-            csr_pem: offer.csr_pem.clone(),
-        }
-    }
-}
-
-/// The answers given, the oldest forgotten first once [`DECISIONS_KEPT`] are kept.
-#[derive(Debug, Default)]
-pub struct Decisions {
-    given: VecDeque<(Request, HeldDecision)>,
-}
-
-impl Decisions {
-    fn get(&self, request: &Request) -> Option<HeldDecision> {
-        self.given
-            .iter()
-            .find(|(given, _)| given == request)
-            .map(|(_, decision)| decision.clone())
-    }
-
-    fn keep(&mut self, request: Request, decision: HeldDecision) {
-        if self.given.len() >= DECISIONS_KEPT {
-            self.given.pop_front();
-        }
-        self.given.push_back((request, decision));
-    }
-}
 
 /// Whether to vouch for `offer`: a bootstrap service's (`bootstrap`, from the authority model), not `own_identity`,
 /// bound to a pod, for a client or server certificate, and not `too_soon` by the renewal rule.
@@ -180,25 +135,14 @@ pub struct HeldVoucherArgs {
 pub struct HeldVoucherState {
     args: HeldVoucherArgs,
     lost: bool,
-    decisions: Decisions,
 }
 
 pub struct HeldVoucher;
 
 impl HeldVoucherState {
-    /// The answer to `offer`: the one given before, if it was offered before, else decided now and kept.
-    async fn decide(&mut self, offer: &HeldOffer) -> HeldDecision {
-        let request = Request::of(offer);
-        if let Some(decision) = self.decisions.get(&request) {
-            info!(held = %offer.id, identity = %offer.identity, decision = ?decision, "a held request offered again: answered as before");
-            return decision;
-        }
-        let decision = self.decide_now(offer).await;
-        self.decisions.keep(request, decision.clone());
-        decision
-    }
-
-    async fn decide_now(&self, offer: &HeldOffer) -> HeldDecision {
+    /// The answer to `offer`, by the rules and then the renewal rule, which admits the same request (its CSR's key)
+    /// again within the bound.
+    async fn decide(&self, offer: &HeldOffer) -> HeldDecision {
         let (bootstrap, own) = (&self.args.bootstrap, &self.args.own_identity);
         // The renewal rule is asked last, and only of an offer the other rules allow, since admitting records it.
         let decision = match (
@@ -211,6 +155,7 @@ impl HeldVoucherState {
                     identity: offer.identity.clone(),
                     instance_binding: binding.clone(),
                     cert_type,
+                    key: cert_issuer_common::public_key::csr_key(&offer.csr_pem),
                     now: polar::time::now_millis(),
                     reply,
                 }) {
@@ -242,11 +187,7 @@ impl Actor for HeldVoucher {
         _myself: ActorRef<Self::Msg>,
         args: HeldVoucherArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(HeldVoucherState {
-            args,
-            lost: false,
-            decisions: Decisions::default(),
-        })
+        Ok(HeldVoucherState { args, lost: false })
     }
 
     async fn handle(
@@ -329,6 +270,25 @@ mod tests {
             .collect()
     }
 
+    /// A real CSR, the `n`th of a few made once: what the renewal rule reads a request's key from.
+    fn csr(n: usize) -> String {
+        static CSRS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        CSRS.get_or_init(|| {
+            (0..2)
+                .map(|_| {
+                    cert_issuer_common::keypair::generate_csr(
+                        CASSINI,
+                        &cert_issuer_common::keypair::KeyAlgorithm::Ed25519,
+                        &[],
+                    )
+                    .unwrap()
+                    .csr_pem
+                })
+                .collect()
+        })[n]
+            .clone()
+    }
+
     fn offer(identity: &str, binding: Option<&str>, cert_type: CertType) -> HeldOffer {
         HeldOffer {
             id: "h1".to_string(),
@@ -340,7 +300,7 @@ mod tests {
             instance_binding: binding.map(str::to_string),
             cert_type,
             names: vec![],
-            csr_pem: "csr".to_string(),
+            csr_pem: csr(0),
         }
     }
 
@@ -616,7 +576,7 @@ mod tests {
         // Another CSR from the same pod, within the bound, is the renewal rule's to refuse, as before.
         let mut other = o.clone();
         other.id = "h3".to_string();
-        other.csr_pem = "another csr".to_string();
+        other.csr_pem = csr(1);
         rig.voucher
             .send_message(offered(&other, Some(CERT_ISSUER)))
             .unwrap();
@@ -747,7 +707,7 @@ mod tests {
                         CertType::Client
                     },
                 );
-                o.csr_pem = format!("csr-{csr}");
+                o.csr_pem = super::csr(csr as usize);
                 o.id = format!("h{id}");
                 o
             })

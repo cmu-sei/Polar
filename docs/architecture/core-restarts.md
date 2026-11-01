@@ -378,6 +378,9 @@ Each step tests first, with property tests where an invariant holds.
      `cert-issuer/server/tests/broker_restarts_test.rs`, cert-issuer run whole against a broker restarted twelve times
      in a row, orderly and at once by turns, each time as a held request's offer reaches the credentials agent, which
      was refused at the first or second restart before the change.
+     *Superseded the same day by the general rule* (`deployments.md`, "A retry is not a second request"): the renewal
+     rule admits the same CSR's key again within the bound, so the voucher decides each offer afresh again and the
+     memory is gone. The tests above stand, on real CSRs, and `broker_restarts_test` passes without the memory.
 
    *Built (2026-10-26): 3, and with it the floor obeys step 2's state.* cert-issuer: `held.rs` (the table: keyed by
    workload, pod, type and CSR, at most 64, kept 10 minutes from the last ask, the first answer final), `gate.rs`

@@ -1076,7 +1076,9 @@ fn trusted_issuance(
 }
 
 /// One certificate from the credentials agent through its observer, waiting out whatever is only unavailable and
-/// stopping at what is final. `Ok` is the certificate; `Err` says why it will not come.
+/// stopping at what is final. Its key is made once: every attempt asks for it, so one asked again after its reply was
+/// lost (a 504 from the observer) is the same request, admitted again (docs/architecture/deployments.md, "A retry is
+/// not a second request"). `Ok` is the certificate; `Err` says why it will not come.
 async fn obtain_via_observer(
     observer: &credentials_agent_client::ObserverClient,
     token: &str,
@@ -1085,11 +1087,9 @@ async fn obtain_via_observer(
     offers: &credentials_agent_common::session_offer::OfferCheck,
     delay: Duration,
 ) -> Result<polar_crypto::workload_certificates::IssuedCertificate, String> {
-    use polar_crypto::workload_certificates::request_certificate;
-    observer_patiently(delay, || {
-        request_certificate(observer, token, dns_identity, request, offers)
-    })
-    .await
+    let keyed = polar_crypto::workload_certificates::KeyedRequest::new(dns_identity, request)
+        .map_err(|e| e.to_string())?;
+    observer_patiently(delay, || keyed.attempt(observer, token, offers)).await
 }
 
 /// One attempt after another at the observer, waiting out whatever is only unavailable and stopping at what is
@@ -1684,6 +1684,57 @@ mod tests {
             asked_for_a_session, 3,
             "two refusals to wait out, then the one that worked"
         );
+    }
+
+    // docs/architecture/deployments.md, "A retry is not a second request": a reply lost behind the observer (its 504)
+    // is asked for again with the same CSR, which the credentials agent admits again; a new key would be too soon.
+    #[tokio::test]
+    async fn a_request_whose_reply_was_lost_is_asked_again_with_the_same_csr() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workload/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(an_offer()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/issue"))
+            .respond_with(
+                ResponseTemplate::new(504).set_body_string("timed out waiting for a reply"),
+            )
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(issued()))
+            .mount(&server)
+            .await;
+        let observer = credentials_agent_client::ObserverClient::new(server.uri());
+        obtain_via_observer(
+            &observer,
+            "token",
+            "a.b",
+            &a_request(),
+            &offers_under(the_ca()),
+            MILLISECOND,
+        )
+        .await
+        .expect("it comes in the end");
+        let csrs: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/workload/issue")
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["csr_pem"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(csrs.len(), 3, "two lost, then the one that came");
+        assert!(csrs.iter().all(|csr| *csr == csrs[0]), "one CSR: {csrs:?}");
     }
 
     /// An observer that signs whatever CSR it is sent with `ca`, and hands back `chain` as the CA chain: a genuine

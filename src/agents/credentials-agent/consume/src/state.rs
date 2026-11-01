@@ -825,6 +825,25 @@ impl CredentialsState {
             .map(|record| record.timestamp)
     }
 
+    /// The key (its SubjectPublicKeyInfo) of the certificate [`last_issued`](Self::last_issued) dates, when it reads:
+    /// which request the renewal rule's bound runs from (`crate::renewal::Admissions`).
+    pub fn last_issued_key(
+        &self,
+        identity: &str,
+        instance_binding: &str,
+        cert_type: WorkloadCertType,
+    ) -> Option<Vec<u8>> {
+        self.valid_certificates
+            .get(&(
+                identity.to_string(),
+                instance_binding.to_string(),
+                cert_type,
+            ))
+            .and_then(|record| {
+                cert_issuer_common::public_key::certificate_key(&record.certificate_pem)
+            })
+    }
+
     /// True if this exact `(identity, instance_binding)` pair
     /// currently holds a valid, unrevoked certificate. Not the renewal
     /// rule, which is [`crate::renewal::Admissions`]: a pod restarted in
