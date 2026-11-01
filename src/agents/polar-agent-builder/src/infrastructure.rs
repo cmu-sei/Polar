@@ -2172,6 +2172,72 @@ mod tests {
         );
     }
 
+    /// An agent held at start (`held::stay_up`) is asked to try again on each configuration change, with the
+    /// configuration in force: while its answer is no, the hold stays with the new message; once yes, the hold is
+    /// released, its work answers the shutdown itself, and it is not asked again.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_agent_starts_its_work_when_an_update_mends_it_and_keeps_its_hold_until_then() {
+        use polar_health::{HealthReason, HoldReason};
+        let rig = Rig::new("held-retry", Duration::from_secs(20), &[], false).await;
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = asked.clone();
+        let try_again: crate::held::TryAgain = Box::new(move |retry| {
+            let filter = retry
+                .config
+                .read(&polar::logging::CONSOLE_FILTER)
+                .unwrap_or_default();
+            seen.lock().unwrap().push(filter.clone());
+            Box::pin(async move {
+                if filter == "debug" {
+                    Ok(())
+                } else {
+                    Err(format!("still wrong with {filter}"))
+                }
+            })
+        });
+        rig.resources
+            .healthcheck
+            .hold(HoldReason::Configuration, "wrong at start");
+        let mut held = crate::held::HeldState::new(
+            "held-retry".to_string(),
+            HoldReason::Configuration,
+            rig.resources.clone(),
+            try_again,
+        );
+        let cell = rig.infra.get_cell();
+
+        // An update that does not mend it: still held, with what the agent says now.
+        rig.resources
+            .configuration
+            .apply_unchecked(1, vec![("RUST_LOG".to_string(), "info".to_string())])
+            .await
+            .unwrap();
+        held.configuration_changed(cell.clone()).await;
+        let report = rig.resources.healthcheck.report().await.unwrap();
+        assert_eq!(report.status, crate::ReportStatus::Unhealthy);
+        assert_eq!(report.reason, Some(HealthReason::Configuration));
+        assert_eq!(report.message.as_deref(), Some("still wrong with info"));
+
+        // One that mends it: the work starts, and the hold is released.
+        rig.resources
+            .configuration
+            .apply_unchecked(2, vec![("RUST_LOG".to_string(), "debug".to_string())])
+            .await
+            .unwrap();
+        held.configuration_changed(cell.clone()).await;
+        let report = rig.resources.healthcheck.report().await.unwrap();
+        assert_ne!(
+            report.reason,
+            Some(HealthReason::Configuration),
+            "{report:?}"
+        );
+        assert!(!held.prepare_shutdown(), "the work answers the shutdown");
+
+        // Not asked again once the work runs.
+        held.configuration_changed(cell).await;
+        assert_eq!(*asked.lock().unwrap(), ["info", "debug"]);
+    }
+
     static INFRA_REPOS: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
         authority: crate::runtime::SectionAuthority::Runtime,
         name: "repositories",

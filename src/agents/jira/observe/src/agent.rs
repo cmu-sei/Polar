@@ -26,7 +26,10 @@
 
 use crate::JiraDeployment;
 use crate::settings::{self, JiraSettings};
-use crate::supervisor::{ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET};
+use crate::supervisor::{
+    Infrastructure, ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET,
+};
+use polar_agent_builder::held::Retry;
 use polar_agent_builder::{
     Cause, Configured, GraphDecl, HoldReason, PolarAgent, StartError, TopicDecl,
 };
@@ -94,6 +97,45 @@ pub fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
     })
 }
 
+/// What the start log says of reading anonymously.
+fn log_anonymous(prepared: &Prepared) {
+    if prepared.anonymous {
+        info!(
+            "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows the public \
+             (anonymous users); what it hides from them is not read"
+        );
+    }
+}
+
+/// The way out of a hold at start: the settings made again from the configuration in force, and, if they work, the
+/// supervisor started on the infrastructure the held agent built, linked under it.
+fn try_again(
+    retry: Retry,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+    Box::pin(async move {
+        let prepared = prepare(&retry.config)?;
+        log_anonymous(&prepared);
+        Actor::spawn_linked(
+            Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
+            ObserverSupervisor,
+            ObserverSupervisorArgs {
+                prepared,
+                base_interval: BASE_INTERVAL_SECS,
+                infrastructure: Infrastructure::Built {
+                    resources: retry.resources,
+                    registered: retry.cassini_registered,
+                },
+            },
+            retry.supervisor,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            format!("the settings work now, but {JIRA_OBSERVER_SUPERVISOR} did not start: {e}")
+        })
+    })
+}
+
 impl PolarAgent for JiraObserver {
     const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str =
@@ -155,7 +197,7 @@ impl PolarAgent for JiraObserver {
 
         // A configuration that cannot work (the placeholder address) is not fixed by starting again: the agent stays
         // up with its infrastructure only, says why when it is asked about its health, and starts no observer
-        // (docs/architecture/soft-state.md, "As built: pulled health").
+        // (docs/architecture/soft-state.md, "As built: pulled health"). A signed update that mends it starts them.
         let prepared = match prepare(configured.config()) {
             Ok(prepared) => prepared,
             Err(why) => {
@@ -164,21 +206,17 @@ impl PolarAgent for JiraObserver {
                     crate::BROKER_CLIENT_NAME,
                     HoldReason::Configuration,
                     why,
+                    Box::new(try_again),
                 )
                 .await;
             }
         };
-        if prepared.anonymous {
-            info!(
-                "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows \
-                 the public (anonymous users); what it hides from them is not read"
-            );
-        }
+        log_anonymous(&prepared);
         let args = ObserverSupervisorArgs {
             prepared,
             // TODO: read this from configuration
             base_interval: BASE_INTERVAL_SECS,
-            configured,
+            infrastructure: Infrastructure::Build(configured),
         };
 
         let (_, handle) = Actor::spawn(

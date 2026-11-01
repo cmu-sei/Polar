@@ -34,8 +34,8 @@ use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;
 use polar::egress::Egress;
 use polar_agent_builder::{
-    AgentBuilder, ConfigurationHandle, Configured, CryptoClient, HealthClient, HealthHandle,
-    HoldReason, InfrastructureEvent, InfrastructureSupervisorMessage, StateClient,
+    AgentBuilder, AgentResources, ConfigurationHandle, Configured, CryptoClient, HealthClient,
+    HealthHandle, HoldReason, InfrastructureEvent, InfrastructureSupervisorMessage, StateClient,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -120,9 +120,21 @@ pub struct ObserverSupervisorState {
     issues: Option<ActorRef<JiraObserverMessage>>,
 }
 
+/// Where the supervisor's infrastructure comes from.
+pub enum Infrastructure {
+    /// The configuration `run` judged: the supervisor builds the agent from it.
+    Build(Configured),
+    /// Built already, by the held supervisor of an agent that refused its configuration at start and was mended by a
+    /// signed update (`polar_agent_builder::held`); `registered` is whether Cassini has registered it already.
+    Built {
+        resources: AgentResources,
+        registered: bool,
+    },
+}
+
 pub struct ObserverSupervisorArgs {
-    /// The configuration `run` judged; the builder is made from it.
-    pub configured: Configured,
+    /// The agent's infrastructure, to build or already built.
+    pub infrastructure: Infrastructure,
     /// The settings `prepare` made of it.
     pub prepared: Prepared,
     pub base_interval: u64,
@@ -431,11 +443,28 @@ impl Actor for ObserverSupervisor {
         // Health check, router, broker client and CryptoActor in one call. Observers only
         // depend on Cassini, which is the default capability; the issue
         // observer's soft state comes with the state actor the builder starts.
-        let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
-            .into_configured(args.configured)
-            .build()
-            .await?;
+        let (resources, registered) = match args.infrastructure {
+            Infrastructure::Build(configured) => (
+                AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+                    .with_lifecycle_handler(|event| {
+                        Some(ObserverSupervisorMessage::ClientEvent { event })
+                    })
+                    .into_configured(configured)
+                    .build()
+                    .await?,
+                false,
+            ),
+            // Its lifecycle events go to the held supervisor that built it, and to whoever subscribes.
+            Infrastructure::Built {
+                resources,
+                registered,
+            } => {
+                resources.events_output.subscribe(myself.clone(), |event| {
+                    Some(ObserverSupervisorMessage::ClientEvent { event })
+                });
+                (resources, registered)
+            }
+        };
 
         resources
             .infrastructure_events
@@ -477,7 +506,7 @@ impl Actor for ObserverSupervisor {
             credential: None,
             credential_problem: None,
             settings_problem: None,
-            registered: false,
+            registered,
             held: None,
             infrastructure: resources.infrastructure,
             projects: None,
@@ -489,12 +518,13 @@ impl Actor for ObserverSupervisor {
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // A section that arrived before the subscription.
         ObserverSupervisor::apply_credentials(state).await;
-        Ok(())
+        // Built by a held supervisor after Cassini registered the agent: no `Registered` comes again.
+        ObserverSupervisor::start_observers(&myself, state).await
     }
 
     async fn handle(
