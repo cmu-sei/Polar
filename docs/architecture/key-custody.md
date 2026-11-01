@@ -670,7 +670,7 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
-### A retry in place (2026-11-01, decided here by (a)'s reasoning, for review)
+### A retry in place (2026-11-01, decided here by (a)'s reasoning; accepted by the maintainer the same day)
 
 *Found on u7c* (`broker-baseline.md`, "The fifth set", "Found on the way"): jira-observer and jira-processor stayed in
 `Init:CrashLoopBackOff`, every run of `polar-init` refused "the slot is sealed: a certificate is installed in it".

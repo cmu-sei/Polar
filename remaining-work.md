@@ -748,6 +748,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   the StateActor at a short fixed interval (a declared variable) before the caller hears anything, so the domain's
   backoff sees only real failures. Found on u7c: jira-observer's Jira backoff (to 15 minutes) delayed the first cursor
   pull 14 minutes after the schema arrived (soft-state.md, "The rebuild, seen on a cluster").
+- [ ] DECIDED 2026-11-01 (the maintainer): the next release waits for multi-instance (protocol version 2, so a major
+  version, 3.0.0); the custody fix's decision is accepted (a polar-init retry reuses what its own sealed slot holds after
+  checking the certificate, never unseals; a failed custodian exits and its pod waits out the renewal rule); and "a retry
+  judged as a second request" is fixed in one general way on the issuance path (the renewal rule's admission keyed on the
+  request itself, the custodian re-asking with the same CSR), replacing the one-off voucher memory; queued after the
+  multi-instance build, which works in the same code.
 - [ ] KEY ROTATION (direction decided by the maintainer 2026-11-01; `docs/architecture/key-rotation.md`): revocation records
   why (compromise vs an ordinary end), and only a compromise starts a rotation; a compromise is declared by the attestation
   agent or an administrator's signed command; rotation is a builder `RotationActor` over an agent's own declared encrypted
