@@ -755,7 +755,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   checking the certificate, never unseals; a failed custodian exits and its pod waits out the renewal rule); and "a retry
   judged as a second request" is fixed in one general way on the issuance path (the renewal rule's admission keyed on the
   request itself, the custodian re-asking with the same CSR), replacing the one-off voucher memory; queued after the
-  multi-instance build, which works in the same code.
+  multi-instance build, which works in the same code. The cluster run waits too (the maintainer, 2026-11-01): one deploy
+  of every image, after the retry fix, sees multi-instance (two harness pods as two sessions, a clean end closing its
+  session, `pressure.nuon`) and the retry fix together, and replaces u7c's stuck jira pods.
 - [ ] KEY ROTATION (direction decided by the maintainer 2026-11-01; `docs/architecture/key-rotation.md`): revocation records
   why (compromise vs an ordinary end), and only a compromise starts a rotation; a compromise is declared by the attestation
   agent or an administrator's signed command; rotation is a builder `RotationActor` over an agent's own declared encrypted
