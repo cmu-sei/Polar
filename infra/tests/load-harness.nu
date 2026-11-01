@@ -152,19 +152,21 @@ def main [] {
             }
         }
         {
-            name: "an image tag replaces the harness container's image, digest or tag, and nothing else"
+            name: "an image tag replaces every container's image, init containers' too, digest or tag, and nothing else"
             body: {
-                let job = { spec: { template: { spec: {
-                    initContainers: [{ name: "polar-init", image: "localhost:30500/polar-init:latest@sha256:aa" }]
-                    containers: [
-                        { name: "harness-sink", image: "localhost:30500/harness-sink:latest@sha256:bb" }
-                        { name: "polar-custody", image: "localhost:30500/polar-custody:latest@sha256:cc" }
+                let job = { metadata: { name: "j" }, spec: { template: { spec: {
+                    initContainers: [
+                        { name: "polar-custody", image: "localhost:30500/polar-custody:latest@sha256:cc", restartPolicy: "Always" }
+                        { name: "polar-init", image: "localhost:30500/polar-init:latest@sha256:aa" }
                     ]
+                    containers: [{ name: "harness-sink", image: "localhost:30500/harness-sink:latest@sha256:bb" }]
                 } } } }
                 let tagged = (with_image_tag $job "s4m")
-                assert equal ($tagged.spec.template.spec.containers | get image) ["localhost:30500/harness-sink:s4m" "localhost:30500/polar-custody:latest@sha256:cc"]
-                assert equal $tagged.spec.template.spec.initContainers $job.spec.template.spec.initContainers
-                let plain = ($job | update spec.template.spec.containers.0.image "reg/harness-producer:latest")
+                assert equal ($tagged.spec.template.spec.containers | get image) ["localhost:30500/harness-sink:s4m"]
+                assert equal ($tagged.spec.template.spec.initContainers | get image) ["localhost:30500/polar-custody:s4m" "localhost:30500/polar-init:s4m"]
+                assert equal ($tagged.spec.template.spec.initContainers.0.restartPolicy) "Always"
+                assert equal $tagged.metadata $job.metadata
+                let plain = ($job | update spec.template.spec.containers.0.image "reg/harness-producer:latest" | reject spec.template.spec.initContainers)
                 assert equal (with_image_tag $plain "new").spec.template.spec.containers.0.image "reg/harness-producer:new"
                 assert equal (with_image_tag $job "") $job
             }

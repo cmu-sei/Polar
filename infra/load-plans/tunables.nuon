@@ -1,0 +1,64 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+# infra/load-plans/tunables.nuon
+#
+# The broker's backpressure tunables under a slow consumer whose slowness reaches the broker (broker-baseline.md, the
+# fifth set): one producer at 1,000 messages a second, one sink spending its delay before it acknowledges each delivery
+# (`sink_slow: "before_ack"`), 1.1 ms (about 9% slower than the producer) or 10 ms (a tenth of its rate), at 4 KiB,
+# 64 KiB and 1 MiB; 10 seconds of messages (at most 4 GiB). Each size and delay under each broker setting in turn, the
+# broker restarted before every run (`fresh_broker`), so each begins at its floor:
+#
+# - the cap, CASSINI_MEMORY_BUDGET_BYTES: 256 MiB (the floor), 512 MiB, 1 GiB, 2 GiB;
+# - uncapped, the controller at its defaults, its latency target at half and twice the stall bound, and its step at
+#   four times its default (64 MiB);
+# - the stall bound, CASSINI_STALL_SECS, at 10 and 50 s (30, the default, is every other setting's).
+#
+# The producer gives up only after 120 s without an acknowledgement, and the sink after 60 s without a message, so a
+# stall bound of 50 s is measured, not the harness's patience. 60 runs, about two hours.
+#
+#   nu infra/load-harness.nu run infra/load-plans/tunables.nuon --target sandbox-local
+{
+  name: "tunables"
+  fresh_broker: true
+  defaults: {
+    rate: 1000, seconds: 10, max_count: 10000, max_bytes: 4294967296, warmup: 100,
+    sink_slow: "before_ack", stall_secs: 120, idle_secs: 60
+  }
+  grid: {
+    size: [4096 65536 1048576]
+    sink_delay_us: [1100 10000]
+    tune: [
+      { broker: { CASSINI_MEMORY_BUDGET_BYTES: 268435456 } }
+      { broker: { CASSINI_MEMORY_BUDGET_BYTES: 536870912 } }
+      { broker: { CASSINI_MEMORY_BUDGET_BYTES: 1073741824 } }
+      { broker: { CASSINI_MEMORY_BUDGET_BYTES: 2147483648 } }
+      { broker: {} }
+      { broker: { CASSINI_BUDGET_LATENCY_PERCENT: 50 } }
+      { broker: { CASSINI_BUDGET_LATENCY_PERCENT: 200 } }
+      { broker: { CASSINI_BUDGET_STEP_BYTES: 67108864 } }
+      { broker: { CASSINI_STALL_SECS: 10 } }
+      { broker: { CASSINI_STALL_SECS: 50 } }
+    ]
+    shape: [
+      { producers: 1, sinks: 1, lanes: 1 }
+    ]
+  }
+}

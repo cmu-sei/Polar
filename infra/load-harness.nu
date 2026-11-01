@@ -291,23 +291,23 @@ export def budget_brief [budget: any]: nothing -> any {
     }
 }
 
-# A run's Job with its harness container's image at `tag` in place of what the target rendered (a digest, or a tag), so
-# rounds of one plan can run one build's harness against that build's broker; the other containers (the custody
-# daemon, polar-init) are left as rendered. An empty tag leaves the Job as it is.
+# A run's Job with every container's image, its init containers' too (the custody daemon, polar-init, the harness's),
+# at `tag` in place of what the target rendered (a digest, or a tag), so rounds of one plan can run one build's pods
+# against that build's broker: the custody daemon's watcher speaks the broker's protocol too. An empty tag leaves the
+# Job as it is.
 export def with_image_tag [job: record, tag: string]: nothing -> record {
     if ($tag | is-empty) { return $job }
-    $job | update spec.template.spec.containers {|j|
-        $j.spec.template.spec.containers | each {|c|
-            if ($c.name | str starts-with "harness-") {
-                # `<registry>/<name>:<tag>@sha256:…` or `<registry>/<name>:<tag>`: the name is all before the last ':' of
-                # the part before any '@' (a registry may have a port).
-                let bare = ($c.image | split row "@" | first)
-                let slash = ($bare | split row "/" )
-                let last = ($slash | last | split row ":" | first)
-                $c | update image ($slash | drop 1 | append $"($last):($tag)" | str join "/")
-            } else { $c }
-        }
+    # `<registry>/<name>:<tag>@sha256:…` or `<registry>/<name>:<tag>`: the name is all before the last ':' of the part
+    # before any '@' (a registry may have a port).
+    let retag = {|c|
+        let slash = ($c.image | split row "@" | first | split row "/")
+        let name = ($slash | last | split row ":" | first)
+        $c | update image ($slash | drop 1 | append $"($name):($tag)" | str join "/")
     }
+    let spec = $job.spec.template.spec
+    let tagged = ($job | update spec.template.spec.containers ($spec.containers | each {|c| do $retag $c }))
+    if ($spec.initContainers? == null) { return $tagged }
+    $tagged | update spec.template.spec.initContainers ($spec.initContainers | each {|c| do $retag $c })
 }
 
 # One row per run: what was asked, what the producers reached, what the sinks received, the worst sink's latencies, and

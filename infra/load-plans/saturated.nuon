@@ -1,0 +1,37 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+# infra/load-plans/saturated.nuon
+#
+# The baseline's saturated large-message rows alone (broker-baseline.md, the fourth set's peak, and the fifth set):
+# 64 KiB and 1 MiB as fast as the window allows, one producer and one sink, the baseline's defaults. 2 runs. The fourth
+# and fifth sets sample the broker's cgroup every 100 ms beside them, outside the harness.
+#
+#   nu infra/load-harness.nu run infra/load-plans/saturated.nuon --target sandbox-local
+{
+  name: "saturated"
+  defaults: { seconds: 20, max_count: 100000, max_bytes: 1073741824, warmup: 100, rate: 0 }
+  grid: {
+    size: [65536 1048576]
+    shape: [
+      { producers: 1, sinks: 1, lanes: 1 }
+    ]
+  }
+}
