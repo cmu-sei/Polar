@@ -33,7 +33,7 @@ use polar_agent_builder::{
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{info, warn};
 
 const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
 
@@ -73,15 +73,35 @@ fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
         .transpose()?
         .map(|date| date.to_string());
     settings::refuse_placeholder_email(settings.email.as_deref())?;
-    if settings::token_looks_base64(&settings.token) {
-        warn!(
-            "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
-             text. Jira expects the token itself; check that the Secret was not encoded twice \
-             (a Secret's data is base64 already, its stringData is not)"
-        );
-    }
+    // The configuration's judgement holds a token exactly when the observer is not reading anonymously.
+    let auth = match (settings.anonymous, settings.token) {
+        (true, _) => {
+            info!(
+                "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows \
+                 the public (anonymous users); what it hides from them is not read"
+            );
+            JiraAuth::Anonymous
+        }
+        (false, Some(token)) => {
+            if settings::token_looks_base64(&token) {
+                warn!(
+                    "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
+                     text. Jira expects the token itself; check that the Secret was not encoded twice \
+                     (a Secret's data is base64 already, its stringData is not)"
+                );
+            }
+            JiraAuth::from_parts(settings.email, token)
+        }
+        (false, None) => {
+            return Err(
+                "JIRA_TOKEN is not set: set it, or set JIRA_ANONYMOUS to true to read the site without a \
+                 credential"
+                    .to_string(),
+            );
+        }
+    };
     Ok(Prepared {
-        auth: JiraAuth::from_parts(settings.email, settings.token),
+        auth,
         deployment: JiraDeployment::resolve(deployment, &jira_url),
         jira_url,
         egress: polar::egress::Egress::read(config).map_err(|e| e.to_string())?,
@@ -129,8 +149,10 @@ impl PolarAgent for JiraObserver {
         "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
          projects, groups, users and issues for jira-processor to write into the graph. \
          JIRA_TOKEN is the credential; with JIRA_EMAIL as well it is Atlassian Cloud's basic \
-         authentication, without it a bearer token. JIRA_DEPLOYMENT overrides the guess made \
-         from the address. Before its first issue pull it asks the state agent for the newest update of an \
+         authentication, without it a bearer token. JIRA_ANONYMOUS=true reads without a credential, \
+         only what the site shows the public, and then JIRA_TOKEN and JIRA_EMAIL are refused. The site's \
+         serverInfo says whether it is Cloud; JIRA_DEPLOYMENT is used where it does not say, and the \
+         address where neither does. Before its first issue pull it asks the state agent for the newest update of an \
          issue in the graph and starts there; QUERY_DATE starts the first pull from a date only when the graph \
          has no issue. The egress \
          section says how the site is reached: through POLAR_EGRESS_PROXY unless the host is in \

@@ -259,10 +259,13 @@ impl Retry {
 ///   Cloud OAuth 2.0 3LO access tokens), which use a plain
 ///   `Authorization: Bearer <token>` header. This preserves today's
 ///   behavior for existing on-prem deployments.
+/// - `Anonymous` sends no credential at all (JIRA_ANONYMOUS, an explicit opt-in): the observer reads only what the
+///   site shows anonymous users, and there is no token to check.
 #[derive(Clone)]
 pub enum JiraAuth {
     Basic { email: String, token: String },
     Bearer { token: String },
+    Anonymous,
 }
 
 impl JiraAuth {
@@ -271,7 +274,12 @@ impl JiraAuth {
         match self {
             JiraAuth::Basic { .. } => "Basic, since JIRA_EMAIL is set",
             JiraAuth::Bearer { .. } => "Bearer, since JIRA_EMAIL is not set",
+            JiraAuth::Anonymous => "no credential, since JIRA_ANONYMOUS is true",
         }
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, JiraAuth::Anonymous)
     }
 
     /// Resolve auth mode from configuration. An email present => Basic (Cloud-style); absent
@@ -288,6 +296,7 @@ impl JiraAuth {
         match self {
             JiraAuth::Basic { email, token } => req.basic_auth(email, Some(token)),
             JiraAuth::Bearer { token } => req.bearer_auth(token),
+            JiraAuth::Anonymous => req,
         }
     }
 }
@@ -552,6 +561,10 @@ impl JiraObserverState {
 
     /// Checks the token before a pull, unless Jira accepted it and nothing has failed since.
     pub async fn ensure_token(&mut self) -> Result<(), ActorProcessingErr> {
+        // Reading anonymously there is no token, and `/myself` would only say so.
+        if self.auth.is_anonymous() {
+            return Ok(());
+        }
         if !self.token_checked {
             let account = self.check_token().await?;
             info!("Jira accepted the token ({account})");
@@ -618,10 +631,13 @@ impl JiraObserverState {
 
     /// What `failure` is for this observer: a credential refused on an endpoint before the token was checked again
     /// in this pull may be a token revoked since its last check, which the next pull checks first, so it is
-    /// [`FailureKind::Transient`] until then; after a check it is the credential's.
+    /// [`FailureKind::Transient`] until then; after a check it is the credential's. Reading anonymously there is no
+    /// token to check: a refusal is at once what the site does not show the public.
     fn classify(&self, failure: &JiraError) -> FailureKind {
         match failure.kind {
-            FailureKind::Credentials if !failure.token_rejected && !self.token_fresh => {
+            FailureKind::Credentials
+                if !failure.token_rejected && !self.token_fresh && !self.auth.is_anonymous() =>
+            {
                 FailureKind::Transient
             }
             kind => kind,
@@ -692,6 +708,9 @@ impl JiraObserverState {
                          (attempt {attempt})",
                         kind.as_str(),
                         match kind {
+                            FailureKind::Credentials if self.auth.is_anonymous() =>
+                                "reading anonymously, and the site does not show this to the public; a token \
+                                 (JIRA_TOKEN, without JIRA_ANONYMOUS) is needed to read it",
                             FailureKind::Credentials =>
                                 "the site refuses the credential, or does not let it read this; check the token, \
                                  the auth mode and the account's permissions",
@@ -1162,6 +1181,26 @@ mod tests {
             "{}",
             failure.message
         );
+        ticks.stop(None);
+    }
+
+    /// Reading anonymously there is no token to check again: a refusal is at once the credentials' kind (what the
+    /// site does not show the public).
+    #[tokio::test]
+    async fn reading_anonymously_a_refusal_is_the_credentials_at_once() {
+        let (ticks, _) = Actor::spawn(None, Ticks, ()).await.unwrap();
+        let mut s = state("http://jira.invalid".into(), JiraAuth::Anonymous).await;
+        s.ensure_token().await.unwrap();
+        s.settle(
+            &ticks,
+            "test",
+            Err(
+                JiraError::status("/rest/api/2/user/search", StatusCode::UNAUTHORIZED, None).into(),
+            ),
+            tick,
+        )
+        .unwrap();
+        assert_eq!(s.failure().map(|f| f.kind), Some(FailureKind::Credentials));
         ticks.stop(None);
     }
 

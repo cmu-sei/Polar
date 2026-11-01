@@ -1022,3 +1022,35 @@ async fn the_deployment_is_what_the_site_says_it_is_and_otherwise_the_setting() 
         observer.stop(None);
     }
 }
+
+/// Reading anonymously (JIRA_ANONYMOUS): no request carries a credential, and the token is never checked, since
+/// there is none.
+#[tokio::test]
+async fn an_anonymous_observer_sends_no_credential_and_checks_no_token() {
+    let server = MockServer::start().await;
+    mount_site(&server).await;
+    let (client, topics) = recorder().await;
+    let mut args = args(&server, client);
+    args.auth = JiraAuth::Anonymous;
+    let (projects, _) = Actor::spawn(None, JiraProjectObserver, args.clone())
+        .await
+        .unwrap();
+    let (issues, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
+
+    assert!(published(&topics, JIRA_PROJECTS_CONSUMER_TOPIC, 1).await);
+    assert!(published(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 1).await);
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.headers.contains_key("authorization")),
+        "a credential was sent"
+    );
+    assert!(
+        requests.iter().all(|r| r.url.path() != MYSELF),
+        "the token was checked"
+    );
+    projects.stop(None);
+    issues.stop(None);
+}
