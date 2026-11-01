@@ -179,6 +179,7 @@ impl JiraIssueObserver {
             JiraDeployment::ServerOrDataCenter => {
                 let endpoint = format!("{}{}", state.jira_url, op);
                 let mut start_at = 0usize;
+                let mut warned_no_total = false;
 
                 loop {
                     let params = vec![
@@ -194,14 +195,20 @@ impl JiraIssueObserver {
                     let fetched =
                         publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)
                             .await?;
-                    let total = res["total"].as_u64().unwrap_or(0) as usize;
+                    let total = res["total"].as_u64().map(|t| t as usize);
+                    if total.is_none() && !warned_no_total {
+                        warn!(
+                            "{op} answered without a total: reading on to an empty page rather than stopping here"
+                        );
+                        warned_no_total = true;
+                    }
 
                     start_at += fetched;
-                    debug!("Loaded {start_at}/{total}...");
+                    debug!("Loaded {start_at}/{total:?}...");
 
-                    // An empty page ends the walk: with a non-zero total
-                    // it would otherwise never advance.
-                    if fetched == 0 || start_at >= total {
+                    // An empty page ends the walk: with a non-zero total it would otherwise never advance. Without a
+                    // total, only an empty page does.
+                    if fetched == 0 || total.is_some_and(|total| start_at >= total) {
                         break;
                     }
                 }
@@ -231,10 +238,20 @@ impl JiraIssueObserver {
                     let res: Value = state.get_json(url.as_str()).await?;
                     publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client).await?;
 
-                    if res["isLast"].as_bool().unwrap_or(true) {
-                        break;
-                    }
                     next_page_token = res["nextPageToken"].as_str().map(str::to_string);
+                    match res["isLast"].as_bool() {
+                        Some(true) => break,
+                        Some(false) => {}
+                        // Said, not taken for the end: the page token says whether there is more.
+                        None => warn!(
+                            "the search answered without isLast: {}",
+                            if next_page_token.is_some() {
+                                "reading on, since it gave a next page"
+                            } else {
+                                "stopping, since it gave no next page"
+                            }
+                        ),
+                    }
                     if next_page_token.is_none() {
                         break;
                     }

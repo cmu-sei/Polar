@@ -27,8 +27,10 @@ use crate::{
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraGroup};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use reqwest::Url;
+use std::collections::HashSet;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const GROUPS_OP: &str = "/rest/api/2/groups/picker";
 
@@ -54,24 +56,42 @@ impl JiraGroupObserver {
     }
 
     /// Pulls every page of groups and publishes them together.
+    ///
+    /// The group picker takes no `startAt` (a Data Center ignores one and answers the first page again), and answers
+    /// at most its autocomplete limit (`jira.ajax.autocomplete.limit`) of groups whatever `maxResults` asks; what it
+    /// takes is `exclude`, the groups to leave out. So each page asks again leaving out every group already read,
+    /// until the picker has none left or as many have been read as it said match. Each group read is in the next
+    /// request's address, so a site with very many groups is read only as far as [`MAX_URL_LEN`] allows, logged.
     async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
         state.ensure_token().await?;
         debug!("{op}");
 
-        let mut all_groups = Vec::new();
-        let mut start_at = 0;
-        let max_results = 50;
-        let query_string = "";
+        let endpoint = format!("{}{}", state.jira_url, op);
+        let mut all_groups: Vec<JiraGroup> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut warned_no_total = false;
 
         loop {
-            let url = format!(
-                "{}{}?query={}&startAt={}&maxResults={}",
-                state.jira_url, op, query_string, start_at, max_results
+            let mut params = vec![
+                ("query".to_string(), String::new()),
+                ("maxResults".to_string(), PAGE_SIZE.to_string()),
+            ];
+            params.extend(
+                all_groups
+                    .iter()
+                    .map(|g| ("exclude".to_string(), g.name.clone())),
             );
+            let url = Url::parse_with_params(&endpoint, params)?;
+            if url.as_str().len() > MAX_URL_LEN {
+                warn!(
+                    "{op}: read {} groups and stopped: leaving out that many more makes the request longer than \
+                     {MAX_URL_LEN} bytes; the rest are not read",
+                    all_groups.len()
+                );
+                break;
+            }
 
-            let res: serde_json::Value = state.get_json(&url).await?;
-            debug!("Group Data {}", res["groups"]);
-
+            let res: serde_json::Value = state.get_json(url.as_str()).await?;
             let groups: Vec<JiraGroup> = if res["groups"].is_null() {
                 Vec::new()
             } else {
@@ -79,18 +99,28 @@ impl JiraGroupObserver {
                     JiraError::new(format!("could not decode the groups from {op}: {e}"))
                 })?
             };
-            let total = res["total"].as_u64().unwrap_or(0);
-            let fetched = groups.len();
-
-            all_groups.extend(groups);
-
-            // An empty page ends the walk: with a non-zero
-            // total it would otherwise never advance.
-            if fetched == 0 || (start_at + fetched) >= total as usize {
-                break;
+            let total = res["total"].as_u64();
+            if total.is_none() && !warned_no_total {
+                warn!(
+                    "{op} answered without a total: reading until it has no group left that was not read"
+                );
+                warned_no_total = true;
             }
 
-            start_at += fetched;
+            // A page with nothing new ends the walk: a site that ignored `exclude` would otherwise answer the same
+            // page for ever.
+            let before = all_groups.len();
+            for group in groups {
+                if seen.insert(group.name.clone()) {
+                    all_groups.push(group);
+                }
+            }
+            debug!("{op}: read {} of {total:?} groups", all_groups.len());
+            if all_groups.len() == before
+                || total.is_some_and(|total| all_groups.len() as u64 >= total)
+            {
+                break;
+            }
         }
 
         publish_data(
@@ -101,6 +131,13 @@ impl JiraGroupObserver {
         .await
     }
 }
+
+/// How many groups a page asks for; the picker answers at most its autocomplete limit, which may be fewer.
+const PAGE_SIZE: usize = 50;
+
+/// The longest request the group walk sends, in bytes: within the 8 KiB request line and headers a Tomcat (and so a
+/// Data Center) accepts by default, with room for the headers.
+pub const MAX_URL_LEN: usize = 6 * 1024;
 
 #[async_trait]
 impl Actor for JiraGroupObserver {

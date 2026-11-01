@@ -43,6 +43,7 @@ const ENDPOINTS: &[&str] = &[
     "/rest/api/2/project",
     "/rest/api/2/groups/picker",
     "/rest/api/2/user/picker",
+    "/rest/api/2/user/search",
     "/rest/api/2/field",
     "/rest/api/2/search",
     "/rest/api/3/search/jql",

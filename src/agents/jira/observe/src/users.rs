@@ -21,12 +21,14 @@
    DM26-0670
 */
 use crate::{
-    Command, JIRA_USER_OBSERVER, JiraError, JiraObserverArgs, JiraObserverMessage,
+    Command, JIRA_USER_OBSERVER, JiraDeployment, JiraError, JiraObserverArgs, JiraObserverMessage,
     JiraObserverState, publish_data,
 };
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraUser};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use reqwest::Url;
+use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -54,42 +56,69 @@ impl JiraUserObserver {
     }
 
     /// Pulls every page of users and publishes them together.
+    ///
+    /// On a Data Center or Server, the user search (`/rest/api/2/user/search`), where `username=.` matches every
+    /// user, active and inactive, paged by `startAt`: the user picker it replaces takes no `startAt` and answers at
+    /// most its autocomplete limit, and `query=''` matches no one. On Cloud, which has no such search by name, the
+    /// picker as before. Either is read to an empty page, or one with no user not already read (a site that ignored
+    /// `startAt`).
     async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
         state.ensure_token().await?;
 
-        let mut all_users = Vec::new();
-        let mut start_at = 0;
-        let max_results = 50;
-        let query_string = "''";
+        let mut all_users: Vec<JiraUser> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut start_at = 0usize;
 
         loop {
-            let url = format!(
-                "{}{}?query={}&startAt={}&maxResults={}",
-                state.jira_url, op, query_string, start_at, max_results
-            );
+            let (endpoint, mut params) = match state.deployment {
+                JiraDeployment::ServerOrDataCenter => (
+                    USER_SEARCH_OP,
+                    vec![
+                        ("username", ".".to_string()),
+                        ("includeActive", "true".to_string()),
+                        ("includeInactive", "true".to_string()),
+                    ],
+                ),
+                JiraDeployment::Cloud => (op, vec![("query", "''".to_string())]),
+            };
+            params.push(("startAt", start_at.to_string()));
+            params.push(("maxResults", PAGE_SIZE.to_string()));
+            let url = Url::parse_with_params(&format!("{}{endpoint}", state.jira_url), params)?;
             debug!("{url}");
 
-            let res: serde_json::Value = state.get_json(&url).await?;
-            debug!("User picker response: {res}");
-
-            let users: Vec<JiraUser> = if res["users"].is_null() {
+            let res: serde_json::Value = state.get_json(url.as_str()).await?;
+            // The search answers a list; the picker an object holding one.
+            let list = if res.is_array() {
+                res
+            } else {
+                res["users"].clone()
+            };
+            let users: Vec<JiraUser> = if list.is_null() {
                 Vec::new()
             } else {
-                serde_json::from_value(res["users"].clone()).map_err(|e| {
-                    JiraError::new(format!("could not decode the users from {op}: {e}"))
+                serde_json::from_value(list).map_err(|e| {
+                    JiraError::new(format!("could not decode the users from {endpoint}: {e}"))
                 })?
             };
-            let total = res["total"].as_u64().unwrap_or(0);
             let fetched = users.len();
 
-            all_users.extend(users);
-
-            // An empty page ends the walk: with a non-zero
-            // total it would otherwise never advance.
-            if fetched == 0 || (start_at + fetched) >= total as usize {
+            let mut new = 0usize;
+            for user in users {
+                // One the processor cannot key is passed on for it to say so, but it is not progress: a site that
+                // ignored `startAt` would otherwise be asked for ever.
+                match user.identity().map(str::to_string) {
+                    Some(identity) => {
+                        if seen.insert(identity) {
+                            new += 1;
+                            all_users.push(user);
+                        }
+                    }
+                    None => all_users.push(user),
+                }
+            }
+            if fetched == 0 || new == 0 {
                 break;
             }
-
             start_at += fetched;
         }
 
@@ -101,6 +130,12 @@ impl JiraUserObserver {
         .await
     }
 }
+
+/// A Data Center's and Server's search for users by name, paged by `startAt`.
+const USER_SEARCH_OP: &str = "/rest/api/2/user/search";
+
+/// How many users a page asks for.
+const PAGE_SIZE: usize = 50;
 
 #[async_trait]
 impl Actor for JiraUserObserver {

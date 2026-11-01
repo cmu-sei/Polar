@@ -26,6 +26,7 @@
 
 use cassini_client::TcpClientMessage;
 use cassini_client::facade::Backoff;
+use jira_common::types::JiraData;
 use jira_common::{
     JIRA_GROUPS_CONSUMER_TOPIC, JIRA_ISSUES_CONSUMER_TOPIC, JIRA_PROJECTS_CONSUMER_TOPIC,
     JIRA_USERS_CONSUMER_TOPIC,
@@ -44,15 +45,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const MYSELF: &str = "/rest/api/2/myself";
 const PROJECTS: &str = "/rest/api/2/project";
 const SEARCH: &str = "/rest/api/2/search";
+const GROUPS: &str = "/rest/api/2/groups/picker";
+const USER_SEARCH: &str = "/rest/api/2/user/search";
 
-/// Stands in for the broker client and keeps the topic of every publish.
+/// Stands in for the broker client and keeps the topic of every publish, and its payload.
 struct Recorder {
     topics: Arc<Mutex<Vec<String>>>,
+    published: Published,
 }
 
 #[async_trait]
@@ -71,7 +75,11 @@ impl Actor for Recorder {
         message: Self::Msg,
         _: &mut (),
     ) -> Result<(), ActorProcessingErr> {
-        if let TcpClientMessage::Publish { topic, .. } = message {
+        if let TcpClientMessage::Publish { topic, payload, .. } = message {
+            self.published
+                .lock()
+                .unwrap()
+                .push((topic.clone(), payload));
             self.topics.lock().unwrap().push(topic);
         }
         Ok(())
@@ -79,17 +87,71 @@ impl Actor for Recorder {
 }
 
 async fn recorder() -> (ActorRef<TcpClientMessage>, Arc<Mutex<Vec<String>>>) {
+    let (actor, topics, _) = recording().await;
+    (actor, topics)
+}
+
+/// Every publish: its topic and its payload.
+type Published = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+async fn recording() -> (
+    ActorRef<TcpClientMessage>,
+    Arc<Mutex<Vec<String>>>,
+    Published,
+) {
     let topics = Arc::new(Mutex::new(Vec::new()));
+    let published = Arc::new(Mutex::new(Vec::new()));
     let (actor, _) = Actor::spawn(
         None,
         Recorder {
             topics: topics.clone(),
+            published: published.clone(),
         },
         (),
     )
     .await
     .unwrap();
-    (actor, topics)
+    (actor, topics, published)
+}
+
+/// Every payload published on `topic`, decoded.
+fn decoded(published: &Published, topic: &str) -> Vec<JiraData> {
+    published
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _)| t == topic)
+        .map(|(_, payload)| rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(payload).unwrap())
+        .collect()
+}
+
+/// The values of every `name` query parameter of `request`.
+fn params(request: &Request, name: &str) -> Vec<String> {
+    request
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == name)
+        .map(|(_, v)| v.to_string())
+        .collect()
+}
+
+/// One query parameter of `request` as a number, or 0.
+fn number(request: &Request, name: &str) -> usize {
+    params(request, name)
+        .first()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The requests the site was asked on `endpoint`.
+async fn asked(server: &MockServer, endpoint: &str) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == endpoint)
+        .collect()
 }
 
 fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserverArgs {
@@ -178,14 +240,8 @@ async fn mount_site(server: &MockServer) {
             json!({ "name": "svc-polar", "key": "JIRAUSER10100" }),
         ),
         (PROJECTS, json!([])),
-        (
-            "/rest/api/2/groups/picker",
-            json!({ "groups": [], "total": 0 }),
-        ),
-        (
-            "/rest/api/2/user/picker",
-            json!({ "users": [], "total": 0 }),
-        ),
+        (GROUPS, json!({ "groups": [], "total": 0 })),
+        (USER_SEARCH, json!([])),
         ("/rest/api/2/field", json!([])),
         (SEARCH, issues),
     ] {
@@ -584,4 +640,160 @@ async fn after_its_session_ended_the_issue_observer_pulls_from_the_graph_s_curso
         "from the graph's cursor (none: everything), not from its last pull"
     );
     observer.stop(None);
+}
+
+/// A Data Center's group picker: it takes no `startAt` (it ignores one), answers at most three groups (its
+/// autocomplete limit) that are not in `exclude`, and says how many match.
+fn group_picker(names: Vec<String>) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |request: &Request| {
+        let excluded = params(request, "exclude");
+        let groups: Vec<_> = names
+            .iter()
+            .filter(|n| !excluded.contains(n))
+            .take(3)
+            .map(|n| json!({ "name": n, "html": n, "labels": [] }))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "header": format!("Showing {} of {} matching groups", groups.len(), names.len()),
+            "total": names.len(),
+            "groups": groups,
+        }))
+    }
+}
+
+/// The group picker is walked to its end: each request leaves out the groups already read, since a Data Center
+/// pages the picker by `exclude`, not by `startAt`; every group is published once, together.
+#[tokio::test]
+async fn the_group_observer_walks_every_page_of_the_picker() {
+    let server = MockServer::start().await;
+    let names: Vec<String> = (1..=7).map(|i| format!("group-{i:02}")).collect();
+    Mock::given(method("GET"))
+        .and(path(GROUPS))
+        .respond_with(group_picker(names.clone()))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics, published) = recording().await;
+    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client))
+        .await
+        .unwrap();
+
+    assert!(published_on(&topics, JIRA_GROUPS_CONSUMER_TOPIC, 1).await);
+    let [JiraData::Groups(groups)] = &decoded(&published, JIRA_GROUPS_CONSUMER_TOPIC)[..] else {
+        panic!("one message of groups");
+    };
+    let mut seen: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    seen.sort();
+    assert_eq!(seen, names);
+    // Three pages: three, three and one.
+    assert_eq!(asked(&server, GROUPS).await.len(), 3);
+    observer.stop(None);
+}
+
+/// A Data Center's user search: `username=.` matches everyone, paged by `startAt` and `maxResults`, a plain list.
+fn user_search(count: usize) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |request: &Request| {
+        if params(request, "username") != ["."] {
+            return ResponseTemplate::new(400);
+        }
+        let start = number(request, "startAt");
+        let max = number(request, "maxResults");
+        let users: Vec<_> = (start..count.min(start + max))
+            .map(|i| {
+                json!({ "name": format!("user{i}"), "key": format!("JIRAUSER{i}"), "displayName": format!("User {i}") })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!(users))
+    }
+}
+
+/// The users are walked page by page of the user search, which a Data Center accepts, to an empty page; every user
+/// is published once, together.
+#[tokio::test]
+async fn the_user_observer_walks_every_page_of_the_user_search() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(USER_SEARCH))
+        .respond_with(user_search(107))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics, published) = recording().await;
+    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client))
+        .await
+        .unwrap();
+
+    assert!(published_on(&topics, JIRA_USERS_CONSUMER_TOPIC, 1).await);
+    let [JiraData::Users(users)] = &decoded(&published, JIRA_USERS_CONSUMER_TOPIC)[..] else {
+        panic!("one message of users");
+    };
+    assert_eq!(users.len(), 107);
+    let mut keys: Vec<&str> = users.iter().filter_map(|u| u.identity()).collect();
+    keys.dedup();
+    assert_eq!(keys.len(), 107);
+    let starts: Vec<usize> = asked(&server, USER_SEARCH)
+        .await
+        .iter()
+        .map(|r| number(r, "startAt"))
+        .collect();
+    assert_eq!(starts, [0, 50, 100, 107]);
+    observer.stop(None);
+}
+
+/// A Data Center's issue search over `count` issues, paged by `startAt`, saying the total when `total` is set.
+fn issue_search(count: usize, total: bool) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |request: &Request| {
+        let start = number(request, "startAt");
+        let max = number(request, "maxResults");
+        let issues: Vec<_> = (start..count.min(start + max))
+            .map(|i| json!({ "key": format!("PLAT-{i}"), "fields": { "summary": "x" } }))
+            .collect();
+        let mut body = json!({ "startAt": start, "maxResults": max, "issues": issues });
+        if total {
+            body["total"] = json!(count);
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+/// Every page of a search is pulled and each issue published; a search that says its total ends there, and one
+/// that does not (logged) is walked to an empty page rather than ended after its first.
+#[tokio::test]
+async fn the_issue_observer_walks_every_page_with_a_total_or_without_one() {
+    for (total, searches) in [(true, vec![0, 50, 100]), (false, vec![0, 50, 100, 120])] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(SEARCH))
+            .respond_with(issue_search(120, total))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_site(&server).await;
+        let (client, topics) = recorder().await;
+        let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client))
+            .await
+            .unwrap();
+
+        assert!(
+            published_on(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 120).await,
+            "total {total}"
+        );
+        let starts: Vec<usize> = asked(&server, SEARCH)
+            .await
+            .iter()
+            .map(|r| number(r, "startAt"))
+            .collect();
+        assert_eq!(starts, searches, "total {total}");
+        observer.stop(None);
+    }
+}
+
+/// Waits up to five seconds for `topic` to have been published at least `count` times, then a little longer, so
+/// that a walk that would go on is seen to.
+async fn published_on(topics: &Arc<Mutex<Vec<String>>>, topic: &str, count: usize) -> bool {
+    let reached = published(topics, topic, count).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    reached
 }
