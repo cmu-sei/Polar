@@ -482,7 +482,9 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   subscribers; subscriptions went unanswered and held up publishing; ractor's output ports dropped a subscriber that fell
   behind; every publish formatted its payload into a span), and that pods of one workload share an identity, so the
   broker supersedes all but one of their sessions: the baseline measures one connection, and several at once wait on a
-  way to give pods identities of their own. As built, a sink says it is ready in its log rather than through a
+  way to give pods identities of their own. *Since 2026-11-01* a multi-instance workload's pods are each a session
+  (`authority-model.md`, "Multi-instance workloads"), and `harness-producer` is one: a plan's `producers: k` is k
+  sessions (`infra/load-plans/pressure.nuon`). As built, a sink says it is ready in its log rather than through a
   readiness probe, and the producer's window is counted in messages as well as bytes.
 
 **Stage 5b: the broker enforces** (gaps 7, 8, 11)

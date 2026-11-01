@@ -436,6 +436,16 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   `TLS_CLIENT_KEY` (`Constants.custodyClientEnv`, `functions.makePolarInitContainerWith`). `resolve.nu images` lists
   the daemon's image for every pod that has one. A target with it off renders byte for byte what rendered before. A
   workload whose code can only read a key file sets `custody: false` (the scheduler observer, whose `git` reads one).
+- **Instances (2026-11-01; `docs/architecture/authority-model.md`, "Multi-instance workloads").** A workload entry's
+  `instances` is `"one"` (the `agent` kind's default) or `"many"`: many pods of its one identity at once, each an instance
+  with its own certificate (its pod named `i:uid:` and `i:pod:`) and session. Many is never a bootstrap service's
+  (`rules.nu`, `instances_problems`, an error at resolve), and takes effect only where the credentials agent issues the
+  workload (`effective_instances`), since only it writes the instance into a certificate: where a target still has
+  cert-issuer issue it, it renders as one. In effect, the resolver passes it to the template, which marks the object
+  `polar.dev/instances: many` (`functions.workloadOf`), and to the authority model's facts (`model_facts`). The render
+  then lets a marked Deployment have more than one replica (`in_place_problems` lifts only that rule) and a marked Job
+  run more than one pod at once (`parallelism_problems`); an unmarked one is held to one. `harness-producer` is many,
+  so `load-harness.nu` runs a plan's `producers: k` as k sessions, and refuses k > 1 where the producer is not marked.
 - **The floor** (`resolve.nu floor`) builds each workload's record from its spec and scaffold alone (`floor_record`,
   since 2026-10-23; it fully resolved every workload before, which cert-issuer's own resolve could not do without
   recursing) and writes, for a

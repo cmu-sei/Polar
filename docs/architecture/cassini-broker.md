@@ -59,6 +59,10 @@ The handshake is mutual TLS: the client's certificate must chain to `TLS_CA_CERT
 - **the floor,** what the certificate admits where no policy speaks: its declared topics (`p:pub:`/`p:sub:` URI SANs)
   and those its workload and `g:` groups imply (`extract_peer_floor`, `listener.rs:136`). A certificate that cannot be
   read gives a reason, and every publish and subscribe on that connection is refused with it.
+- **the instance** (since 2026-11-01), when its workload is multi-instance: the pod its `i:uid:` and `i:pod:` URI SANs
+  name (`extract_peer_instance`, `peer_instance_of`, `listener.rs`; `cert_issuer_common::instance`), none for a
+  single-instance workload's; names that do not read as one instance are refused as an unreadable floor is
+  (docs/architecture/authority-model.md, "Multi-instance workloads").
 
 | Where | Has the client's identity |
 |---|---|
@@ -67,11 +71,15 @@ The handshake is mutual TLS: the client's certificate must chain to `TLS_CA_CERT
 | Broker, TopicManager, SubscriberManager | no: a subscribe carries the registration id and topic; a publish carries `published_by` only when the publisher shares it |
 
 `published_by` is the verified identity, stamped by the broker on a publish when the client sets `share_identity` (the
-default). Receivers check it where it matters (`AuthorityCore`'s publisher check; the broker believes authority only
+default). Beside it, by the same choice, the broker stamps `published_instance` (`cassini_types::Instance`, the pod UID
+and name) from the same certificate, on every delivery (protocol version 2, 2026-11-01): a message names the workload and
+the pod it came from, never anything the client sent. It reaches `ClientEvent::MessagePublished` and
+`polar_router::IncomingMessage`. Receivers check it where it matters (`AuthorityCore`'s publisher check; the broker believes authority only
 from `POLAR_AUTHORITY_PUBLISHER`).
 
 *Resuming a session* is the identity's alone: a connection asking to resume a session of another identity is given a new
-one (`may_resume`, `session.rs:1537`, used at `:631`), so a registration id is not a bearer token. (The flaw this section
+one (`may_resume`, `session.rs:1537`, used at `:631`), so a registration id is not a bearer token. Since 2026-11-01 it is the instance's too
+(`may_resume_as`): one pod of a multi-instance workload never resumes another's. (The flaw this section
 used to record, fixed.)
 
 ## The flows
@@ -104,6 +112,17 @@ used to record, fixed.)
 
 Read 2026-10-22, after stage 5a found the first while measuring (`broker-baseline.md`, finding 6).
 
+*Since 2026-11-01, one session per identity and instance.* A multi-instance workload's sessions supersede each other by
+(identity, instance), the rule one function both the broker and the credentials agent's ledger read
+(`cert_issuer_common::instance::same_instance`; `session::supersedes`): two pods are two sessions, a pod restarted in place
+(the same UID, a new key) supersedes its own, and what was held for one pod is claimed only by that pod (the held
+sessions and the parked questions are keyed the same way). A single-instance workload's certificates name no instance,
+so everything below holds for it unchanged. A pod of a multi-instance workload that shuts down cleanly says goodbye
+(the builder's drain sends `Disconnect`, `polar-agent-builder` `say_goodbye`) and its session ends at once; one that
+dies uncleanly leaves its session detached for the retention window, since no successor of its instance supersedes it.
+Tests: `broker/tests/instances.rs` (two pods, a restart, resuming, the stamped instance, a goodbye against a vanish, and a
+property over any registrations).
+
 - **The supersede rule.** A new session of an identity takes over every older session of it, including one whose
   client still looks connected (`supersede_older`, `session.rs:346`). The older one can no longer be resumed (597); its
   connection is closed, all but the new client's (`CloseConnection`, 854); its subscribers stop forwarding and hold
@@ -132,8 +151,9 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
 - **Why:** a replaced pod (a rollout, a Job retry) usually registers before the broker sees the old connection is dead.
   The replacement takes over and inherits what was waiting for the old one.
 - **Fan-out.** A topic delivers every message to every subscriber (`topic.rs:728`). There are no consumer groups.
-- **So a workload cannot scale out.** The identity is the workload's (the certificate's first DNS SAN), so its pods
-  supersede each other. Identities per pod would stop that but would not share the work: with fan-out, every replica
+- **So a workload cannot scale out (a consumer; a publisher may since 2026-11-01).** The identity is the workload's (the
+  certificate's first DNS SAN), so a single-instance workload's pods supersede each other; a multi-instance one's pods
+  are each a session, which serves publishers (the load harness, build jobs) but shares no work, below. Identities per pod would stop that but would not share the work: with fan-out, every replica
   receives every message (two `kube-consumer`s would both write each to the graph). Scaling a consumer or processor out
   needs both a way to tell a replica from a replacement and delivery shared within a group; an observer that scales out
   has to split its source, which the broker cannot do for it. Open, in `remaining-work.md`.
@@ -379,7 +399,8 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   it is told, with why (`ClientMessage::SessionEnded`), before it is given a new session. The age bounds (`R`, the
   queue's 180 s) stay.
 - **A protocol version** at registration (`cassini_types::PROTOCOL_VERSION`): a registration of another version is
-  refused by name (`RefusalCode::ProtocolMismatch`), and a first frame that does not decode (an older client's
+  refused by name (`RefusalCode::ProtocolMismatch`) (version 2 since 2026-11-01, when deliveries began to carry the
+  publisher's instance; a version-1 client is refused so: `broker/tests/frames.rs`), and a first frame that does not decode (an older client's
   registration) with a refusal such a client can decode; either connection is closed.
 - **Observable:** the budget's report every 30 s while something is held, waits or was counted, from the pressure
   manager (`PressureMsg::Report`, `broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the

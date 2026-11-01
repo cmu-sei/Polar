@@ -48,6 +48,11 @@ The builder refuses to start an agent whose certificate names another workload, 
 A signed document must name the service name in `target.agent` (`signed.rs:312`, `configuration.rs:706`). A rule about
 who may use an agent's topics has to join the two.
 
+*A fourth, for a multi-instance workload (2026-11-01).* Its pods are instances of the one identity, each named in its
+certificate (`i:uid:<pod uid>`, `i:pod:<pod name>`) and stamped beside `published_by` on what it publishes
+(`published_instance`). Topics, policy and the floor are the workload's, as for any: nothing is decided by the instance,
+which keys supersession and sessions only (`authority-model.md`, "Multi-instance workloads").
+
 ## Implied topics
 
 An agent declares the topics it uses itself (`PolarAgent::TOPICS`: each topic, `publish` or `subscribe`, and what it is
@@ -197,7 +202,10 @@ The consumer subscribes to all 13 request topics (`credentials_agent_common::REQ
 request gate first (`credentials-agent/consume/src/request_gate.rs`, `authority-model.md` slice 9): Cedar's
 `Action::"request"` on `Request::"<topic>"`, then, where policy is silent, the topic's publishers in the authority model,
 by any origin. Only then is it dispatched, and the handlers are given `published_by` for store, retrieve, keypair
-retrieval and decrypt, as before.
+retrieval and decrypt, as before. Since 2026-11-01 the custodian's requests (its workload's certificates, the escrow key's
+retrieval, issuance and store) carry the pod UID the broker stamped beside `published_by` too: a multi-instance
+workload's custodians are one identity, `custody.<X>`, each its own pod's (`authority-model.md`, "Multi-instance
+workloads").
 
 ## The scheduler and the git server
 

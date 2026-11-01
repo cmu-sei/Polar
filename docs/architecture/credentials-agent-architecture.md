@@ -591,6 +591,15 @@ right now, not why one might be missing. Backed directly by
 `CredentialsState::certificate_for`, which guarantees at most one
 non-revoked certificate can exist per identity at any time (see
 "Source of truth," above, on reissue superseding a prior certificate).
+*Corrected 2026-11-01:* it answered with the mTLS certificate, as written
+above, which is the wrong key for every workload: one encrypts to a
+workload's escrow certificate (`CertType::Service`, one per workload,
+shared by its instances), never to an instance's transport certificate,
+whose key no workload has held since the custody daemon. It now answers
+with the escrow certificate (`CredentialsState::agent_escrow_certificate_for`,
+never a revoked one), and NotFound for an identity with only an mTLS
+certificate (`credentials-agent/consume/src/certificate.rs`;
+`authority-model.md`, "Multi-instance workloads").
 
 **Agent escrow-key query** (built: `AgentEscrowKeyRequest`, which `CryptoActor` uses for `EncryptForRecipient`):
 the analogous lookup for an *agent's own* escrow public key (its

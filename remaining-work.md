@@ -55,7 +55,9 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
 `polar-init` waiting in init for good (`8030abdd`). Open:
 
 - **Pods of one workload share an identity**, and the broker keeps one live session per identity (a new one supersedes
-  the rest and closes their connections). So a workload cannot run several pods at once, and the harness cannot measure
+  the rest and closes their connections). *Since 2026-11-01* a multi-instance workload's pods are each a session (who a
+  connection is: the pod in the certificate, `authority-model.md`, "Multi-instance workloads"); who gets a message is
+  still open (the "load balancer", below). So a workload cannot run several pods at once, and the harness cannot measure
   several connections. Horizontal scaling is wanted (David, 2026-10-22), and needs two things, not one
   (`docs/architecture/cassini-broker.md`, "One session per identity, and fan-out"):
   - *Who a connection is:* a replica runs beside the others, a replacement takes over; the broker cannot tell them apart
@@ -765,8 +767,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   part B; the credentials agent's signing half is designed separately before first real use.
 - [ ] MULTI-INSTANCE: WHAT LETS ONE CONSUME (later; `authority-model.md`, "Multi-instance workloads", "Later"): shared
   subscriptions (a "load balancer") and commands to one instance; the encryption model already fits them.
-- [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; DECIDED 2026-11-01, `docs/architecture/authority-model.md`,
-  "Multi-instance workloads"; the load harness is its first user, then Blitz; next to build). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
+- [~] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; DECIDED 2026-11-01, `docs/architecture/authority-model.md`,
+  "Multi-instance workloads"; BUILT 2026-11-01, `5886e43d` to `764cb62f`, "As built" there; not yet seen on a cluster).
+  Left: run `infra/load-plans/pressure.nuon` on a fresh cluster (every image redeployed together: protocol 2) and read
+  whether the budget grows past its floor; see two pods of the harness producer as two sessions, a clean end ending
+  its session at once, and concurrent first escrow issuances of a many with `encryption` (none has one yet); Blitz's
+  `build-job` workload; the decisions marked for review there. Rotation on a compromise is `key-rotation.md`'s. Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
   topics while a shared one supersedes. Recommended instead of their family of identities: one exact workload marked
   multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
   certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the

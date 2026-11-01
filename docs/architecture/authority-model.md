@@ -691,7 +691,9 @@ To settle one at a time, before building:
     After the backpressure merge a refused publish reaches their client as a typed `Denied`, not a timeout. DECIDED
     2026-11-01: the multi-instance workload, "Multi-instance workloads" below.
 
-## Multi-instance workloads (decided 2026-11-01, not built)
+## Multi-instance workloads (decided 2026-11-01, built 2026-11-01)
+
+*As built: see "As built (2026-11-01)" at the end of this section; the decisions below are kept as decided.*
 
 Decided by the maintainer, answering open question 11 (Blitz's per-run build identities) and the load harness's need for
 several concurrent publishers (broker-baseline.md, "The fifth set": one publisher and one subscriber could not reach the
@@ -784,6 +786,65 @@ a multi-instance workload is exempt from the single-replica rule, and a `run`-ki
 its pods at once, each its own session (today they supersede each other); `infra/load-plans/pressure.nuon` drives the
 budget past its growth threshold. Then Blitz's build jobs: one `build-job` workload, multi-instance; the orchestrator
 creates Jobs, not ServiceAccounts.
+
+### As built (2026-11-01)
+
+Built test-first, a commit a step (`5886e43d` to `764cb62f`); not yet seen on a cluster.
+
+1. **The catalog** (`5886e43d`, `764cb62f`). `instances: "one" | "many"` on a workload entry, `"one"` in `kinds.nuon`;
+   `rules.nu`: `instances_problems` (one or many, never many for a bootstrap service), `effective_instances` (many in
+   effect only where the credentials agent issues the workload), `is_multi_instance` over the object's
+   `polar.dev/instances: many` annotation, which `functions.workloadOf` writes for a many and for nothing else;
+   `in_place_problems` lifts only the single-replica rule for a marked Deployment, and `parallelism_problems` lets only a
+   marked Job run more than one pod at once (`render.nu` runs both). `resolve.nu` passes the effective value to the
+   template and to the authority model's facts (`model_facts` writes `instances`; `credentials_agent_model::Instances`,
+   `Model::instances_of`). `harness-producer` is the first: `instances: "many"`.
+2. **The certificate's names** (`769d3055`; `cert_issuer_common::instance`). Two URI names beside the identity's DNS name
+   and the `p:`, `g:`, `c:` names: **`i:uid:<pod uid>`**, the key, and **`i:pod:<pod name>`**, for people. A pod UID is
+   lower-case letters, digits and `-` (at most 64); a pod name a DNS subdomain. Names that do not read as one instance
+   (two UIDs, two pod names, a pod with no UID, an unknown `i:` name, a malformed value) are refused wherever they are
+   read, and a certificate with none is a single instance's. cert-issuer reads the pod name by a new per-issuer
+   `instance_name_claim` (`kubernetes.io/pod/name` in the targets), returns it from `/validate` (`instance_name`), signs
+   `i:` names on `/issue` only when they are exactly the token's own pod, and on `/internal/issue` only for the request's
+   `instance_binding`. The credentials agent writes them (`instance_sans_for`) into a many's client certificate and its
+   custodian's: on the token path from `/validate`, on the custodian's path from the custodian's own certificate.
+3. **Supersession** (`ea76550f`). Both sides read one rule, `same_instance`: the same identity is the same instance unless
+   both name an instance and they differ. The broker keeps each session's instance (`session::supersedes`,
+   `may_resume_as`; held sessions and parked questions keyed the same); the ledger keeps each certificate record's
+   (`CertificateRecord.instance`).
+4. **The stamp, protocol 2** (`c123d18f`). `published_instance` (`cassini_types::Instance`) beside `published_by` on
+   every delivery, read from the verified certificate and shared by the same choice; in `ClientEvent::MessagePublished`
+   and `polar_router::IncomingMessage`. `PROTOCOL_VERSION` is 2; a version-1 client is refused by name. The credentials
+   agent answers a custodian's requests as the custodian of the stamped pod (`custodian_certificate_of`).
+5. **A clean end** (`38af6bc4`). The builder knows it is one of many from its own certificate (`names_an_instance`) and,
+   as it proceeds with its shutdown, says goodbye (`Disconnect`, waiting at most two seconds); the broker ends that
+   session at once. An unclean end waits out the retention window.
+6. **The first escrow issuance, serialized** (`fef9021e`). The handler holds the identity's place until the certificate
+   is recorded (`InFlight`); `first_issuance`: issue the first; tell another pod `BeingIssued` within the issuing
+   custodian's window; refuse anything else as before. The custodian waits (`BEING_ISSUED_WAIT`, 2 s), asks again and
+   retrieves the escrowed key into its own slot. A revoked escrow certificate no longer counts toward the one per
+   identity, nor is it handed out to encrypt to (it did both before).
+7. **The certificate lookup** (`91661103`). It answered with the identity's **mTLS client certificate**
+   (`certificate_for`), the wrong key for every workload; it now answers with the escrow certificate, and NotFound for an
+   identity with only an mTLS certificate. Nothing in the workspace asked it.
+8. **Why a revocation was made** (`3a2d0a48`). The ledger already recorded it (`Revoke { reason }`, `Compromised` among
+   the reasons; `Superseded` for a reissue). Added: the signed set says which serials were revoked for a compromise
+   (`AuthorityBody::Revoked { serials, compromised }`, left out when empty, so older updates read back as signed), and
+   every agent's held set, the broker's among them, answers `revoked_for` (Ordinary or Compromise). Rotation is not built
+   (`key-rotation.md`).
+
+**Decided while building, for review** (by the Design Principles, where the decisions above are silent):
+- *The custodian's certificate names the instance too*, not only the client certificate: a multi-instance workload's
+  custodians are one identity, `custody.<X>`, and would otherwise supersede each other, revoking and destroying each
+  other's keys; and the credentials agent finds a custodian by the stamped pod.
+- *Many takes effect only where the credentials agent issues the workload*; where a target still has cert-issuer issue it
+  (`local`), it renders as one instance, since only the credentials agent writes the instance. A bootstrap service may
+  not be many.
+- *The pod's name is optional in a certificate*, the UID required: an issuer without `instance_name_claim` gives the UID
+  alone.
+- *"Being issued" lasts the issuing custodian's window* (five minutes); after it, an escrow certificate with nothing
+  stored is refused as before (an orphan now recoverable by revoking it).
+- *A harness plan of several producers on a single-instance producer is refused* by `load-harness.nu`, naming why.
 
 ## Build order, tests first
 
