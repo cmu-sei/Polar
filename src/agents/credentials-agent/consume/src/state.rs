@@ -72,11 +72,11 @@ pub struct CertificateRecord {
 /// A currently-issued agent escrow-identity (CertType::Service)
 /// certificate -- keyed on identity alone, per
 /// AgentEscrowIssuanceCompleted's own doc comment, not
-/// (identity, instance_binding). Deliberately does not track
-/// revocation yet -- Revoke events today only ever look up (and
-/// mark) entries in valid_certificates, never this map. A real,
-/// separate expansion, named here rather than silently assumed:
-/// service-certificate revocation.
+/// (identity, instance_binding). Not marked revoked in place: a
+/// Revoke of its serial puts it in the revoked set, and from then on
+/// it is not the identity's current escrow certificate
+/// (`CredentialsState::agent_escrow_certificate_for`), so it is not
+/// encrypted to and does not stop the identity being issued another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentEscrowCertificateRecord {
     pub instance_binding: String,
@@ -902,7 +902,7 @@ impl CredentialsState {
     /// scoped renewal-prevention check human/workload mTLS issuance
     /// uses instead.
     pub fn has_agent_escrow_certificate(&self, identity: &str) -> bool {
-        self.agent_escrow_certificates.contains_key(identity)
+        self.agent_escrow_certificate_for(identity).is_some()
     }
 
     /// The agent escrow-identity certificate record for `identity`,
@@ -913,7 +913,12 @@ impl CredentialsState {
         &self,
         identity: &str,
     ) -> Option<&AgentEscrowCertificateRecord> {
-        self.agent_escrow_certificates.get(identity)
+        // A revoked escrow certificate is no one's to encrypt to, and does not count toward the one per identity: its
+        // workload may be issued another (an orphan, issued and never stored, revoked by an administrator, is how a
+        // workload stuck without its key gets one again).
+        self.agent_escrow_certificates
+            .get(identity)
+            .filter(|record| !self.revoked_serials.contains(&record.serial))
     }
 
     /// The provisioned-but-unclaimed account record for `username`,

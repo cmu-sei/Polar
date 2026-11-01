@@ -106,6 +106,11 @@ pub enum AgentEscrowIssuanceRefusalReason {
     /// cert-issuer's own /issue call itself failed (CA unavailable,
     /// an internal signing error).
     SigningFailed,
+    /// Another pod of the workload is being issued its escrow key's certificate, within its custodian's window: the first
+    /// escrow issuance of an identity is serialized, one key per workload shared by its instances
+    /// (docs/architecture/authority-model.md, "Multi-instance workloads"). Not final: the custodian waits and asks for
+    /// the key again, which it retrieves once the other pod has escrowed it. Last, so no earlier reason's tag moves.
+    BeingIssued,
 }
 
 #[cfg(test)]
@@ -209,6 +214,7 @@ mod tests {
             AgentEscrowIssuanceRefusalReason::SigningFailed,
             AgentEscrowIssuanceRefusalReason::NotACustodian,
             AgentEscrowIssuanceRefusalReason::CustodianWindowClosed,
+            AgentEscrowIssuanceRefusalReason::BeingIssued,
         ] {
             let original = AgentEscrowIssuanceReply::Refused { reason };
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)

@@ -1047,6 +1047,7 @@ impl Actor for ConsumerSupervisor {
             ledger: ledger.clone(),
             cert_issuer: make_cert_issuer_client().await?,
             escrow_keypair: escrow_keypair.clone(),
+            in_flight: Default::default(),
         };
         // A custodian's requests for its workload's certificates (docs/architecture/key-custody.md, "Part A's
         // bootstrap: the custodian").
@@ -2351,6 +2352,7 @@ mod agent_escrow_wiring_tests {
             ledger: ledger.clone(),
             cert_issuer: HandshakeClient::new(cert_issuer.uri()),
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            in_flight: Default::default(),
         };
 
         let (agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn(

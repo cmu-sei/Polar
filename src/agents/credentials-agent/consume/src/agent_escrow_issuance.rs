@@ -69,6 +69,63 @@ pub struct AgentEscrowIssuanceHandler {
     /// cert-issuer, reached with this agent's own certificate, for `/internal/issue`.
     pub cert_issuer: HandshakeClient,
     pub escrow_keypair: Arc<EscrowKeypair>,
+    /// The identities whose escrow certificate is being signed now: the first escrow issuance of an identity is
+    /// serialized, whoever asks and however the requests are interleaved.
+    pub in_flight: InFlight,
+}
+
+/// The identities an escrow issuance is under way for (`AgentEscrowIssuanceHandler::in_flight`).
+pub type InFlight = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
+/// An identity's place in [`InFlight`], taken for one issuance and given back when it is dropped, however it ends.
+struct Reserved {
+    in_flight: InFlight,
+    identity: String,
+}
+
+impl Reserved {
+    /// The place of `identity`, unless another issuance holds it.
+    fn take(in_flight: &InFlight, identity: &str) -> Option<Self> {
+        let mut held = in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(identity.to_string()).then(|| Reserved {
+            in_flight: in_flight.clone(),
+            identity: identity.to_string(),
+        })
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.identity);
+    }
+}
+
+/// What an escrow issuance for one pod of a workload is, given the workload's current escrow certificate (`existing`,
+/// none or revoked being none), the pod asking (`requester`, its UID) and the time (Unix milliseconds): issue the first;
+/// tell another pod, while the issuing pod's custodian is in its window, that it is being issued, and it asks again and
+/// retrieves the key once escrowed (docs/architecture/authority-model.md, "Multi-instance workloads"); refuse anything
+/// else, as before (one escrow certificate per identity). Pure.
+pub(crate) fn first_issuance(
+    existing: Option<&crate::state::AgentEscrowCertificateRecord>,
+    requester: &str,
+    now_millis: i64,
+) -> Result<(), AgentEscrowIssuanceRefusalReason> {
+    use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
+    match existing {
+        None => Ok(()),
+        Some(record)
+            if record.instance_binding != requester
+                && now_millis.saturating_sub(record.timestamp) <= CUSTODIAN_WINDOW_SECS * 1000 =>
+        {
+            Err(AgentEscrowIssuanceRefusalReason::BeingIssued)
+        }
+        Some(_) => Err(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate),
+    }
 }
 
 impl AgentEscrowIssuanceHandler {
@@ -113,22 +170,27 @@ impl AgentEscrowIssuanceHandler {
         };
         let identity = custodian.workload;
 
-        // ---- Step 2: renewal-prevention check, identity-scoped ----
+        // ---- Step 2: the first issuance of an identity, serialized; one escrow certificate per identity ----
         //
-        // Not the pod-instance renewal rule: a service's escrow identity
-        // isn't pod-scoped at all. See AgentEscrowCertificateRecord's own
-        // doc comment (state.rs) for why a second, competing service
-        // certificate for the same identity would break a real invariant
-        // the certificate-lookup query relies on.
-        match call_check_agent_escrow_renewal(&self.ledger, &identity).await {
-            Ok(false) => {}
-            Ok(true) => {
-                return refused(
-                    AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate,
-                );
+        // Not the pod-instance renewal rule: a service's escrow identity isn't pod-scoped at all, one key per
+        // workload shared by its instances. Its place is held until the certificate is recorded, so a concurrent
+        // request, another pod's, is told it is being issued and retrieves the key once escrowed.
+        let Some(_reserved) = Reserved::take(&self.in_flight, &identity) else {
+            warn!(%identity, pod = %custodian.instance_binding, "an escrow issuance is under way for this workload: told so");
+            return refused(AgentEscrowIssuanceRefusalReason::BeingIssued);
+        };
+        match call_check_agent_escrow_key(&self.ledger, &identity).await {
+            Ok(existing) => {
+                if let Err(reason) = first_issuance(
+                    existing.as_ref(),
+                    &custodian.instance_binding,
+                    polar::time::now_millis(),
+                ) {
+                    return refused(reason);
+                }
             }
             Err(e) => {
-                error!("Ledger CheckAgentEscrowRenewal call failed: {e}");
+                error!("Ledger CheckAgentEscrowKey call failed: {e}");
                 return refused(AgentEscrowIssuanceRefusalReason::CredentialInvalid);
             }
         }
@@ -234,13 +296,13 @@ async fn call_check_grant(
     }
 }
 
-async fn call_check_agent_escrow_renewal(
+async fn call_check_agent_escrow_key(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
-) -> Result<bool, String> {
+) -> Result<Option<crate::state::AgentEscrowCertificateRecord>, String> {
     match ractor::rpc::call(
         ledger,
-        |reply| LedgerMessage::CheckAgentEscrowRenewal {
+        |reply| LedgerMessage::CheckAgentEscrowKey {
             identity: identity.to_string(),
             reply,
         },
@@ -308,6 +370,7 @@ mod tests {
             ledger,
             cert_issuer: HandshakeClient::new(server.uri()),
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            in_flight: Default::default(),
         }
     }
 
@@ -337,13 +400,17 @@ mod tests {
             "{reply:?}"
         );
         assert!(
-            call_check_agent_escrow_renewal(&ledger, X).await.unwrap(),
+            call_check_agent_escrow_key(&ledger, X)
+                .await
+                .unwrap()
+                .is_some(),
             "the service certificate is not found by the workload's identity"
         );
         assert!(
-            !call_check_agent_escrow_renewal(&ledger, CUSTODIAN)
+            call_check_agent_escrow_key(&ledger, CUSTODIAN)
                 .await
-                .unwrap(),
+                .unwrap()
+                .is_none(),
             "the custodian's identity must not be what it is recorded under"
         );
     }
@@ -444,5 +511,179 @@ mod tests {
             matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
             "{reply:?}"
         );
+    }
+
+    // ---- one key per workload, shared by its instances (docs/architecture/authority-model.md, "Multi-instance
+    // workloads"): the first escrow issuance of an identity is serialized ----------------------------------------
+
+    /// The ledger, holding a live custodian of X for each pod of `pods`, each naming its pod, its certificate naming the
+    /// escrow key.
+    async fn ledger_with_custodians_of(pods: &[&str]) -> ActorRef<LedgerMessage> {
+        let ledger = crate::issuance::tests::spawn_test_ledger().await;
+        for pod in pods {
+            call_append(
+                &ledger,
+                CredentialsEvent::IssuanceCompleted {
+                    identity: CUSTODIAN.to_string(),
+                    instance_binding: pod.to_string(),
+                    serial: format!("custodian-{pod}"),
+                    timestamp: polar::time::now_millis(),
+                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                    grant_key: None,
+                    certificate_pem: crate::custodian::tests::custodian_pem_naming(
+                        &[CustodyPermission::Escrow],
+                        3600,
+                        &[&format!("i:uid:{pod}"), &format!("i:pod:{pod}-name")],
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        ledger
+    }
+
+    /// A cert-issuer that signs any service certificate, slowly: long enough for a second request to arrive while the
+    /// first is being signed.
+    async fn slow_cert_issuer() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(fake_issue_response())
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_requests_of_two_pods_are_one_issuance_and_the_other_is_told_it_is_being_issued()
+     {
+        let ledger = ledger_with_custodians_of(&["pod-a", "pod-b"]).await;
+        let server = slow_cert_issuer().await;
+        let handler = handler(ledger.clone(), &server);
+        let ask = |pod: &str| {
+            handler.handle_from(
+                request(),
+                Some(CUSTODIAN.to_string()),
+                Some(pod.to_string()),
+            )
+        };
+        let (a, b) = tokio::join!(ask("pod-a"), ask("pod-b"));
+        let issued = [&a, &b]
+            .iter()
+            .filter(|r| matches!(r, AgentEscrowIssuanceReply::Issued { .. }))
+            .count();
+        assert_eq!(issued, 1, "{a:?} {b:?}");
+        assert!(
+            [reason(&a), reason(&b)].contains(&Some(AgentEscrowIssuanceRefusalReason::BeingIssued)),
+            "{a:?} {b:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "cert-issuer is asked once"
+        );
+        // Asked again within the issuing custodian's window: the other pod is told it is being issued (it retrieves the
+        // key once escrowed); the pod that was issued it is refused a second, as before.
+        let (winner, other) = if matches!(a, AgentEscrowIssuanceReply::Issued { .. }) {
+            ("pod-a", "pod-b")
+        } else {
+            ("pod-b", "pod-a")
+        };
+        assert_eq!(
+            reason(&ask(other).await),
+            Some(AgentEscrowIssuanceRefusalReason::BeingIssued)
+        );
+        assert_eq!(
+            reason(&ask(winner).await),
+            Some(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A revoked escrow certificate does not count toward the one per identity: its workload is issued another (an
+    /// orphan, issued and never stored, revoked by an administrator, is how a workload stuck without its key gets one).
+    #[tokio::test]
+    async fn a_workload_whose_only_escrow_certificate_was_revoked_is_issued_another() {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        call_append(
+            &ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: X.to_string(),
+                instance_binding: "pod-uid-0".to_string(),
+                serial: "old-service".to_string(),
+                timestamp: 1000,
+                certificate_pem: "-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let server = cert_issuer_signing(&["p:s2s"]).await;
+        assert_eq!(
+            reason(
+                &handler(ledger.clone(), &server)
+                    .handle(request(), Some(CUSTODIAN.to_string()))
+                    .await
+            ),
+            Some(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate)
+        );
+        call_append(
+            &ledger,
+            CredentialsEvent::Revoke {
+                serial: "old-service".to_string(),
+                reason: credentials_agent_common::events::RevocationReason::IssuedInError,
+                revoked_by: "admin".to_string(),
+                timestamp: 2000,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            call_check_agent_escrow_key(&ledger, X)
+                .await
+                .unwrap()
+                .is_none(),
+            "a revoked escrow certificate is no one's to encrypt to"
+        );
+        let reply = handler(ledger, &server)
+            .handle(request(), Some(CUSTODIAN.to_string()))
+            .await;
+        assert!(
+            matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
+            "{reply:?}"
+        );
+    }
+
+    proptest::proptest! {
+        /// For any existing certificate, pod and time: one escrow certificate per identity (a second is never issued
+        /// while one is current); the pod that was issued it is never told to wait for itself; and once the issuing
+        /// custodian's window is past no one is told to wait, so no pod waits for good.
+        #[test]
+        fn one_certificate_per_identity_and_no_one_waits_on_itself_or_for_good(
+            existing in proptest::option::of((0u8..3, 0i64..1_000_000)),
+            requester in 0u8..3,
+            now in 0i64..2_000_000,
+        ) {
+            use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
+            let record = existing.map(|(pod, at)| crate::state::AgentEscrowCertificateRecord {
+                instance_binding: format!("pod-{pod}"),
+                serial: "s".to_string(),
+                timestamp: at,
+                certificate_pem: String::new(),
+            });
+            let requester = format!("pod-{requester}");
+            let decided = first_issuance(record.as_ref(), &requester, now);
+            proptest::prop_assert_eq!(decided.is_ok(), record.is_none());
+            if let Some(r) = &record
+                && (r.instance_binding == requester || now - r.timestamp > CUSTODIAN_WINDOW_SECS * 1000)
+            {
+                proptest::prop_assert_ne!(decided, Err(AgentEscrowIssuanceRefusalReason::BeingIssued));
+            }
+        }
     }
 }

@@ -29,11 +29,12 @@
 //! are made in the custody, and the certificate the credentials agent issues is judged and installed as `polar-init`'s
 //! would be. The escrow key is retrieved, sealed to an ephemeral this machine opens alone; if none is escrowed, one is
 //! made in the custody, its certificate issued, and the key sealed to the credentials agent's key as the daemon pinned
-//! it, and stored. A refusal is final: the custody is told, and `polar-init` with it, and the daemon ends so that it
+//! it, and stored; while another pod of a multi-instance workload is being issued it, the custodian waits and asks again,
+//! and retrieves the key that pod escrowed. Any other refusal is final: the custody is told, and `polar-init` with it, and the daemon ends so that it
 //! starts again empty (`crate::end_once_failed`). A reply that never comes is asked for again.
 
 use credentials_agent_common::agent_escrow_issuance::{
-    AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
+    AgentEscrowIssuanceRefusalReason, AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
 };
 use credentials_agent_common::agent_escrow_keypair_bootstrap::{
     RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRequest,
@@ -61,6 +62,10 @@ use tracing::{info, warn};
 
 /// How long a request waits for its reply before it is asked again.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a custodian told its workload's escrow key is being issued (by another pod's custodian) waits before it asks
+/// for the key again (docs/architecture/authority-model.md, "Multi-instance workloads").
+pub const BEING_ISSUED_WAIT: Duration = Duration::from_secs(2);
 
 /// The topics a custodian's replies arrive on.
 pub const REPLY_TOPICS: [&str; 4] = [
@@ -110,6 +115,8 @@ pub struct Bootstrap {
     steps: VecDeque<Step>,
     waiting: Option<Waiting>,
     finished: bool,
+    /// Nothing is asked before this: the escrow key is being issued to another pod, which escrows it.
+    not_before: Option<Instant>,
 }
 
 fn encode<T>(correlation_id: &str, payload: T) -> Result<Vec<u8>, String>
@@ -157,6 +164,7 @@ impl Bootstrap {
             steps,
             waiting: None,
             finished: false,
+            not_before: None,
         }
     }
 
@@ -193,6 +201,10 @@ impl Bootstrap {
             self.waiting = None;
             self.steps.push_front(step);
         }
+        if self.not_before.is_some_and(|at| now < at) {
+            return Progress::Wait;
+        }
+        self.not_before = None;
         let Some(step) = self.steps.pop_front() else {
             self.finished = true;
             write(custody).set_ready();
@@ -382,6 +394,17 @@ impl Bootstrap {
             Step::IssueEscrow => match decode::<AgentEscrowIssuanceReply>(payload) {
                 Some(envelope) if ours(&envelope.correlation_id) => match envelope.payload {
                     AgentEscrowIssuanceReply::Issued { .. } => Ok(Some(Step::StoreEscrow)),
+                    // Another pod of this workload is being issued the one key the workload has: asked for again shortly,
+                    // and retrieved once that pod has escrowed it.
+                    AgentEscrowIssuanceReply::Refused {
+                        reason: AgentEscrowIssuanceRefusalReason::BeingIssued,
+                    } => {
+                        info!(
+                            "the escrow key is being issued to another pod of this workload: asking for it again shortly"
+                        );
+                        self.not_before = Some(now + BEING_ISSUED_WAIT);
+                        Ok(Some(Step::RetrieveEscrow))
+                    }
                     AgentEscrowIssuanceReply::Refused { reason } => Err(format!(
                         "the escrow key's certificate: the credentials agent refused: {reason:?}"
                     )),
@@ -906,6 +929,82 @@ mod tests {
         assert_eq!(
             asked.topic,
             CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC
+        );
+    }
+
+    /// docs/architecture/authority-model.md, "Multi-instance workloads": told the workload's one escrow key is being
+    /// issued to another pod, the custodian does not fail; it waits, asks for the key again, and holds the one that pod
+    /// escrowed.
+    #[test]
+    fn told_the_key_is_being_issued_to_another_pod_it_waits_and_retrieves_that_key() {
+        let custody = custody_planned(false, None, true);
+        let plan = read(&custody).plan().unwrap();
+        let mut bootstrap = Bootstrap::new(&plan);
+        let now = Instant::now();
+        let pinned = credentials_agent_key().to_public_key();
+        let retrieve = request::<RetrieveAgentEscrowKeypairRequest>(&sent(bootstrap.next(
+            &custody,
+            Some(&pinned),
+            now,
+        )));
+        let issue = request::<AgentEscrowIssuanceRequest>(&sent(bootstrap.on_reply(
+            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+            &reply(
+                &retrieve.correlation_id,
+                RetrieveAgentEscrowKeypairReply::NotFound,
+            ),
+            &custody,
+            Some(&pinned),
+            now,
+        )));
+        // Told so: nothing asked at once, nothing failed.
+        assert_eq!(
+            bootstrap.on_reply(
+                CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+                &reply(
+                    &issue.correlation_id,
+                    AgentEscrowIssuanceReply::Refused {
+                        reason: AgentEscrowIssuanceRefusalReason::BeingIssued,
+                    },
+                ),
+                &custody,
+                Some(&pinned),
+                now,
+            ),
+            Progress::Wait
+        );
+        assert!(!bootstrap.is_finished());
+        assert_eq!(
+            bootstrap.next(&custody, Some(&pinned), now + BEING_ISSUED_WAIT / 2),
+            Progress::Wait
+        );
+        // Then it asks for the key again, and holds the one the other pod escrowed.
+        let later = now + BEING_ISSUED_WAIT;
+        let again = request::<RetrieveAgentEscrowKeypairRequest>(&sent(bootstrap.next(
+            &custody,
+            Some(&pinned),
+            later,
+        )));
+        let escrowed = polar_custody::escrow::EscrowKey::generate().unwrap();
+        let pem = escrowed
+            .sealed_to(&pinned)
+            .unwrap()
+            .decrypt(credentials_agent_key())
+            .unwrap()
+            .to_vec();
+        let found = RetrieveAgentEscrowKeypairReply::Found {
+            payload: EphemeralEncryptedPayload::encrypt(&pem, &again.payload.ephemeral_public_key)
+                .unwrap(),
+        };
+        assert_eq!(
+            bootstrap.on_reply(
+                CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+                &reply(&again.correlation_id, found),
+                &custody,
+                Some(&pinned),
+                later,
+            ),
+            Progress::Done
         );
     }
 
