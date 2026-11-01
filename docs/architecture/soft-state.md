@@ -219,9 +219,9 @@ Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e
   render gives the state agent nothing of its own, and asks the scaffolds once.
 - **The Jira cursor.** jira-observer asks through the `StateClient` it is given (`jira/observe/src/issues.rs`,
   `cursor_query`, `:61`; `start_from`, `:80`): no request or reply code of its own. The observer finds the system field
-  `updated` (`system_field_id`, `:411`) and passes its value as `polar_updated` (`mark_updated`, `:426`,
+  `updated` (`system_field_id`, `:550`) and passes its value as `polar_updated` (`mark_updated`, `:619`,
   `jira_common::SYSTEM_UPDATED_KEY`); jira-processor parses `updated_ms` from it alone
-  (`jira/process/src/issues.rs:353`).
+  (`jira/process/src/issues.rs:379`). (Line numbers as of 2026-11-01, `d5bb9200`.)
 
 Decided where the review was silent (by the agent that rebuilt it; to confirm):
 
@@ -280,7 +280,8 @@ Neo4j container) and the images built, not yet run on a cluster. Paths relative 
   the agent stays up, its health file says `unhealthy` (the probe judges only its age), its report says why, and it
   still rejuvenates; the domain stops retrying what cannot work. `polar_agent_builder::held::stay_up` (`held.rs`) is
   the start-time form: an agent whose own configuration cannot work starts its infrastructure and no domain, holds
-  the problem, answers health queries, and ends only by its health actor's verdict or a signal.
+  the problem, answers health queries, and ends only by its health actor's verdict or a signal, unless a signed update
+  mends it (below, "A held agent tries again on a signed update").
 - **The question and the answer** (`polar-agent-builder/src/health_query.rs`). The `agent` rule implies, for every
   Cassini client, subscribe `agent.<name>.health` and publish `polar-health-replies` (`topics.rs`, `implied_by`; the
   answer is caused by the question), so the broker's floor, the certificates and the agent's own set have them. The
@@ -309,11 +310,49 @@ Neo4j container) and the images built, not yet run on a cluster. Paths relative 
   is asked.
 - **jira-observer** (`jira/observe/src/agent.rs`, `prepare`): a placeholder or malformed `JIRA_URL`, or any other
   configuration error at its start, is held as `Configuration` through `held::stay_up`, instead of ending the process
-  (which, with the pod's `RestartAllContainers` rule and the renewal rule, looped every five minutes).
+  (which, with the pod's `RestartAllContainers` rule and the renewal rule, looped every five minutes). Its observers hold
+  at run time too (below).
 - **Infra.** `config/workloads/soft-state.nuon` (pool `writers`), `images.nuon`, `soft-state/package.nix`
   (`processorImage`) and `container-processor.{dhall,nix}`, the targets' resource lists and issuer entries, `seed.nu`
   (a computed body names its `resolve` command; `computed`), `up.nu` `step_seed` (asks each computed document's
   command), `graph.nu` `health_agents`.
+
+### A held agent tries again on a signed update (the maintainer, 2026-11-01)
+
+The rule, amended: a held agent does not only wait for its next rejuvenation; it tries again when a signed
+configuration update arrives. Polar's control travels as signed configuration at run time: the builder's
+ConfigurationActor announces each applied update on `ConfigurationHandle::changes()` (`ConfigChanged { version,
+changed }`), and the new values are read with `current()`. The scheduler replays the signed documents to an agent that has
+just registered (`polar-configuration-replay`, `polar-scheduler/common/src/lib.rs:65`), so after every restart the
+render's environment applies first and the signed update arrives just after. Only a Dynamic variable can be changed by an
+update; the maintainer's rule is that an agent's own non-secret settings are Dynamic (one whose are Static "hasn't been
+properly migrated to the builder"), and making them so for every agent is a remaining-work item. Built 2026-11-01:
+
+- **At start** (`8635c729`, `polar-agent-builder/src/held.rs`): `held::stay_up(configured, name, reason, message,
+  try_again)`. `TryAgain` is a boxed async closure the agent passes; on each `ConfigChanged` it is called with a `Retry`:
+  the configuration in force, the resources already built, the held supervisor's cell to link the work under, and
+  whether Cassini has registered the agent. `Ok` means the work started: the hold is released, the work takes the
+  agent's events itself (`events_output`, `infrastructure_events`) and answers the shutdown, and the work's ending ends
+  the agent. `Err(why)` keeps the hold, with `why` as its message. `held::never()` is the closure of an agent no update
+  can mend. General; jira-observer is its one user (its closure runs `prepare` on the configuration in force and starts
+  the observer supervisor on the built infrastructure, `Infrastructure::Built`).
+- **At run time, jira-observer** (`8c2ec420`, `e0901170`, `96ddd517`; `jira.md`, "What it does at start", 6): each
+  observer holds a `Credentials` or `Configuration` failure through the agent's `HealthHandle` (given in
+  `JiraObserverArgs` by `observer_args`), one line (`<observer>: <what failed>; <what to set>`, never a secret), and
+  schedules no pull; a success releases the hold its observer placed; a transient failure keeps the backoff and never
+  holds. Its settings (`JIRA_URL`, `JIRA_ANONYMOUS`, `JIRA_DEPLOYMENT`, `QUERY_DATE`) are Dynamic: an update naming one
+  makes the supervisor run `prepare` on `current()` and start the observers again, which releases every hold (an observer
+  that meets the problem again holds it again), or stop them and hold `Configuration` with why. Its credential is a
+  signed runtime section (`credentials`), so a new token is a new version: the supervisor registers it with the
+  CryptoActor and starts the observers again, clearing a `Credentials` hold without a restart. Egress stays Static (the
+  cluster's setting; the CA is a mounted file).
+- **Which variables an update can change today:** jira-observer's four, and every agent's logging (`RUST_LOG`,
+  `POLAR_TRACE_FILTER`); `held::stay_up` retries on a change to any of them. The token is not a variable: it is the
+  `credentials` runtime section (`RuntimeChanged`).
+
+Decided (to review): several observers can hold; each releases only its own hold, and the health actor reports the
+latest (`HoldReason` is one slot per agent: naming every holder would need holds keyed by holder in the builder). A
+held observer is never pulled again in its process; starting again is a stop and respawn by the supervisor.
 
 Decided where the design was silent (by the agent that built it; to confirm):
 
@@ -391,7 +430,9 @@ it (`polar-agent-builder/src/state.rs`, `ask_until_available`); a value or a ref
   images built, not deployed. The seed's `resolve.nu state-schema` has run from the workspace's scaffolds only.
 - Health in the graph is built ("As built: pulled health") and not yet seen on a cluster: the seeded `agents`, the
   rounds, the request gate against the broker's stamped identity, the `AgentHealth` writes, jira-observer held on a
-  placeholder `JIRA_URL`. The state agent's reader now reports `Degraded` with reason `Graph` while the graph is down.
+  placeholder `JIRA_URL`, its observers' run-time holds, and a held agent mended by a signed update (neither the
+  supervisor's wiring of `ConfigChanged` and `RuntimeChanged` nor jira-observer's `TryAgain` closure is covered by a
+  test: they need the agent's built infrastructure). The state agent's reader now reports `Degraded` with reason `Graph` while the graph is down.
 - Self-state writes (`StateHandle::put`, `changes`) and the git checkpoints are not built.
 - The broker's own health cannot be asked over Cassini (it is not a client); remaining-work.md, "THE BROKER AS A USER
   OF SOFT STATE".

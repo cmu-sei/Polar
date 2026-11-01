@@ -57,10 +57,12 @@ Capabilities (`needs`) *union* into list-valued fields (env, volumes, mounts, ce
 dependency checks) in declared order. `explain` shows provenance per value, like
 `git config --show-origin`: `[kind]`, `[entry]`, `[cassini]`, `[derived]`.
 
-Target-specific values (e.g. `JIRA_URL`, `JIRA_EMAIL`) come from the target layer,
+Target-specific values (e.g. `JIRA_URL`, `JIRA_DEPLOYMENT`) come from the target layer,
 not the workload entry: each target's `config.nuon` carries
 `workloads.<name>.env`, appended after the capability env. Secrets are referenced,
-never stored: `{ name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }`.
+never stored: `{ name: "FOO_TOKEN", secret: "foo-secret", key: "token" }`. (Until 3.0.0
+the example was jira-observer's `JIRA_TOKEN`; its credential is now a signed runtime
+section, docs/architecture/jira.md, "The credential".)
 
 ## 3. The capability vocabulary (the shared contract)
 
@@ -170,8 +172,9 @@ Facts learned from the jira migration:
   `TcpClient` handle is stored and observers are rebuilt on the next registration.
   jira-processor lacked the second half before its migration; kube-consumer lacked it too until it was fixed the same way.
 - **Environment.** Everything the pod needs comes from the catalog entry plus the
-  target layer; the Rust side reads `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` and fails
-  with a message, not a panic, when one is missing.
+  target layer; the Rust side reads `JIRA_URL` (and, since 3.0.0, its credential from a
+  signed runtime section, not `JIRA_EMAIL` and `JIRA_TOKEN`) and fails with a message,
+  not a panic, when one is missing.
 
 ## 5. Decisions
 

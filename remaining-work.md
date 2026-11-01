@@ -700,7 +700,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
 
 - [ ] Fresh-cluster apply of `kube-observer-resources.yaml` on a cluster where the ServiceAccount and token Secret do not exist yet (this time they already did; `serviceaccounts.yaml` precedes it in `apply_order`)
 - [ ] `clusterrolebinding/kube-observer-read` printed `configured` on both applies even though `kubectl diff` is empty afterwards; confirm a later apply says `unchanged`
-- [ ] jira positive end-to-end test (observer publishes projects/groups/users/issues, processor receives them and writes the graph; confirm the processor's subscription log lines, not seen yet). Blocked on a live Jira: `daveman1010220.atlassian.net` answers 404 even on the unauthenticated `/rest/api/3/serverInfo`. Not being chased. If the site does not return, a small fake Jira in the cluster would test the publish path. Set a real `jira_token` in the target secrets when a site exists
+- [ ] jira positive end-to-end test (observer publishes projects/groups/users/issues, processor receives them and writes the graph; confirm the processor's subscription log lines, not seen yet). Blocked on a live Jira: `daveman1010220.atlassian.net` answers 404 even on the unauthenticated `/rest/api/3/serverInfo`. Not being chased. If the site does not return, a small fake Jira in the cluster would test the publish path. UPDATE 2026-11-01: u7c (sandbox-local) reads Apache's Jira anonymously (`b1789556`); a site read with a credential gets it as a signed `credentials` section (polar-sign), no longer `jira_token` in the target secrets (docs/architecture/jira.md, "The credential")
 - [ ] jira observer follow-ups: the user picker is queried with `query=''` (literal quotes) and appears to ignore `startAt`, so pages may repeat (consider `/rest/api/3/users/search`); the processor handles one issue per message, so batching needs a wire-type change; fix the stale comment in the ActorTerminated arm of `observe/src/supervisor.rs` ("typically after exhausting its backoff...") next time the file is touched
 - [x] Rejuvenation handshake verified on a real cluster for kube-consumer (forced by setting `POLAR_HEALTH_REJUVENATION_SECS` above the cert lifetime: health check terminates, PrepareShutdown, unsubscribe, drain, graph flush, ProceedWithShutdown, infrastructure down, exit 1, Job restarts the pod). Client certs live 1 hour, and credentials-agent has been restarting about hourly for 4+ hours on its own. Not yet forced for jira-processor or kube-observer, which use the same builder path with their own supervisor halves
 - [ ] Env precedence: a target `workloads.<name>.env` entry whose name the catalog also derives (seen with `POLAR_HEALTH_TICK_SECS`) is rendered twice and the later, derived value won silently (kubectl warns `hides previous definition`). Decide the precedence (the target should win) and make `resolve.nu check` fail on duplicate env names within a resolved workload
@@ -842,8 +842,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   publisher refused for now mid-stream, then its order at the subscriber. Also to settle: why a producer's own selftest
   subscription stalls at all while it publishes.
 - [~] (BUILT 2026-11-01, not yet on a cluster: jira-observer holds a start-time configuration error as `Configuration`
-  through `polar_agent_builder::held::stay_up`, stays up, answers health queries and starts no observer;
-  `docs/architecture/soft-state.md`, "As built: pulled health".) SEEN AGAIN 2026-11-01 on u7c, which has no Jira:
+  through `polar_agent_builder::held::stay_up`, stays up, answers health queries and starts no observer, and starts them
+  when a signed update mends it (`8635c729`); its observers hold `Credentials` and `Configuration` at run time
+  (`8c2ec420`); `docs/architecture/soft-state.md`, "As built: pulled health".) SEEN AGAIN 2026-11-01 on u7c, which has no Jira:
   jira-observer ends at once (`JIRA_URL is still the example
   placeholder`), the pod's rule restarts every container, and each restart's new custodian key waits out the renewal
   rule, so it loops every five minutes. NOT correct behaviour: the maintainer decided on 2026-10-30, after the same loop,
@@ -851,6 +852,15 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   GRAPH, PULLED", below). Only the run-time half was built that day (Jira errors retried with backoff, `jira.md`); the
   start-time configuration refusal still ends the process, and waits on that item, which was queued after the
   backpressure merge and not started.
+- [ ] EVERY AGENT'S NON-SECRET SETTINGS DYNAMIC (the maintainer, 2026-11-01: an agent whose own non-secret settings are
+  Static "hasn't been properly migrated to the builder"). Control travels as signed configuration at run time, and only
+  a Dynamic variable can be changed by a signed update (`polar-agent-builder/src/configuration.rs`), so a held agent
+  (`held::stay_up`) or a running one cannot be mended without a restart while its settings are Static. Done for
+  jira-observer (`e0901170`: `JIRA_URL`, `JIRA_ANONYMOUS`, `JIRA_DEPLOYMENT`, `QUERY_DATE`; egress stays Static, the
+  cluster's setting). For each other agent: declare its own non-secret settings `.dynamic()`, and have it take a
+  `ConfigChanged` naming one (read `current()` again, start what depends on it again); a secret travels as a signed
+  runtime section, as the git observer's and jira-observer's credentials do. docs/architecture/soft-state.md, "A held
+  agent tries again on a signed update".
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`

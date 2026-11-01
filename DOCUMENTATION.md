@@ -309,7 +309,6 @@ In a cluster, the `TLS_*` variables point at files that `polar-init` writes from
 | `TLS_CA_CERT` | CA certificate path |
 | `GITLAB_TOKEN` | GitLab API token |
 | `GITLAB_ENDPOINT` | GitLab GraphQL endpoint |
-| `JIRA_TOKEN` | Jira API token |
 | `JIRA_URL` | Jira REST API URL |
 | `KUBECONFIG` | Kubernetes config file path |
 
