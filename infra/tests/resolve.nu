@@ -1191,6 +1191,42 @@ def main [] {
             }
         }
 
+        # Since 3.0.0 the catalog gives jira-observer no Secret: its credential is its signed `credentials` section
+        # (docs/architecture/jira.md, "The credential"). So a target that reads a site anonymously, as sandbox-local reads
+        # Apache's, needs nothing taken out: its pod has no Secret reference, its document no token or email. A target that
+        # still sets JIRA_TOKEN or JIRA_EMAIL is refused by name, as any variable the agent does not declare.
+        "a target that reads Jira anonymously renders jira-observer with no credential and no Secret": {
+            let config = (open ($INFRA | path join "targets/local/config.nuon"))
+            let anonymous = [
+                { name: "JIRA_URL", value: "https://issues.apache.org/jira" }
+                { name: "JIRA_ANONYMOUS", value: "true" }
+            ]
+            let with_env = {|entries| $config | upsert workloads ($config.workloads | upsert jira-observer {|w| $w.jira-observer | upsert env $entries }) }
+            with_target (do $with_env $anonymous) {|t|
+                let r = (resolve_for $t "jira-observer")
+                assert ($r.env | where secret != null | is-empty) $"a Secret is referenced: ($r.env | where secret != null)"
+                assert equal (env_value $r "JIRA_ANONYMOUS" $t) "true"
+                let maps = (^nu $RESOLVER resources jira-observer --target $t | from json | get config_maps)
+                let names = ($maps | first | get content | from json | get sections | each {|s| $s.variables | get name } | flatten)
+                for gone in ["JIRA_TOKEN" "JIRA_EMAIL"] { assert ($gone not-in $names) $"($gone) is in the document" }
+                let pod = (pod_of "jira-observer" $t)
+                let refs = ($pod.containers | each {|c| $c.env? | default [] } | flatten | where {|e| $e.valueFrom?.secretKeyRef? != null })
+                assert ($refs | is-empty) $"the pod reads a Secret: ($refs)"
+                # and nothing the catalog or the target gives it is a problem (the agents' own judgement needs a cluster)
+                let checked = (^nu $RESOLVER check --target $t | complete)
+                let jira = ($checked.stderr | lines | where {|l| ($l | str contains "jira-observer") or ($l | str contains "JIRA_") })
+                assert ($jira | is-empty) $"($jira)"
+            }
+            for gone in ["JIRA_TOKEN" "JIRA_EMAIL"] {
+                with_target (do $with_env ($anonymous | append { name: $gone, value: "x" })) {|t|
+                    let checked = (^nu $RESOLVER check --target $t | complete)
+                    assert ($checked.exit_code != 0)
+                    assert ($checked.stderr | str contains $"($gone) is set by") $checked.stderr
+                    assert ($checked.stderr | str contains "jira-observer does not declare it") $checked.stderr
+                }
+            }
+        }
+
         "a target that sets an egress variable itself is refused, and so is a CA file that holds a key": {
             let config = (open ($INFRA | path join "targets/local/config.nuon"))
             let workloads = ($config.workloads | upsert jira-observer {|w|
