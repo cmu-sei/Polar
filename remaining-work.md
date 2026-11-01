@@ -754,6 +754,20 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
   certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the
   backpressure merge. A reply to Blitz was drafted for the maintainer.
+- [ ] FROM THE FIFTH SET (decided by the maintainer 2026-11-01; `docs/architecture/broker-baseline.md`, "The fifth set"):
+  - The stall rule ends a subscriber only when it makes NO PROGRESS (acknowledges nothing) for `T_stall`; a slow but
+    acknowledging subscriber is held back by its topic instead (its publishers go at its pace), never ended.
+  - The broker's workload gets a memory limit in the catalog, 1 GiB, so the controller's ceiling is real (u7c had none:
+    a ceiling of about 27 GB).
+  - The harness runs several publisher identities, so the controller is exercised (one publisher and one subscriber held
+    at most 145 MB, never the budget's 3/4); then the tunables are measured again.
+  - Profile where the new broker's CPU goes: 8-20% more per message saturated, up to 45% at set rates; -13% at 64 KiB.
+  - Study why latency at low rates improved: 64 KiB at 100/s has p50 0.54 ms against about 10 ms on S4m, which S4m has
+    carried since 2026-10-21. The maintainer: "astonishing ... on a case that wouldn't seem to have been about
+    back-pressure at all. We should study this to understand why."
+  - Two bugs: issuance stopped after the tenth broker restart in a row (cert-issuer's held offer to the credentials agent
+    never answered, until cert-issuer restarted); a pod whose custody slot was sealed by a failed first attempt fails every
+    retry in place (`Init:CrashLoopBackOff`, jira-observer and jira-processor on u7c).
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
