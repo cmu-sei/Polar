@@ -719,9 +719,20 @@ the Job, and so the build or the run). Nothing about the instance is self-report
   identity, so a message names the workload and the pod it came from. This changes the wire: PROTOCOL VERSION 2; a
   client and a broker of different versions are refused by name at registration, as built; every image is redeployed
   together.
-- Given up, by design: the credentials agent's "current certificate of this identity" lookup is not offered for a
-  multi-instance workload (it has several); a finished pod's session is not superseded by a successor and waits out its
-  retention (pulled health and the Reaper will see it as unresponsive).
+- A pod that shuts down cleanly ends its own session at once (the builder's drain tells the broker it is done); only a
+  pod that dies uncleanly leaves its session detached for the retention window (`DEFAULT_SESSION_RETENTION`, ten
+  minutes), since no successor supersedes it. Pulled health and the Reaper see such a session as unresponsive.
+- Escrow stays ONE KEY PER WORKLOAD, shared by its instances: the escrow keypair is the service's identity by design
+  ("Agent escrow identity: pod-instance vs. service identity", credentials-agent-architecture.md), so a secret sealed to
+  the workload opens in any instance. Every instance retrieves it into its own custody slot (sealed there, destroyed
+  there on revocation). The gap closed: concurrent first instances must not each mint one (`agent_escrow_issuance.rs:96`,
+  at most one per identity), so the credentials agent serializes the first escrow issuance per identity; a concurrent
+  request is told it is being issued and asks again, then retrieves.
+- The certificate lookup is not lost: it exists so one agent can encrypt to another (`credentials-agent/common/src/
+  certificate.rs`), and what one encrypts to is the workload's escrow certificate, one per workload (the maintainer:
+  this and the escrow key are "the same gap from different vantage points"). The lookup answers with that certificate,
+  never an instance's mTLS certificate. To check in the build: what `certificate_for` returns today; if it is the mTLS
+  certificate, the lookup points at the wrong key for every workload, not only multi-instance ones.
 
 **What does not change.** `workload_of`, the authority model's facts by workload, the judge, Cedar's `Identity` (rules
 name the workload), the builder's own-name check, topics as exact names, a single-instance workload's behaviour.
