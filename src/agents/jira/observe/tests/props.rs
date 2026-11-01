@@ -26,11 +26,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use cassini_client::facade::Backoff;
+use jira_common::types::JiraField;
 use jira_observer::JiraDeployment;
 use jira_observer::Retry;
 use jira_observer::issues::{
-    Filter, INCREMENTAL_OVERLAP_SECS, ORDER, Start, cursor_minutes, incremental_window, issue_jql,
-    jql_filter,
+    Filter, INCREMENTAL_OVERLAP_SECS, ORDER, SiteFields, Start, cursor_minutes, incremental_window,
+    issue_jql, jql_filter,
 };
 use jira_observer::settings::{normalise_jira_url, parse_query_date, token_looks_base64};
 use proptest::prelude::*;
@@ -325,6 +326,58 @@ proptest! {
             );
             prop_assert!(said.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b' ' || b == b':'), "{}", said);
         }
+    }
+
+    /// Whatever the site calls its fields (any display names, the same name twice, a custom field named as a system
+    /// field is), the system fields travel by id with their values, none is left among the fields, and every other
+    /// field is there under a display name.
+    #[test]
+    fn system_fields_are_matched_by_id_whatever_their_display_names(
+        names in proptest::collection::vec(prop_oneof!["[A-Za-z ]{1,6}", Just("Project".to_string()), Just("Assignee".to_string())], 7),
+        values in proptest::collection::vec(any::<u32>(), 7),
+        shown in proptest::collection::vec(any::<bool>(), 7),
+    ) {
+        let ids = ["assignee", "reporter", "creator", "issuetype", "project", "customfield_1", "customfield_2"];
+        let fields: Vec<JiraField> = ids
+            .iter()
+            .zip(&names)
+            .enumerate()
+            .map(|(i, (id, name))| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "name": name, "custom": i >= 5, "navigable": true, "orderable": true, "searchable": true,
+                    "schema": if i < 5 { serde_json::json!({ "type": "any", "system": id }) } else { serde_json::json!({ "type": "any" }) },
+                }))
+                .unwrap()
+            })
+            .collect();
+        // A system field's value is marked "s", a custom field's "c", so each can be told wherever it ends up.
+        let value = |i: usize| {
+            if i < 5 { serde_json::json!({ "s": values[i] }) } else { serde_json::json!({ "c": values[i] }) }
+        };
+        let mut on_issue = serde_json::Map::new();
+        for (i, id) in ids.iter().enumerate() {
+            if shown[i] {
+                on_issue.insert(id.to_string(), value(i));
+            }
+        }
+        let mut issue = serde_json::json!({ "key": "PLAT-1", "fields": on_issue });
+        prop_assert!(SiteFields::new(&fields).prepare(&mut issue));
+
+        let system = &issue[jira_common::SYSTEM_FIELDS_KEY];
+        for (i, id) in ids.iter().enumerate().take(5) {
+            if shown[i] {
+                prop_assert_eq!(&system[id], &value(i));
+            } else {
+                prop_assert!(system.get(id).is_none());
+            }
+        }
+        let left = issue["fields"].as_object().unwrap();
+        for i in 5..7 {
+            if shown[i] {
+                prop_assert!(left.contains_key(&names[i]), "{} is missing from {:?}", names[i], left);
+            }
+        }
+        prop_assert!(left.values().all(|v| v.get("s").is_none()), "a system field was left among {:?}", left);
     }
 
     /// Every issue pull's JQL is ordered oldest update first, once, whatever the filter and the deployment.

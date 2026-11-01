@@ -153,11 +153,7 @@ impl JiraIssueObserver {
         let fields: Vec<JiraField> = state
             .get_json(&format!("{}{FIELD_OP}", state.jira_url))
             .await?;
-        let updated_id = system_field_id(&fields, "updated");
-        let names: HashMap<String, String> = fields
-            .into_iter()
-            .map(|f| (f.id.to_string(), f.name.to_string()))
-            .collect();
+        let site = SiteFields::new(&fields);
 
         let mut walk = match state.issue_walk.take() {
             Some(walk) => {
@@ -195,11 +191,9 @@ impl JiraIssueObserver {
 
         let walked = match state.deployment {
             JiraDeployment::ServerOrDataCenter => {
-                Self::walk_by_offset(op, state, &mut walk, &names, updated_id.as_deref()).await
+                Self::walk_by_offset(op, state, &mut walk, &site).await
             }
-            JiraDeployment::Cloud => {
-                Self::walk_by_token(state, &mut walk, &names, updated_id.as_deref()).await
-            }
+            JiraDeployment::Cloud => Self::walk_by_token(state, &mut walk, &site).await,
         };
         match walked {
             Ok(()) => {
@@ -222,8 +216,7 @@ impl JiraIssueObserver {
         op: &str,
         state: &JiraObserverState,
         walk: &mut IssueWalk,
-        names: &HashMap<String, String>,
-        updated_id: Option<&str>,
+        site: &SiteFields,
     ) -> Result<(), ActorProcessingErr> {
         let endpoint = format!("{}{}", state.jira_url, op);
         loop {
@@ -238,7 +231,7 @@ impl JiraIssueObserver {
             debug!("{url}");
 
             let res: Value = state.get_json(url.as_str()).await?;
-            let fetched = publish_issues(&res, names, updated_id, &state.tcp_client).await?;
+            let fetched = publish_issues(&res, site, &state.tcp_client).await?;
             walk.published += fetched;
             let total = res["total"].as_u64().map(|t| t as usize);
             if total.is_none() && !walk.warned_no_total {
@@ -264,8 +257,7 @@ impl JiraIssueObserver {
     async fn walk_by_token(
         state: &JiraObserverState,
         walk: &mut IssueWalk,
-        names: &HashMap<String, String>,
-        updated_id: Option<&str>,
+        site: &SiteFields,
     ) -> Result<(), ActorProcessingErr> {
         let endpoint = format!("{}/rest/api/3/search/jql", state.jira_url);
         loop {
@@ -284,7 +276,7 @@ impl JiraIssueObserver {
             debug!("{url}");
 
             let res: Value = state.get_json(url.as_str()).await?;
-            walk.published += publish_issues(&res, names, updated_id, &state.tcp_client).await?;
+            walk.published += publish_issues(&res, site, &state.tcp_client).await?;
 
             walk.next_page_token = res["nextPageToken"].as_str().map(str::to_string);
             match res["isLast"].as_bool() {
@@ -566,6 +558,60 @@ pub fn system_field_id(fields: &[JiraField], system: &str) -> Option<String> {
         .map(|f| f.id.clone())
 }
 
+/// What the observer knows of the site's fields (`/field`), for preparing each issue it publishes: every field's
+/// display name, the id of the system field `updated`, and the id of each system field the processor makes edges of
+/// ([`jira_common::SYSTEM_FIELDS`]), found by its schema or, where `/field` gives none, by the id that is its system
+/// name.
+pub struct SiteFields {
+    names: HashMap<String, String>,
+    updated_id: Option<String>,
+    system: Vec<(&'static str, String)>,
+}
+
+impl SiteFields {
+    pub fn new(fields: &[JiraField]) -> Self {
+        Self {
+            names: fields
+                .iter()
+                .map(|f| (f.id.clone(), f.name.clone()))
+                .collect(),
+            updated_id: system_field_id(fields, "updated"),
+            system: jira_common::SYSTEM_FIELDS
+                .iter()
+                .map(|system| {
+                    (
+                        *system,
+                        system_field_id(fields, system).unwrap_or_else(|| system.to_string()),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Prepares an issue for the processor: its last update beside its fields ([`mark_updated`]), the system fields
+    /// moved out of its fields to beside them by system id ([`jira_common::SYSTEM_FIELDS_KEY`]), and the rest renamed
+    /// to their display names ([`rename_fields`]). False if the issue has no fields object.
+    pub fn prepare(&self, issue: &mut Value) -> bool {
+        mark_updated(issue, self.updated_id.as_deref());
+        let Some(fields) = issue.get_mut("fields").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        let mut system = serde_json::Map::new();
+        for (name, id) in &self.system {
+            if let Some(value) = fields.remove(id) {
+                system.insert(name.to_string(), value);
+            }
+        }
+        if let Some(object) = issue.as_object_mut() {
+            object.insert(
+                jira_common::SYSTEM_FIELDS_KEY.to_string(),
+                Value::Object(system),
+            );
+        }
+        rename_fields(issue, &self.names)
+    }
+}
+
 /// Puts the issue's last update, the value of the field `updated_id`, beside its fields under
 /// [`jira_common::SYSTEM_UPDATED_KEY`], before the fields are renamed: the processor reads the cursor's time from there,
 /// never from a display name. An issue without it, or a site whose `/field` names no such field, gets nothing.
@@ -590,8 +636,7 @@ pub fn mark_updated(issue: &mut Value, updated_id: Option<&str>) {
 /// whole pull.
 async fn publish_issues(
     res: &Value,
-    names: &HashMap<String, String>,
-    updated_id: Option<&str>,
+    site: &SiteFields,
     tcp_client: &TcpClient,
 ) -> Result<usize, ActorProcessingErr> {
     let items = res["issues"]
@@ -600,8 +645,7 @@ async fn publish_issues(
 
     for issue in items {
         let mut issue = issue.clone();
-        mark_updated(&mut issue, updated_id);
-        if !rename_fields(&mut issue, names) {
+        if !site.prepare(&mut issue) {
             warn!("Skipping issue {} with no fields", issue["key"]);
             continue;
         }
@@ -665,6 +709,67 @@ mod tests {
         );
         // A custom field that happens to be named "Updated" is not the cursor.
         assert_eq!(issue["fields"]["Updated"], "not it");
+    }
+
+    /// Assignee, reporter, creator, issue type and project travel beside the fields by their system field ids, found
+    /// by `/field`'s schema, so the processor never needs their display names: here a German site, and a custom field
+    /// named "Project" as Apache's Jira has one (customfield_12312823), which before took the system field's place
+    /// whenever it sorted first.
+    #[test]
+    fn the_system_fields_travel_by_id_whatever_the_site_calls_them() {
+        let fields = [
+            field("assignee", "Bearbeiter", Some("assignee")),
+            field("reporter", "Autor", Some("reporter")),
+            field("creator", "Ersteller", Some("creator")),
+            field("issuetype", "Vorgangstyp", Some("issuetype")),
+            field("project", "Projekt", Some("project")),
+            field("summary", "Zusammenfassung", Some("summary")),
+            field("customfield_12312823", "Projekt", None),
+        ];
+        let site = SiteFields::new(&fields);
+        let mut issue = json!({
+            "key": "PLAT-1",
+            "fields": {
+                "assignee": { "key": "jdoe", "name": "jdoe" },
+                "reporter": { "key": "asmith" },
+                "creator": null,
+                "issuetype": { "name": "Fehler" },
+                "project": { "id": "10042", "key": "PLAT" },
+                "summary": "hallo",
+                "customfield_12312823": { "value": "custom" }
+            }
+        });
+        assert!(site.prepare(&mut issue));
+        assert_eq!(
+            issue[jira_common::SYSTEM_FIELDS_KEY],
+            json!({
+                "assignee": { "key": "jdoe", "name": "jdoe" },
+                "reporter": { "key": "asmith" },
+                "creator": null,
+                "issuetype": { "name": "Fehler" },
+                "project": { "id": "10042", "key": "PLAT" }
+            })
+        );
+        // The rest by display name, the custom "Projekt" among them; no system field is left there.
+        assert_eq!(
+            issue["fields"],
+            json!({ "Zusammenfassung": "hallo", "Projekt": { "value": "custom" } })
+        );
+    }
+
+    /// A `/field` that gives no schema (an old site, or a stand-in) still finds the system fields: their ids are the
+    /// system names.
+    #[test]
+    fn without_a_schema_the_system_fields_are_found_by_their_ids() {
+        let site = SiteFields::new(&[field("assignee", "Assignee", None)]);
+        let mut issue = json!({ "key": "PLAT-1", "fields": { "assignee": { "key": "jdoe" }, "project": { "id": "1" } } });
+        assert!(site.prepare(&mut issue));
+        assert_eq!(
+            issue[jira_common::SYSTEM_FIELDS_KEY]["assignee"]["key"],
+            "jdoe"
+        );
+        assert_eq!(issue[jira_common::SYSTEM_FIELDS_KEY]["project"]["id"], "1");
+        assert_eq!(issue["fields"], json!({}));
     }
 
     #[test]

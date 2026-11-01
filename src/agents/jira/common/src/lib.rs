@@ -34,3 +34,12 @@ pub const JIRA_ISSUES_CONSUMER_TOPIC: &str = "jira:consumer:issues";
 /// `updated`, found by its schema (`/field`'s `schema.system`), never by its display name, which is the site's language
 /// (docs/architecture/soft-state.md, "The as-built decisions, reviewed").
 pub const SYSTEM_UPDATED_KEY: &str = "polar_updated";
+
+/// Where the observer puts the system fields the processor makes edges of, beside `fields`, keyed by their system
+/// ids (`/field`'s `schema.system`, which are also their field ids), never by their display names, which are the
+/// site's language and may be another field's too (Apache's Jira has a custom field named "Project").
+pub const SYSTEM_FIELDS_KEY: &str = "polar_system";
+
+/// The system fields that travel under [`SYSTEM_FIELDS_KEY`]: who is assigned, who reported and who created the
+/// issue, its type and its project.
+pub const SYSTEM_FIELDS: &[&str] = &["assignee", "reporter", "creator", "issuetype", "project"];

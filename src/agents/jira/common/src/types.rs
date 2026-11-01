@@ -251,6 +251,10 @@ pub struct JiraIssue {
     /// an observer that did not say, or for an issue without it.
     #[serde(default, rename = "polar_updated")]
     pub system_updated: Option<String>,
+    /// The system fields [`crate::SYSTEM_FIELDS`] names, by system id, as the observer passed them beside `fields`
+    /// ([`crate::SYSTEM_FIELDS_KEY`]); they are not among `fields`.
+    #[serde(default, rename = "polar_system")]
+    pub system_fields: HashMap<String, FieldValue>,
 }
 
 #[derive(

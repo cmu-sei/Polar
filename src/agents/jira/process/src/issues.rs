@@ -28,6 +28,7 @@ use polar::graph::controller::{
     Property,
 };
 use ractor::ActorProcessingErr;
+use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Sanitizes a raw Jira field name into something safe to embed as a
@@ -171,6 +172,102 @@ fn dynamic_field_ops(
     });
 }
 
+/// The ops for the issue's type, from the system field `issuetype`: a JiraIssueType node keyed by name, and HAS_TYPE.
+fn issue_type_ops(ops: &mut Vec<GraphOp>, issue: &JiraIssue, v: &HashMap<String, FirstTierField>) {
+    if let Some(FirstTierField::Option(Some(name))) = v.get("name") {
+        let mut props = Vec::new();
+        for (subkey, value) in v {
+            if subkey == "name" {
+                continue;
+            }
+            if let Some(prop) = first_tier_to_property(subkey, value) {
+                props.push(prop);
+            }
+        }
+        let type_key = JiraNodeKey::IssueType { name: name.clone() };
+        ops.push(GraphOp::UpsertNode {
+            key: type_key.clone().into_key(),
+            props,
+        });
+        ops.push(GraphOp::EnsureEdge {
+            from: JiraNodeKey::Issue {
+                key: issue.key.clone(),
+            }
+            .into_key(),
+            to: type_key.into_key(),
+            rel_type: "HAS_TYPE".to_string(),
+            props: vec![],
+        });
+    }
+}
+
+/// The ops for the issue's project, from the system field `project`: a JiraProject node keyed by id, and PART_OF.
+fn project_ops(ops: &mut Vec<GraphOp>, issue: &JiraIssue, v: &HashMap<String, FirstTierField>) {
+    if let Some(FirstTierField::Option(Some(project_id))) = v.get("id") {
+        let mut props = Vec::new();
+        for (subkey, value) in v {
+            if subkey == "id" {
+                continue;
+            }
+            if let Some(prop) = first_tier_to_property(subkey, value) {
+                props.push(prop);
+            }
+        }
+        let project_key = JiraNodeKey::Project {
+            project_id: project_id.clone(),
+        };
+        ops.push(GraphOp::UpsertNode {
+            key: project_key.clone().into_key(),
+            props,
+        });
+        ops.push(GraphOp::EnsureEdge {
+            from: JiraNodeKey::Issue {
+                key: issue.key.clone(),
+            }
+            .into_key(),
+            to: project_key.into_key(),
+            rel_type: "PART_OF".to_string(),
+            props: vec![],
+        });
+    } else {
+        warn!(
+            "Issue {}: Project field has no 'id' -- skipping PART_OF edge \
+             rather than create a non-converging, name-keyed duplicate",
+            issue.key
+        );
+    }
+}
+
+/// The ops for the system fields the observer passed by id ([`jira_common::SYSTEM_FIELDS_KEY`]): who is assigned,
+/// who reported and created the issue, its type and its project. Never found by display name, which is the site's
+/// language and may name another field too.
+fn system_field_ops(ops: &mut Vec<GraphOp>, issue: &JiraIssue) {
+    merge_user(
+        ops,
+        &issue.key,
+        "ASSIGNED",
+        issue.system_fields.get("assignee"),
+    );
+    merge_user(
+        ops,
+        &issue.key,
+        "REPORTED",
+        issue.system_fields.get("reporter"),
+    );
+    merge_user(
+        ops,
+        &issue.key,
+        "CREATED",
+        issue.system_fields.get("creator"),
+    );
+    if let Some(FieldValue::Object(v)) = issue.system_fields.get("issuetype") {
+        issue_type_ops(ops, issue, v);
+    }
+    if let Some(FieldValue::Object(v)) = issue.system_fields.get("project") {
+        project_ops(ops, issue, v);
+    }
+}
+
 /// Builds the full set of graph ops for one Jira issue -- every node
 /// and edge this file produces, as a pure function of the already-
 /// deserialized issue. Extracted from handle() specifically so this
@@ -235,83 +332,7 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
                 }
             }
             FieldValue::Object(v) => {
-                if key == "Assignee" {
-                    merge_user(
-                        &mut ops,
-                        &issue.key,
-                        "ASSIGNED",
-                        issue.fields.get("Assignee"),
-                    );
-                } else if key == "Creator" {
-                    merge_user(&mut ops, &issue.key, "CREATED", issue.fields.get("Creator"));
-                } else if key == "Reporter" {
-                    merge_user(
-                        &mut ops,
-                        &issue.key,
-                        "REPORTED",
-                        issue.fields.get("Reporter"),
-                    );
-                } else if key == "Issue Type" {
-                    if let Some(FirstTierField::Option(Some(name))) = v.get("name") {
-                        let mut props = Vec::new();
-                        for (subkey, value) in v {
-                            if subkey == "name" {
-                                continue;
-                            }
-                            if let Some(prop) = first_tier_to_property(subkey, value) {
-                                props.push(prop);
-                            }
-                        }
-                        let type_key = JiraNodeKey::IssueType { name: name.clone() };
-                        ops.push(GraphOp::UpsertNode {
-                            key: type_key.clone().into_key(),
-                            props,
-                        });
-                        ops.push(GraphOp::EnsureEdge {
-                            from: JiraNodeKey::Issue {
-                                key: issue.key.clone(),
-                            }
-                            .into_key(),
-                            to: type_key.into_key(),
-                            rel_type: "HAS_TYPE".to_string(),
-                            props: vec![],
-                        });
-                    }
-                } else if key == "Project" {
-                    if let Some(FirstTierField::Option(Some(project_id))) = v.get("id") {
-                        let mut props = Vec::new();
-                        for (subkey, value) in v {
-                            if subkey == "id" {
-                                continue;
-                            }
-                            if let Some(prop) = first_tier_to_property(subkey, value) {
-                                props.push(prop);
-                            }
-                        }
-                        let project_key = JiraNodeKey::Project {
-                            project_id: project_id.clone(),
-                        };
-                        ops.push(GraphOp::UpsertNode {
-                            key: project_key.clone().into_key(),
-                            props,
-                        });
-                        ops.push(GraphOp::EnsureEdge {
-                            from: JiraNodeKey::Issue {
-                                key: issue.key.clone(),
-                            }
-                            .into_key(),
-                            to: project_key.into_key(),
-                            rel_type: "PART_OF".to_string(),
-                            props: vec![],
-                        });
-                    } else {
-                        warn!(
-                            "Issue {}: Project field has no 'id' -- skipping PART_OF edge \
-                             rather than create a non-converging, name-keyed duplicate",
-                            issue.key
-                        );
-                    }
-                } else if key == "parent" {
+                if key == "parent" {
                     if let Some(FirstTierField::Option(Some(parent_key))) = v.get("name") {
                         ops.push(GraphOp::EnsureEdge {
                             from: JiraNodeKey::Issue {
@@ -349,6 +370,8 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
             _ => {}
         }
     }
+
+    system_field_ops(&mut ops, issue);
 
     // The system field `updated`, as the observer passed it beside the fields (jira_common::SYSTEM_UPDATED_KEY):
     // never a display name, which is the site's language.
@@ -514,7 +537,6 @@ mod tests {
     use super::*;
     use jira_common::types::{JiraAuthor, JiraHistory, JiraIssueChangeLog, JiraItemHistory};
     use polar::graph::controller::GraphNodeKey;
-    use std::collections::HashMap;
 
     fn empty_issue(key: &str) -> JiraIssue {
         JiraIssue {
@@ -525,6 +547,7 @@ mod tests {
             fields: HashMap::new(),
             rendered_fields: None,
             system_updated: None,
+            system_fields: HashMap::new(),
             changelog: JiraIssueChangeLog {
                 start_at: 0.0,
                 max_results: 0.0,
@@ -770,8 +793,8 @@ mod tests {
             FirstTierField::Option(Some("Jane Doe".to_string())),
         );
         issue
-            .fields
-            .insert("Assignee".to_string(), FieldValue::Object(assignee));
+            .system_fields
+            .insert("assignee".to_string(), FieldValue::Object(assignee));
 
         let ops = build_ops_for_issue(&issue);
 
@@ -800,6 +823,109 @@ mod tests {
             panic!("expected EnsureEdge for the assignment");
         };
         assert_eq!(rel_type, "ASSIGNED");
+    }
+
+    /// The relationship types of the edges `ops` makes.
+    fn edge_types(ops: &[GraphOp]) -> Vec<String> {
+        let mut types: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::EnsureEdge { rel_type, .. } => Some(rel_type.clone()),
+                _ => None,
+            })
+            .collect();
+        types.sort();
+        types
+    }
+
+    fn object(pairs: &[(&str, &str)]) -> FieldValue {
+        FieldValue::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), FirstTierField::Option(Some(v.to_string()))))
+                .collect(),
+        )
+    }
+
+    /// Who is assigned, who reported and created it, its type and its project come from the system fields the
+    /// observer passed by id, whatever the site's language calls them; a field whose display name is "Assignee" or
+    /// "Project" (Apache's Jira has a custom field named "Project") is an ordinary field.
+    #[test]
+    fn the_system_fields_come_by_id_and_a_display_name_is_an_ordinary_field() {
+        let mut issue = empty_issue("PROJ-15");
+        for (id, value) in [
+            ("assignee", object(&[("key", "jdoe")])),
+            ("reporter", object(&[("key", "asmith")])),
+            ("creator", object(&[("key", "asmith")])),
+            ("issuetype", object(&[("name", "Fehler")])),
+            ("project", object(&[("id", "10042"), ("key", "PROJ")])),
+        ] {
+            issue.system_fields.insert(id.to_string(), value);
+        }
+        issue.fields.insert(
+            "Project".to_string(),
+            object(&[("value", "custom"), ("id", "7")]),
+        );
+        issue
+            .fields
+            .insert("Assignee".to_string(), object(&[("key", "not-a-user")]));
+
+        let ops = build_ops_for_issue(&issue);
+        assert_eq!(
+            edge_types(&ops),
+            [
+                "ASSIGNED",
+                "CREATED",
+                "HAS_ASSIGNEE",
+                "HAS_PROJECT",
+                "HAS_TYPE",
+                "PART_OF",
+                "REPORTED"
+            ]
+        );
+        // The project the issue is part of is the system field's, keyed by its id.
+        let projects: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::UpsertNode { key, .. } => {
+                    let (pattern, params) = key_pattern(key.as_ref());
+                    pattern
+                        .contains(":JiraProject ")
+                        .then(|| format!("{params:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(projects.len(), 1);
+        assert!(projects[0].contains("10042"), "{projects:?}");
+    }
+
+    proptest::proptest! {
+        /// Whatever the fields are called, none of them makes an assignment, a report, a creation, a type or a
+        /// project: only the system fields do.
+        #[test]
+        fn no_display_name_is_taken_for_a_system_field(
+            names in proptest::collection::vec(
+                proptest::prop_oneof![
+                    any_name(),
+                    proptest::strategy::Just("Assignee".to_string()),
+                    proptest::strategy::Just("Issue Type".to_string()),
+                    proptest::strategy::Just("Project".to_string()),
+                    proptest::strategy::Just("Reporter".to_string()),
+                    proptest::strategy::Just("Creator".to_string()),
+                ],
+                0..8
+            )
+        ) {
+            let mut issue = empty_issue("PROJ-16");
+            for name in &names {
+                issue.fields.insert(name.clone(), object(&[("key", "k"), ("name", "n"), ("id", "1")]));
+            }
+            let ops = build_ops_for_issue(&issue);
+            for special in ["ASSIGNED", "CREATED", "REPORTED", "HAS_TYPE", "PART_OF"] {
+                proptest::prop_assert!(!edge_types(&ops).iter().any(|t| t == special), "{} from {:?}", special, names);
+            }
+        }
     }
 
     #[test]
@@ -898,8 +1024,8 @@ mod tests {
         );
         issue_type.insert("subtask".to_string(), FirstTierField::Bool(false));
         issue
-            .fields
-            .insert("Issue Type".to_string(), FieldValue::Object(issue_type));
+            .system_fields
+            .insert("issuetype".to_string(), FieldValue::Object(issue_type));
 
         let ops = build_ops_for_issue(&issue);
         assert_eq!(ops.len(), 3);
@@ -931,8 +1057,8 @@ mod tests {
             FirstTierField::Option(Some("Platform".to_string())),
         );
         issue
-            .fields
-            .insert("Project".to_string(), FieldValue::Object(project));
+            .system_fields
+            .insert("project".to_string(), FieldValue::Object(project));
 
         let ops = build_ops_for_issue(&issue);
         assert_eq!(ops.len(), 3);
@@ -970,8 +1096,8 @@ mod tests {
             FirstTierField::Option(Some("Platform".to_string())),
         );
         issue
-            .fields
-            .insert("Project".to_string(), FieldValue::Object(project));
+            .system_fields
+            .insert("project".to_string(), FieldValue::Object(project));
 
         let ops = build_ops_for_issue(&issue);
 
@@ -1286,24 +1412,24 @@ mod tests {
             FirstTierField::Option(Some("jdoe".to_string())),
         );
         issue
-            .fields
-            .insert("Assignee".to_string(), FieldValue::Object(assignee));
+            .system_fields
+            .insert("assignee".to_string(), FieldValue::Object(assignee));
         let mut issue_type = HashMap::new();
         issue_type.insert(
             "name".to_string(),
             FirstTierField::Option(Some("Bug".to_string())),
         );
         issue
-            .fields
-            .insert("Issue Type".to_string(), FieldValue::Object(issue_type));
+            .system_fields
+            .insert("issuetype".to_string(), FieldValue::Object(issue_type));
         let mut project = HashMap::new();
         project.insert(
             "id".to_string(),
             FirstTierField::Option(Some("10042".to_string())),
         );
         issue
-            .fields
-            .insert("Project".to_string(), FieldValue::Object(project));
+            .system_fields
+            .insert("project".to_string(), FieldValue::Object(project));
         issue.fields.insert(
             "Labels".to_string(),
             FieldValue::List(vec![NestedListTypes::Option(Some("backend".to_string()))]),
