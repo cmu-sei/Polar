@@ -813,6 +813,15 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
       the pod and type cannot tell a retry from a second request; keying an admission on the request's key (the same
       CSR admitted again within the bound) and the custodian re-asking with the same CSR would close all three where
       the voucher's memory closes one.
+    - [ ] DECIDED 2026-11-01 (the maintainer), part of the same fix: an escrow certificate whose key was never escrowed
+      locks its workload out for good. A pod issued the workload's one escrow certificate that dies before it stores the
+      sealed key leaves a live certificate no one holds the key of, and every later pod, its replacement included (a new
+      UID), is refused `AlreadyHasValidServiceCertificate`, final, once the issuing custodian's window is past
+      (`first_issuance`, `credentials-agent/consume/src/agent_escrow_issuance.rs:112`). Older than multi-instance; many
+      pods starting at once make it likelier. The rule: past the issuing custodian's window, an escrow certificate with
+      no stored key is abandoned, and the credentials agent revokes it (`Superseded`, in the ledger) and issues a new one,
+      still serialized. Revoking it loses nothing: the certificate lookup can hand it out once it is recorded, but
+      whatever was encrypted to it in that gap is unreadable already, since no one holds its key.
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
