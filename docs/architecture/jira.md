@@ -366,3 +366,42 @@ answers and the design principles were silent:
     once it injects nothing.
 13. **The old hashes in this page** were the review fixes' before the rebase; replaced by the rebased ones.
 
+
+## Seen on a cluster (u7c, sandbox-local, 2026-11-01)
+
+Main at `8e2967b1`, every image rebuilt and redeployed; jira-observer reading `https://issues.apache.org/jira`
+anonymously (`JIRA_ANONYMOUS` true, `JIRA_DEPLOYMENT` server). The graph still held the fake Jira's 120 issues from
+2026-10-30, so the first pull started at the fake's newest (`2026-10-31 13:13:41Z`), not at `QUERY_DATE`.
+
+- **Start:** anonymous, the users observer not started, `serverInfo` read (`deploymentType "Server"`), no restart loop.
+- **Completeness:** every issue Apache answered as updated since the cursor's start was in the graph with its
+  `updated_ms`: 656 of 656 after the first pull, 668 of 668 after the rejuvenation, none missing, none with an older
+  update time than Apache's (key sets compared, one search walk of 100 a page). 30 further `JiraIssue` nodes hold only
+  `key`: the parents of sub-tasks, made by the `CHILD_OF` fix (none was ever written before).
+- **Across a rejuvenation (22:30:38, in place):** the new process's first pull started at the graph's newest issue
+  (22:04:34, written by the 22:04 pull); polar-init did not wait on the renewal rule.
+- **Pulled health:** 14 `(:AgentHealth)`, every agent `healthy`.
+- **A signed update that cannot work, then one that can** (`polar-sign sign --push`, settings version 1 then 2):
+  `JIRA_URL` set to the placeholder was applied the same second (`changed=["JIRA_URL"]`), the observers stopped, the
+  agent held `Configuration` and stayed up, the next round wrote `unhealthy` / `configuration` with its transition;
+  version 2 (Apache's address) released the hold ("the standing problem (configuration) is resolved"), respawned the
+  observers, the pull resumed from the graph's newest issue, and the next round wrote `healthy`. No container restart
+  from either (the container's restart count stayed at the rejuvenation's 1).
+
+Found, not fixed:
+- **Projects never reach the graph.** Apache lists 674 projects (all decode as `JiraProject`); the graph has 51, the
+  ones issues name (`project_ops`). The listing after the respawn (22:41:42) went to the processor as one `UpsertNodes`
+  of 674 items and failed 30 s later with `ConnectionTimedOut`. The earlier pulls (21:34, 22:04, 22:30) left neither an
+  error nor the nodes; not yet explained (a batch published before a restarted processor subscribes is lost by design,
+  delivery being best attempt, but 22:04 had both up). To find, test first: a large `UpsertNodes` against a real Neo4j.
+- **An empty batch is an empty statement:** `UpsertNodes { items: [] }` (groups read anonymously: none) compiles to
+  `""`, which Neo4j refuses (`SyntaxError: Unexpected end of input`), counted as a graph op failure.
+- **A restart between two health rounds leaves no transition:** `uptime_secs` falls, `transitions` does not show it.
+- **The hold's message from a signed update** says "set workloads.jira-observer.env in the target's config.nuon", the
+  render-time remedy; for a setting a signed update made, the remedy is another signed version.
+- **polar-sign:** `--push` needs the git server's name resolved to the forward (`http.<url>.curloptResolve`, as
+  `just polar-git-config` prints) and its cached clone (`~/.cache/polar-sign/schedules`) cannot fast-forward after a
+  cluster's schedules repository is seeded anew; `--workdir` with a fresh folder worked.
+- **Seen on the way:** `~/.config/polar-admin/djshepard.chain.pem`'s first certificate is not the one
+  `djshepard.key` belongs to (`djshepard.crt` is); the up.nu Neo4j forward on 7473 was tied to a replaced pod (not
+  probed, by design).
