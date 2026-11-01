@@ -1172,6 +1172,7 @@ dependencies = [
  "cassini-broker",
  "cassini-client",
  "cassini-types",
+ "cert-client",
  "cert-issuer-common",
  "chrono",
  "credentials-agent-consumer",

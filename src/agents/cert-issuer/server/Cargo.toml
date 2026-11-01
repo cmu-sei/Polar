@@ -77,3 +77,5 @@ polar-policy.workspace = true
 tracing-subscriber.workspace = true
 # The credentials agent's asker and ledger, which the same test runs as the other side of the record.
 credentials-agent-consumer = { path = "../../credentials-agent/consume" }
+# The voucher's client of cert-issuer over mTLS, and a new pod's on its token, in the test of broker restarts.
+cert-client = { path = "../client" }

@@ -35,6 +35,11 @@
 //! one), bound to a pod, for a client or server certificate, and admitted by the renewal rule: not issued one of that
 //! type for that pod within the bound (docs/architecture/deployments.md, "The renewal rule"). The attestation agent's
 //! instance check joins them once it exists (step 6).
+//!
+//! A request is given one answer, however often it is offered ([`Decisions`]). cert-issuer offers what it holds again
+//! each time it hears this agent, and lists it over mTLS while the session is lost, so an answer lost with a session
+//! that ended is asked for again; deciding it again would find the pod admitted by the first answer and refuse it as
+//! too soon, and cert-issuer takes a refusal as final (docs/architecture/broker-baseline.md, "The fifth set").
 
 use crate::ledger::LedgerMessage;
 use cassini_client::TcpClientMessage;
@@ -43,13 +48,59 @@ use cert_issuer_common::CertType;
 use cert_issuer_common::held::{HELD_REPLIES_TOPIC, HeldDecision, HeldOffer, HeldReply};
 use credentials_agent_common::issuance::WorkloadCertType;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
 use tracing::{info, warn};
 
 /// How often the held requests are asked for over mTLS while the Cassini session is lost: well inside cert-issuer's
 /// presence bound, so it keeps hearing this agent.
 pub const HELD_POLL_EVERY: Duration = Duration::from_secs(10);
+
+/// How many answers are remembered: four times what cert-issuer holds at once (`MAX_HELD`, 64).
+pub const DECISIONS_KEPT: usize = 256;
+
+/// What makes two offers one request, as cert-issuer keys what it holds: the identity, the pod, the type and the CSR.
+/// Not the offer's id, which a cert-issuer that restarted gives anew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Request {
+    identity: String,
+    instance_binding: Option<String>,
+    cert_type: CertType,
+    csr_pem: String,
+}
+
+impl Request {
+    fn of(offer: &HeldOffer) -> Self {
+        Self {
+            identity: offer.identity.clone(),
+            instance_binding: offer.instance_binding.clone(),
+            cert_type: offer.cert_type.clone(),
+            csr_pem: offer.csr_pem.clone(),
+        }
+    }
+}
+
+/// The answers given, the oldest forgotten first once [`DECISIONS_KEPT`] are kept.
+#[derive(Debug, Default)]
+pub struct Decisions {
+    given: VecDeque<(Request, HeldDecision)>,
+}
+
+impl Decisions {
+    fn get(&self, request: &Request) -> Option<HeldDecision> {
+        self.given
+            .iter()
+            .find(|(given, _)| given == request)
+            .map(|(_, decision)| decision.clone())
+    }
+
+    fn keep(&mut self, request: Request, decision: HeldDecision) {
+        if self.given.len() >= DECISIONS_KEPT {
+            self.given.pop_front();
+        }
+        self.given.push_back((request, decision));
+    }
+}
 
 /// Whether to vouch for `offer`: a bootstrap service's (`bootstrap`, from the authority model), not `own_identity`,
 /// bound to a pod, for a client or server certificate, and not `too_soon` by the renewal rule.
@@ -129,12 +180,25 @@ pub struct HeldVoucherArgs {
 pub struct HeldVoucherState {
     args: HeldVoucherArgs,
     lost: bool,
+    decisions: Decisions,
 }
 
 pub struct HeldVoucher;
 
 impl HeldVoucherState {
-    async fn decide(&self, offer: &HeldOffer) -> HeldDecision {
+    /// The answer to `offer`: the one given before, if it was offered before, else decided now and kept.
+    async fn decide(&mut self, offer: &HeldOffer) -> HeldDecision {
+        let request = Request::of(offer);
+        if let Some(decision) = self.decisions.get(&request) {
+            info!(held = %offer.id, identity = %offer.identity, decision = ?decision, "a held request offered again: answered as before");
+            return decision;
+        }
+        let decision = self.decide_now(offer).await;
+        self.decisions.keep(request, decision.clone());
+        decision
+    }
+
+    async fn decide_now(&self, offer: &HeldOffer) -> HeldDecision {
         let (bootstrap, own) = (&self.args.bootstrap, &self.args.own_identity);
         // The renewal rule is asked last, and only of an offer the other rules allow, since admitting records it.
         let decision = match (
@@ -178,7 +242,11 @@ impl Actor for HeldVoucher {
         _myself: ActorRef<Self::Msg>,
         args: HeldVoucherArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(HeldVoucherState { args, lost: false })
+        Ok(HeldVoucherState {
+            args,
+            lost: false,
+            decisions: Decisions::default(),
+        })
     }
 
     async fn handle(
@@ -516,6 +584,98 @@ mod tests {
         assert_eq!(published[0].1.decision, HeldDecision::Vouch);
     }
 
+    /// The decisions published, in order.
+    fn decisions(rig: &Rig) -> Vec<HeldDecision> {
+        rig.published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, reply)| reply.decision.clone())
+            .collect()
+    }
+
+    // An answer lost with a session that ended (docs/architecture/broker-baseline.md, "The fifth set"): cert-issuer
+    // offers the request again, and the credentials agent, having admitted the pod when it vouched, refused the second
+    // offer as "too soon", which cert-issuer takes as final.
+    #[tokio::test]
+    async fn the_same_request_offered_again_is_given_the_answer_it_was_given_first() {
+        let rig = rig(HandshakeClient::new("http://127.0.0.1:1".to_string())).await;
+        let o = offer(CASSINI, Some("pod-2"), CertType::Server);
+        rig.voucher
+            .send_message(offered(&o, Some(CERT_ISSUER)))
+            .unwrap();
+        rig.voucher
+            .send_message(offered(&o, Some(CERT_ISSUER)))
+            .unwrap();
+        // Held again under a new id, as by a cert-issuer that restarted: the same request.
+        let mut again = o.clone();
+        again.id = "h2".to_string();
+        rig.voucher
+            .send_message(offered(&again, Some(CERT_ISSUER)))
+            .unwrap();
+        // Another CSR from the same pod, within the bound, is the renewal rule's to refuse, as before.
+        let mut other = o.clone();
+        other.id = "h3".to_string();
+        other.csr_pem = "another csr".to_string();
+        rig.voucher
+            .send_message(offered(&other, Some(CERT_ISSUER)))
+            .unwrap();
+        settle().await;
+        let decided = decisions(&rig);
+        assert_eq!(decided.len(), 4);
+        assert_eq!(
+            decided[..3],
+            [
+                HeldDecision::Vouch,
+                HeldDecision::Vouch,
+                HeldDecision::Vouch
+            ]
+        );
+        assert!(refused(decided[3].clone()).contains("five minutes"));
+    }
+
+    // The same, the answer over Cassini lost and the request listed over mTLS while the session is down.
+    #[tokio::test]
+    async fn a_request_answered_over_cassini_and_listed_again_over_mtls_is_given_the_same_answer() {
+        let server = MockServer::start().await;
+        let o = offer(CASSINI, Some("pod-9"), CertType::Server);
+        Mock::given(method("GET"))
+            .and(path("/internal/held"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::held::HeldList {
+                    held: vec![o.clone()],
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/internal/held/h1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"taken": true})),
+            )
+            .mount(&server)
+            .await;
+        let rig = rig(HandshakeClient::new(server.uri())).await;
+        rig.voucher
+            .send_message(offered(&o, Some(CERT_ISSUER)))
+            .unwrap();
+        rig.voucher
+            .send_message(HeldVoucherMessage::CassiniLost)
+            .unwrap();
+        rig.voucher.send_message(HeldVoucherMessage::Poll).unwrap();
+        settle().await;
+        assert_eq!(decisions(&rig), [HeldDecision::Vouch]);
+        let answered: Vec<HeldDecision> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(answered, [HeldDecision::Vouch]);
+    }
+
     #[tokio::test]
     async fn while_its_cassini_session_is_lost_it_lists_and_answers_over_mtls_and_not_otherwise() {
         let server = MockServer::start().await;
@@ -567,5 +727,68 @@ mod tests {
             2,
             "back over Cassini: no more polling"
         );
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashMap;
+
+        /// An offer of one of a few requests: a pod of two, a type of two, a CSR of two, under an id of two (cert-issuer
+        /// holding it again after a restart is a new id for the same request).
+        fn an_offer() -> impl Strategy<Value = HeldOffer> {
+            (0..2u8, prop::bool::ANY, 0..2u8, 0..2u8).prop_map(|(pod, server, csr, id)| {
+                let mut o = offer(
+                    CASSINI,
+                    Some(&format!("pod-{pod}")),
+                    if server {
+                        CertType::Server
+                    } else {
+                        CertType::Client
+                    },
+                );
+                o.csr_pem = format!("csr-{csr}");
+                o.id = format!("h{id}");
+                o
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+            /// However often and in whatever order the requests are offered, each is given one answer, the one it was
+            /// given first; and no pod is vouched for in two requests of one type within the renewal bound.
+            #[test]
+            fn each_request_is_given_one_answer_and_a_pod_one_vouch_of_each_type(
+                offers in proptest::collection::vec(an_offer(), 1..12)
+            ) {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                runtime.block_on(async {
+                    let rig = rig(HandshakeClient::new("http://127.0.0.1:1".to_string())).await;
+                    for o in &offers {
+                        rig.voucher.send_message(offered(o, Some(CERT_ISSUER))).unwrap();
+                    }
+                    let began = std::time::Instant::now();
+                    while rig.published.lock().unwrap().len() < offers.len() {
+                        prop_assert!(began.elapsed() < Duration::from_secs(10), "not every offer was answered");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    let decided = decisions(&rig);
+                    let mut first: HashMap<(Option<String>, CertType, String), HeldDecision> = HashMap::new();
+                    let mut vouched: HashMap<(Option<String>, CertType), String> = HashMap::new();
+                    for (o, decision) in offers.iter().zip(decided) {
+                        let request = (o.instance_binding.clone(), o.cert_type.clone(), o.csr_pem.clone());
+                        let given = first.entry(request).or_insert_with(|| decision.clone());
+                        prop_assert_eq!(&*given, &decision);
+                        if decision == HeldDecision::Vouch {
+                            let csr = vouched
+                                .entry((o.instance_binding.clone(), o.cert_type.clone()))
+                                .or_insert_with(|| o.csr_pem.clone());
+                            prop_assert_eq!(&*csr, &o.csr_pem);
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 }
