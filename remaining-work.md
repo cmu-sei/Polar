@@ -748,8 +748,8 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   the StateActor at a short fixed interval (a declared variable) before the caller hears anything, so the domain's
   backoff sees only real failures. Found on u7c: jira-observer's Jira backoff (to 15 minutes) delayed the first cursor
   pull 14 minutes after the schema arrived (soft-state.md, "The rebuild, seen on a cluster").
-- [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; analysis in `docs/architecture/authority-model.md`, open
-  question 11; NOT DECIDED). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
+- [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; DECIDED 2026-11-01, `docs/architecture/authority-model.md`,
+  "Multi-instance workloads"; the load harness is its first user, then Blitz; next to build). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
   topics while a shared one supersedes. Recommended instead of their family of identities: one exact workload marked
   multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
   certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the

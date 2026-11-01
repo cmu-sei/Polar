@@ -688,7 +688,51 @@ To settle one at a time, before building:
     pods wait out R instead of being superseded (pulled health and the Reaper see them unresponsive). Their questions,
     under it: (1) neither a namespace prefix nor a ServiceAccount label; the token already names the pod; (2) implied
     topics are the workload's, none per instance; (3) no way exists today: the `run` kind uses fixed catalog identities.
-    After the backpressure merge a refused publish reaches their client as a typed `Denied`, not a timeout. Not decided.
+    After the backpressure merge a refused publish reaches their client as a typed `Denied`, not a timeout. DECIDED
+    2026-11-01: the multi-instance workload, "Multi-instance workloads" below.
+
+## Multi-instance workloads (decided 2026-11-01, not built)
+
+Decided by the maintainer, answering open question 11 (Blitz's per-run build identities) and the load harness's need for
+several concurrent publishers (broker-baseline.md, "The fifth set": one publisher and one subscriber could not reach the
+runtime budget's growth threshold). One mechanism serves both; the harness is its first user and its test bed.
+
+**What a multi-instance workload is.** A catalog workload whose entry says `instances: "many"` (default `"one"`; a field of
+the workload, any kind may use it). It is one exact workload: one name, one ServiceAccount, one identity
+`<workload>.<namespace>.serviceaccount.<domain>`, its topics and groups in the catalog as any workload's, signed off by
+applying the catalog. Many pods of it run at once; each is an INSTANCE.
+
+**What names an instance.** The pod, from the bound ServiceAccount token the issuer already verifies (within the trust
+base: the token is Kubernetes'): its UID is the key (unique, never reused; what `instance_binding` already holds,
+`instance_binding_claim`, `cert-issuer/server/src/config.rs:93`), and its name travels beside it for people (it names
+the Job, and so the build or the run). Nothing about the instance is self-reported.
+
+**What changes, only for a multi-instance workload:**
+
+- Issuance: the client certificate carries the instance: the pod UID and the pod name, as names of their own beside the
+  identity's DNS SAN and the `p:`, `g:` and `c:` names (the exact form is the build's to choose, documented and tested).
+- Supersession is keyed by `(identity, instance)`, not by identity: at the broker (`supersede_older`,
+  `cassini/broker/src/session.rs`, today `session.identity == identity`), and in the credentials agent's ledger, where a
+  reissue supersedes a still-valid certificate (`events.rs:63`, `authority_state.rs`). Two concurrent pods are two
+  certificates and two sessions; a pod restarted in place (a new key, the same UID) still supersedes itself.
+- The broker stamps the instance beside `published_by` on every delivery, taken from the verified certificate like the
+  identity, so a message names the workload and the pod it came from. This changes the wire: PROTOCOL VERSION 2; a
+  client and a broker of different versions are refused by name at registration, as built; every image is redeployed
+  together.
+- Given up, by design: the credentials agent's "current certificate of this identity" lookup is not offered for a
+  multi-instance workload (it has several); a finished pod's session is not superseded by a successor and waits out its
+  retention (pulled health and the Reaper will see it as unresponsive).
+
+**What does not change.** `workload_of`, the authority model's facts by workload, the judge, Cedar's `Identity` (rules
+name the workload), the builder's own-name check, topics as exact names, a single-instance workload's behaviour.
+
+**Render.** `in_place_problems` (`infra/rules.nu:81`) requires one replica and `Recreate` of a Deployment with polar-init;
+a multi-instance workload is exempt from the single-replica rule, and a `run`-kind Job may run several pods in parallel.
+
+**Its first users.** The load harness: `harness-producer` becomes multi-instance, and a plan's `producers: k` runs k of
+its pods at once, each its own session (today they supersede each other); `infra/load-plans/pressure.nuon` drives the
+budget past its growth threshold. Then Blitz's build jobs: one `build-job` workload, multi-instance; the orchestrator
+creates Jobs, not ServiceAccounts.
 
 ## Build order, tests first
 
