@@ -670,6 +670,48 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
+### A retry in place (2026-11-01, decided here by (a)'s reasoning, for review)
+
+*Found on u7c* (`broker-baseline.md`, "The fifth set", "Found on the way"): jira-observer and jira-processor stayed in
+`Init:CrashLoopBackOff`, every run of `polar-init` refused "the slot is sealed: a certificate is installed in it".
+The cause: `RestartAllContainers` is the main container's rule (`deployments.md`, "How the move is done"), so an
+init container that fails is restarted alone, and the daemon, a native sidecar, is not. A run of `polar-init` that
+installed a certificate (the custodian's, or a bootstrap service's own) and then stopped (its custodian not ready by
+`CUSTODIAN_DEADLINE`, a refusal, a crash) leaves the slot sealed in a daemon that lives on, and every later run in the
+pod began with `MakeCsr` on it. Nothing here says sealing must be final for the pod: (a) was decided to keep the
+installer apart from the workload, which starts only once every init container has finished, so every run of
+`polar-init` in one daemon's life comes before the workload runs.
+
+*What a retry does with a slot it sealed itself: reuse what it holds if it is still good, never unseal.* Unsealing on
+request would be (c): the daemon cannot tell `polar-init` from the workload, so whatever request unsealed for one would
+unseal for the other. Reading is already the installer's (`Certificate`), so a run that finds a slot holding a
+certificate judges it (`cert_client::output::judge_held`: signed by the pinned CA, valid now, naming the identity and
+the names it would ask for, for the use it would ask for; the daemon checked the key when it installed it) and goes on
+from it: the custodian's certificate is not bought again with the token, a bootstrap service's is written with the
+pinned CA (`held_before`, `polar-init/src/main.rs`). The plan given again is the same plan (it is made from the pod's
+own `--cert`s), and the daemon answers the same plan as taken and changes nothing; any other plan is still `Sealed`
+(`Custody::bootstrap`). A sealed slot holding a certificate the pod cannot use (expired, another CA, with no pinned CA
+to judge it by) stops `polar-init` and says that only a new pod gets past it. Another pod or identity cannot reuse a
+slot: a daemon is its pod's, and what it holds is judged for this pod's identity.
+
+*A custodian that failed is not reused: the daemon ends.* Its authority is spent (each kind of request answered once,
+within five minutes of its certificate: "Part A's bootstrap: the custodian", item 3), so what it holds cannot finish.
+It ends `FAILED_GRACE` (5 s) after the failure, once `polar-init`, which asks `Ready` every half second, has been told,
+as it ends on revocation (`polar_custody_daemon::end_once_failed`, exit 4), and the kubelet starts it again empty, for
+the next run of `polar-init` to start from. A failure is said only before the custodian is ready (`set_failed`), so a
+daemon whose workload runs never ends this way. The next run's custodian certificate falls under the renewal rule's
+five minutes for its pod, so a pod whose custodian failed waits that out in its init container's backoff.
+
+*Tests* (each failed before the change with the slot sealed): `polar-init`'s
+`polar_init_run_again_in_the_same_pod_goes_on_from_what_its_first_run_sealed` (a first run that buys the custodian's
+certificate, gives the plan and stops at its deadline, and a second in the same daemon that buys nothing and writes what
+the custodian fetched), `a_bootstrap_service_s_polar_init_run_again_in_the_same_pod_writes_what_its_slots_hold` and
+`a_sealed_slot_this_pod_cannot_use_stops_polar_init_and_says_why`; `polar-custody`'s plan test (the same plan again
+taken and nothing changed, another refused) and the property that nothing changes an installed slot, unchanged;
+`cert-client`'s `a_certificate_the_daemon_holds_is_judged_for_all_but_its_key`; the daemon's ending
+(`a_daemon_whose_custodian_failed_ends_once_polar_init_has_had_time_to_hear_why`, and one that fetched everything does
+not end). Not yet on a cluster; the pods stuck on u7c need replacing once, as before.
+
 ## Step 5, revocation: the plan (2026-10-27, its question decided)
 
 What is there, read for this:

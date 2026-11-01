@@ -366,6 +366,18 @@ Each step tests first, with property tests where an invariant holds.
      the credentials agent's Cassini session is lost, it polls cert-issuer over mTLS (`GET /internal/held`) and answers
      there (`POST /internal/held/<id>`); each poll counts as its presence, so a Cassini restart completes with nothing
      but cert-issuer and the credentials agent up.
+   - *One answer to a request, however often it is offered (2026-11-01, found in the fifth set's broker restarts,
+     `broker-baseline.md`).* Being offered again is how a lost answer is recovered, and the voucher used to decide
+     each offer afresh: its first decision admitted the pod under the renewal rule, so an answer lost with a session
+     that ended (or still in the voucher's outbox while the broker was away) was followed by "too soon" for the same
+     request, which cert-issuer takes as final. The voucher now keeps the answers it gave (`Decisions`, the last 256,
+     keyed as cert-issuer keys what it holds: identity, pod, type and CSR, not the offer's id, which a cert-issuer that
+     restarted gives anew) and gives each request its first answer again, over Cassini and over mTLS alike. Another
+     CSR from the same pod within the bound is still refused. Tests: `held_voucher.rs`, the same request offered again
+     and listed again over mTLS, and a property (each request one answer, a pod one vouch of each type); and
+     `cert-issuer/server/tests/broker_restarts_test.rs`, cert-issuer run whole against a broker restarted twelve times
+     in a row, orderly and at once by turns, each time as a held request's offer reaches the credentials agent, which
+     was refused at the first or second restart before the change.
 
    *Built (2026-10-26): 3, and with it the floor obeys step 2's state.* cert-issuer: `held.rs` (the table: keyed by
    workload, pod, type and CSR, at most 64, kept 10 minutes from the last ask, the first answer final), `gate.rs`

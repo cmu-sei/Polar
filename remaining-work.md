@@ -768,6 +768,24 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   - Two bugs: issuance stopped after the tenth broker restart in a row (cert-issuer's held offer to the credentials agent
     never answered, until cert-issuer restarted); a pod whose custody slot was sealed by a failed first attempt fails every
     retry in place (`Init:CrashLoopBackOff`, jira-observer and jira-processor on u7c).
+    - [x] The held path under restarts (2026-11-01; `core-restarts.md`, "3 in detail", "One answer to a request"): the
+      voucher decided each offer afresh, and its first decision admitted the pod, so an answer lost with a session that
+      ended came back as "too soon" for the same request, final at cert-issuer. It keeps its answers now. The incident's
+      own logs were not kept (only the sink's `polar-init`), so this is a defect found on its path, not its proven
+      cause; `cert-issuer/server/tests/broker_restarts_test.rs` restarts a broker twelve times in a row with issuance
+      working after each (refused at the first or second before). Not yet on a cluster.
+    - [x] A retry in place (2026-11-01; `key-custody.md`, "A retry in place", decided by (a)'s reasoning, for review):
+      `polar-init` run again in the same pod reuses what the daemon's slots hold if still good, the same plan is taken
+      again, and a daemon whose custodian failed ends to start again empty. Never unsealed by request. Not yet on a
+      cluster; the u7c pods stuck now need replacing once.
+    - [ ] The same shape remains elsewhere: a request asked again after its reply was lost meets the renewal rule as a
+      second request. `polar-init` through the observer asks again after a 504 (a lost `Issue` reply comes back
+      `TooSoon`, final for `polar-init`; its pod recovers after five minutes of init backoff), and the custodian asks
+      again after `REPLY_TIMEOUT` with a new key (`Bootstrap::next` makes a new CSR), so its re-ask is `TooSoon` and
+      the custodian fails (now: the daemon ends and the pod waits the bound out). For the maintainer: the rule keyed on
+      the pod and type cannot tell a retry from a second request; keying an admission on the request's key (the same
+      CSR admitted again within the bound) and the custodian re-asking with the same CSR would close all three where
+      the voucher's memory closes one.
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`

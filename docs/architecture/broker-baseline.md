@@ -910,10 +910,20 @@ its default.
   restarting cert-issuer did (its held offer is made once and not again). The rest of the plan ran with a watchdog that
   would have restarted cert-issuer for a pod held in its init for two minutes; it never had to. Not reproduced; its own
   item.
+  *Followed up 2026-11-01* (`core-restarts.md`, "3 in detail", "One answer to a request"): the run kept only the sink's
+  `polar-init` log (an `OpenSession` relayed every 15 s, never answered), not cert-issuer's, the credentials agents' or
+  the broker's, so which request stalled at 02:17 cannot be read now. In process, cert-issuer run whole against a broker
+  restarted again and again showed a defect on the held path that a lost answer turns final: an offer whose answer was
+  on its way when the sessions ended was offered again (or listed over mTLS) and refused as "too soon", the pod having
+  been admitted by the first answer. Fixed in the voucher; a restart in a row now leaves issuance working
+  (`broker_restarts_test.rs`, twelve). The same shape stays where a request is asked again after a lost reply under the
+  renewal rule (`remaining-work.md`).
 - **After the cluster was put back, jira-processor stayed in `Init:Error`**: its `polar-init` was restarted while the
   custody daemon beside it kept the custodian's slot sealed from the first try ("the slot is sealed: a certificate is
   installed in it"), so every retry is refused. The pod needs replacing; jira-observer, which has no Jira to reach on
-  u7c, was failing before the set.
+  u7c, was failing before the set. *Fixed 2026-11-01* (`key-custody.md`, "A retry in place"): a run of `polar-init`
+  again in the same pod goes on from what the daemon holds, and a daemon whose custodian failed ends to start again
+  empty.
 
 ## What measuring it found
 
