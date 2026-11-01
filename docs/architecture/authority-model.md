@@ -734,6 +734,33 @@ the Job, and so the build or the run). Nothing about the instance is self-report
   never an instance's mTLS certificate. To check in the build: what `certificate_for` returns today; if it is the mTLS
   certificate, the lookup points at the wrong key for every workload, not only multi-instance ones.
 
+**Encryption, and its threat model (DRAFT 2026-11-01, for the maintainer's review).** Two things can be encrypted to:
+
+- *The workload* ("whoever does this work": a job, a secret at rest): sealed to the workload's escrow key, one per
+  workload, held only in each instance's custody daemon (`key-custody.md`, "The escrow keys into the daemon"); the
+  workload itself only asks its daemon to unwrap. A shared subscription (a later "load balancer") needs exactly this: the
+  broker picks the instance, so a sender cannot seal to one.
+- *One instance* (a reply to the pod that asked, anything for that pod alone): sealed to a key made for that one exchange
+  by the instance's custody daemon, its public half sent in the request (as `EscrowExchange` does today); no stored
+  per-instance key, no directory. Rule: a payload sealed to an instance never goes on a shared subscription; replies go to
+  every instance of the workload (only the sealed-for one can open them) or are routed by the broker to the instance
+  stamped beside `published_by`.
+
+What changes against `key-custody.md`'s table, "What it protects", with N instances:
+
+| Threat | One instance (as built) | N instances of one workload |
+|---|---|---|
+| A compromised workload container | uses its daemon as an unwrap oracle while it runs; never has the key; revocation destroys the slot | the same, for its own instance only; the other instances are untouched; no rotation needed (the key never left a daemon) |
+| It asks its daemon to open another instance's exchange | not applicable | not possible: that exchange's key is in the other daemon |
+| It reads another instance's replies (fan-out) | not applicable | sees the ciphertext only |
+| A compromised custody daemon (a bug in Polar's own code) | the workload's key is exposed | the same key, now held in N daemons on several nodes: N times the surface; exposed for every instance, past and future, so the workload's escrow key is rotated, re-escrowed, and what is stored under it re-sealed |
+| Root on a node | outside the boundary (Kubernetes is the trust base) | unchanged; the key sits on more nodes |
+| A compromised instance asks for more copies of the key | not applicable | retrieval is per pod (its token, its custodian), as for one |
+
+So rotation is for the DAEMON's compromise, not the workload's. Open: whether revocation records why (a daemon or key
+compromise against an ordinary end) so that rotation follows it, and who decides a daemon is compromised (the attestation
+agent's word, an administrator's signed command).
+
 **What does not change.** `workload_of`, the authority model's facts by workload, the judge, Cedar's `Identity` (rules
 name the workload), the builder's own-name check, topics as exact names, a single-instance workload's behaviour.
 
