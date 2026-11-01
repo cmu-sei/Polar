@@ -262,6 +262,23 @@ struct SelfTestState {
     connected: bool,
 }
 
+/// The longest a clean shutdown waits for the client to have said goodbye to the broker before it stops it anyway.
+const GOODBYE_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether the certificate at `path` names an instance (`cert_issuer_common::instance`): the agent is one pod of a
+/// multi-instance workload (docs/architecture/authority-model.md, "Multi-instance workloads"). A certificate that cannot
+/// be read names none: the agent is taken for a single instance, whose session is kept for its successor.
+pub(crate) fn names_an_instance(path: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|pem| {
+            cert_issuer_common::instance::extract_instance(&pem)
+                .ok()
+                .flatten()
+        })
+        .is_some()
+}
+
 /// What the supervisor needs to make a Cassini client.
 struct ClientSetup {
     subscriptions: Vec<Subscription>,
@@ -280,6 +297,9 @@ struct ClientParts {
     events_output: Arc<OutputPort<ClientEvent>>,
     router: ActorRef<polar_router::RouterMessage>,
     tcp_client: TcpClient,
+    /// Whether its certificate names an instance (one pod of a multi-instance workload's): a clean shutdown then ends
+    /// its session at once (docs/architecture/authority-model.md, "Multi-instance workloads").
+    one_of_many: bool,
     crypto: Option<CryptoHandle>,
     state: Option<crate::state::StateHandle>,
 }
@@ -526,6 +546,7 @@ impl InfrastructureSupervisor {
 
         let client_config =
             TCPClientConfig::from_env(&*setup.config).map_err(ActorProcessingErr::from)?;
+        let one_of_many = names_an_instance(&client_config.client_certificate_path);
         let tcp_client = setup
             .tcp_spawner
             .spawn(
@@ -587,11 +608,36 @@ impl InfrastructureSupervisor {
                 events_output,
                 router,
                 tcp_client,
+                one_of_many,
                 crypto,
                 state,
             },
             self_test,
         ))
+    }
+
+    /// Tells the broker this session is done (the client's goodbye, `Disconnect`), and waits for the client to have said
+    /// it, at most `GOODBYE_WAIT`: the broker then ends the session at once, where a connection that only closed would
+    /// leave it detached for the retention window.
+    async fn say_goodbye(service_name: &str, client: &ClientParts) {
+        tracing::info!(
+            "InfrastructureSupervisor: one instance of a multi-instance workload: telling the broker its session is done"
+        );
+        if let Err(e) = client
+            .tcp_client
+            .as_actor_ref()
+            .send_message(cassini_client::TcpClientMessage::Disconnect { trace_ctx: None })
+        {
+            tracing::warn!("InfrastructureSupervisor: could not say goodbye to the broker: {e}");
+            return;
+        }
+        let transport = format!("{service_name}.tcp");
+        let deadline = tokio::time::Instant::now() + GOODBYE_WAIT;
+        while ractor::registry::where_is(transport.clone()).is_some()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn classify(state: &InfrastructureSupervisorState, cell: &ActorCell) -> Child {
@@ -1030,6 +1076,12 @@ impl Actor for InfrastructureSupervisor {
                     return Ok(());
                 }
                 tracing::info!("InfrastructureSupervisor: proceeding with its own shutdown");
+                // One pod of a multi-instance workload ends its session at once: no successor of its instance will
+                // supersede it, so left to the retention window it would wait there ten minutes as unresponsive. A
+                // single-instance workload's session is kept for its successor, as always.
+                if let Some(client) = state.client.as_ref().filter(|client| client.one_of_many) {
+                    Self::say_goodbye(&state.service_name, client).await;
+                }
                 myself
                     .stop_children_and_wait(
                         Some("infrastructure shutdown".to_string()),
@@ -1112,6 +1164,8 @@ mod tests {
         published: Published,
         /// How many times it was told to judge its refusals again.
         judged: Arc<AtomicUsize>,
+        /// How many times it said goodbye to the broker (`Disconnect`), after which it stops, as the real client does.
+        goodbyes: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -1130,12 +1184,17 @@ mod tests {
 
         async fn handle(
             &self,
-            _myself: ActorRef<Self::Msg>,
+            myself: ActorRef<Self::Msg>,
             message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             if let TcpClientMessage::JudgeAgain = message {
                 self.judged.fetch_add(1, Ordering::SeqCst);
+            }
+            if let TcpClientMessage::Disconnect { .. } = message {
+                self.goodbyes.fetch_add(1, Ordering::SeqCst);
+                myself.stop(Some("goodbye".to_string()));
+                return Ok(());
             }
             if let TcpClientMessage::Publish { topic, payload, .. } = message {
                 self.published
@@ -1175,6 +1234,8 @@ mod tests {
         published: Published,
         /// How many times every client was told to judge its refusals again.
         judged: Arc<AtomicUsize>,
+        /// How many times every client said goodbye.
+        goodbyes: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -1204,6 +1265,7 @@ mod tests {
                         .then(|| router.clone()),
                     published: self.published.clone(),
                     judged: self.judged.clone(),
+                    goodbyes: self.goodbyes.clone(),
                 },
                 (),
                 supervisor.get_cell(),
@@ -2602,6 +2664,62 @@ mod tests {
     }
 
     // -- the handshake and the watchdog ---------------------------------------------------
+
+    /// A client certificate, written to a file of `dir`, naming the pod `uid` as its instance or none.
+    fn client_certificate(dir: &std::path::Path, uid: Option<&str>) -> String {
+        let mut params = rcgen::CertificateParams::new(vec!["w.polar".to_string()]).unwrap();
+        if let Some(uid) = uid {
+            for name in [format!("i:uid:{uid}"), format!("i:pod:{uid}-pod")] {
+                params
+                    .subject_alt_names
+                    .push(rcgen::SanType::URI(name.try_into().unwrap()));
+            }
+        }
+        let pem = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem();
+        let path = dir.join(format!("client-{}.pem", uid.unwrap_or("one")));
+        std::fs::write(&path, pem).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// docs/architecture/authority-model.md, "Multi-instance workloads": one pod of a multi-instance workload that
+    /// shuts down cleanly tells the broker its session is done (the client's goodbye) before its client stops; a
+    /// single-instance workload's drain leaves its session for its successor, as before.
+    #[tokio::test]
+    async fn a_clean_shutdown_ends_a_multi_instance_pod_s_session_and_only_its() {
+        let dir = tempfile::tempdir().unwrap();
+        for (uid, goodbyes) in [(Some("pod-a"), 1), (None, 0)] {
+            let certificate = client_certificate(dir.path(), uid);
+            assert_eq!(names_an_instance(&certificate), uid.is_some());
+            let mut rig = Rig::new(
+                &format!("infra-goodbye-{}", uid.unwrap_or("one")),
+                Duration::from_secs(20),
+                &[("TLS_CLIENT_CERT", certificate.as_str())],
+                false,
+            )
+            .await;
+            rig.begin("test");
+            rig.settle().await;
+            rig.infra
+                .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+                .unwrap();
+            let ended =
+                tokio::time::timeout(Duration::from_secs(30), rig.done.take().unwrap()).await;
+            assert!(ended.is_ok(), "the supervisor never ended");
+            assert_eq!(
+                rig.spawner.goodbyes.load(Ordering::SeqCst),
+                goodbyes,
+                "{uid:?}"
+            );
+            assert!(
+                rig.exits().is_empty(),
+                "a clean handshake needs no watchdog"
+            );
+        }
+        assert!(!names_an_instance("/no/such/certificate.pem"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn proceeding_stops_the_children_and_ends_the_supervisor() {

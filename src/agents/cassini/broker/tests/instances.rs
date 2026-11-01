@@ -176,6 +176,32 @@ async fn every_delivery_names_the_pod_it_came_from_beside_the_workload() {
     .await;
 }
 
+/// A pod that shuts down cleanly says goodbye, and its session ends at once; one that dies uncleanly leaves its
+/// session detached for the retention window, since no successor of its instance supersedes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pod_s_goodbye_ends_its_session_at_once_and_an_unclean_end_waits_out_the_retention() {
+    with_broker(|broker| async move {
+        let clean = TestClient::connect_as_instance(&broker, WORKLOAD, "uid-a", None).await;
+        let unclean = TestClient::connect_as_instance(&broker, WORKLOAD, "uid-b", None).await;
+        let (clean_id, unclean_id) = (
+            clean.registration_id().unwrap(),
+            unclean.registration_id().unwrap(),
+        );
+        clean.subscribe("news");
+        unclean.subscribe("news");
+        pause().await;
+        clean.say_goodbye();
+        unclean.vanish().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!broker.has_session(&clean_id).await, "ended at once");
+        assert!(
+            broker.has_session(&unclean_id).await,
+            "kept for the retention window"
+        );
+    })
+    .await;
+}
+
 #[test]
 fn supersession_and_resumption_are_by_identity_and_instance() {
     let w = WORKLOAD;
