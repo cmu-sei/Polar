@@ -27,7 +27,7 @@ use polar::graph::controller::{
     GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
 };
 use ractor::ActorProcessingErr;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Builds the single UpsertNodes op for a batch of users, as a pure
 /// function of already-deserialized data -- extracted specifically so
@@ -40,23 +40,34 @@ use tracing::debug;
 fn build_ops_for_users(users: &[JiraUser]) -> GraphOp {
     let items = users
         .iter()
-        .map(|user| {
+        .filter_map(|user| {
+            // A user the site shows neither a key nor a name for cannot be told from another: skipped, said.
+            let Some(identity) = user.identity() else {
+                warn!(
+                    "Skipping a user the site gave neither a key nor a name for (display name {:?})",
+                    user.display_name
+                );
+                return None;
+            };
             let key = JiraNodeKey::User {
-                key: user.key.to_string(),
+                key: identity.to_string(),
             }
             .into_key();
-            let props = vec![
-                Property(
-                    "html".into(),
-                    GraphValue::String(user.html.clone().unwrap_or_default()),
-                ),
-                Property("name".into(), GraphValue::String(user.name.to_string())),
-                Property(
+            let mut props = vec![Property(
+                "html".into(),
+                GraphValue::String(user.html.clone().unwrap_or_default()),
+            )];
+            // Only what the site showed: a hidden field is not written as an empty one.
+            if let Some(name) = &user.name {
+                props.push(Property("name".into(), GraphValue::String(name.clone())));
+            }
+            if let Some(display_name) = &user.display_name {
+                props.push(Property(
                     "displayName".into(),
-                    GraphValue::String(user.display_name.to_string()),
-                ),
-            ];
-            (key, props)
+                    GraphValue::String(display_name.clone()),
+                ));
+            }
+            Some((key, props))
         })
         .collect::<Vec<_>>();
 
@@ -88,11 +99,44 @@ mod tests {
 
     fn test_user(key: &str, name: &str, html: Option<&str>, display_name: &str) -> JiraUser {
         JiraUser {
-            name: name.to_string(),
-            key: key.to_string(),
+            name: Some(name.to_string()),
+            key: Some(key.to_string()),
             html: html.map(|s| s.to_string()),
-            display_name: display_name.to_string(),
+            display_name: Some(display_name.to_string()),
         }
+    }
+
+    /// The identity each item of `op` is keyed by.
+    fn keys_of(op: &GraphOp) -> Vec<String> {
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        items
+            .iter()
+            .flat_map(|(key, _)| key_pattern(key.as_ref()).1)
+            .filter_map(|(_, v)| match v {
+                neo4rs::BoltType::String(s) => Some(s.value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A site that hides a user's key is keyed by the name; one that shows neither is skipped, and the others are
+    /// still written. What the site does not show is not written as an empty property.
+    #[test]
+    fn a_user_without_a_key_is_keyed_by_name_and_one_without_either_is_skipped() {
+        let users: Vec<JiraUser> = serde_json::from_value(serde_json::json!([
+            { "name": "jdoe", "displayName": "Jane Doe" },
+            { "displayName": "Nobody we can name" },
+            { "name": "asmith", "key": "JIRAUSER10200" }
+        ]))
+        .unwrap();
+        let op = build_ops_for_users(&users);
+        assert_eq!(keys_of(&op), ["jdoe", "JIRAUSER10200"]);
+        let GraphOp::UpsertNodes { items } = &op else {
+            unreachable!()
+        };
+        assert!(items[1].1.iter().all(|p| p.0 != "displayName"));
     }
 
     fn key_pattern(key: &dyn GraphNodeKey) -> (String, Vec<(String, neo4rs::BoltType)>) {

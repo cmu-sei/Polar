@@ -380,8 +380,9 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
         let author = base_item
             .author
             .as_ref()
-            .map(|a| a.key.clone())
-            .unwrap_or_else(|| "No one".to_string());
+            .and_then(|a| a.identity())
+            .unwrap_or("No one")
+            .to_string();
 
         for item in &base_item.items {
             let mut cl_props = vec![
@@ -505,14 +506,56 @@ mod tests {
 
     fn test_author(key: &str) -> JiraAuthor {
         JiraAuthor {
-            name: key.to_string(),
-            key: key.to_string(),
-            email_address: format!("{key}@example.com"),
-            avatar_urls: HashMap::new(),
-            display_name: key.to_string(),
-            active: true,
-            time_zone: "UTC".to_string(),
+            name: Some(key.to_string()),
+            key: Some(key.to_string()),
+            email_address: Some(format!("{key}@example.com")),
+            display_name: Some(key.to_string()),
+            active: Some(true),
+            time_zone: Some("UTC".to_string()),
+            ..JiraAuthor::default()
         }
+    }
+
+    /// The authors a changelog entry records: what `ops` writes as each entry's `author`, in order.
+    fn changelog_authors(ops: &[GraphOp]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                GraphOp::UpsertNode { props, .. } => props.iter().find(|p| p.0 == "author"),
+                _ => None,
+            })
+            .filter_map(|p| match &p.1 {
+                GraphValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An issue whose history was written by authors the site shows no email for, as Apache's Jira sends them: it
+    /// decodes, and each change records who made it.
+    #[test]
+    fn an_issue_whose_changelog_authors_have_no_email_is_written_with_its_history() {
+        let issue: JiraIssue = serde_json::from_value(serde_json::json!({
+            "expand": "operations,versionedRepresentations,editmeta,changelog,renderedFields",
+            "id": "12442326", "self": "https://issues.apache.org/jira/rest/api/2/issue/12442326", "key": "COMDEV-4",
+            "fields": { "Summary": "a question" },
+            "changelog": { "startAt": 0, "maxResults": 2, "total": 2, "histories": [
+                { "id": "12793179", "created": "2009-12-04T11:38:05.962+0000",
+                  "author": { "self": "https://issues.apache.org/jira/rest/api/2/user?username=sri_kumar_4u",
+                              "name": "sri_kumar_4u", "key": "sri_kumar_4u", "avatarUrls": {},
+                              "displayName": "sri kumar ", "active": false, "timeZone": "Etc/UTC" },
+                  "items": [{ "field": "Link", "fieldtype": "jira", "from": null, "fromString": null,
+                              "to": "XERCESJ-977", "toString": "This issue relates to XERCESJ-977" }] },
+                { "id": "12793186", "created": "2009-12-04T12:22:31.383+0000",
+                  "author": { "name": "rgardler" },
+                  "items": [{ "field": "status", "fieldtype": "jira", "from": "1", "fromString": "Open",
+                              "to": "6", "toString": "Closed" }] }
+            ] }
+        }))
+        .unwrap();
+        let ops = build_ops_for_issue(&issue);
+        // The issue, and an entry and its edge for each of the two changes.
+        assert_eq!(ops.len(), 5);
+        assert_eq!(changelog_authors(&ops), ["sri_kumar_4u", "rgardler"]);
     }
 
     /// Pulls the rendered Cypher pattern + params out of a GraphOp's
