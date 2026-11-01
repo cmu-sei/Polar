@@ -159,7 +159,7 @@ pub enum UseRefusal {
     HostNotBound,
     #[error("the binding names no user name, and a user name and password need one")]
     NoUsername,
-    #[error("the secret is not text, so it cannot be given to git")]
+    #[error("the secret is not text, so it cannot be given to git or sent in a request")]
     NotText,
 }
 
@@ -185,6 +185,57 @@ pub fn git_credential(
         username,
         secret: zeroize::Zeroizing::new(secret.to_vec()),
     })
+}
+
+/// What an HTTP request is given for a host, wiped when dropped: a bearer token (`Authorization: Bearer`, a Jira
+/// Data Center personal access token), or a user name and password for Basic authentication (a Jira Cloud account's
+/// email and API token).
+pub enum HttpCredential {
+    Bearer(zeroize::Zeroizing<Vec<u8>>),
+    Basic {
+        username: String,
+        password: zeroize::Zeroizing<Vec<u8>>,
+    },
+}
+
+impl std::fmt::Debug for HttpCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpCredential::Bearer(_) => f.debug_tuple("Bearer").field(&"<redacted>").finish(),
+            HttpCredential::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+/// The credential an HTTP request is given for `host`, or why not: a token is a bearer token (a user name in its
+/// binding is not sent), a user name and password is Basic and needs the user name. The host is checked first, as
+/// for [`git_credential`], so a caller who may not have the secret learns nothing else about it. A sibling of
+/// `git_credential` rather than a generalisation of it: git is given a user name for a token too (`oauth2`), which
+/// an HTTP API is not.
+pub fn http_credential(
+    binding: &SecretBinding,
+    secret: &[u8],
+    host: &str,
+) -> Result<HttpCredential, UseRefusal> {
+    if !host_matches(&binding.host_pattern, host) {
+        return Err(UseRefusal::HostNotBound);
+    }
+    if std::str::from_utf8(secret).is_err() {
+        return Err(UseRefusal::NotText);
+    }
+    let secret = zeroize::Zeroizing::new(secret.to_vec());
+    match (binding.kind, &binding.username) {
+        (SecretKind::Token, _) => Ok(HttpCredential::Bearer(secret)),
+        (SecretKind::UserPassword, Some(username)) => Ok(HttpCredential::Basic {
+            username: username.clone(),
+            password: secret,
+        }),
+        (SecretKind::UserPassword, None) => Err(UseRefusal::NoUsername),
+    }
 }
 
 /// Why an escrowed record could not be made or read. The messages are fixed: a parser's own message can repeat a
@@ -399,6 +450,113 @@ mod tests {
         )
         .unwrap_err();
         assert!(!format!("{err} {err:?}").contains("super-secret-token"));
+    }
+
+    #[test]
+    fn an_http_request_is_given_a_bearer_token_or_basic_for_a_bound_host_only() {
+        let token = binding("jira.example.org", SecretKind::Token, None);
+        let HttpCredential::Bearer(got) =
+            http_credential(&token, b"pat-token", "jira.example.org").unwrap()
+        else {
+            panic!("a token is a bearer token");
+        };
+        assert_eq!(got.as_slice(), b"pat-token");
+        // A user name beside a token is not sent: a bearer token has none.
+        let named = binding("jira.example.org", SecretKind::Token, Some("svc"));
+        assert!(matches!(
+            http_credential(&named, b"pat-token", "jira.example.org").unwrap(),
+            HttpCredential::Bearer(_)
+        ));
+
+        let cloud = binding(
+            "*.atlassian.net",
+            SecretKind::UserPassword,
+            Some("me@example.org"),
+        );
+        let HttpCredential::Basic { username, password } =
+            http_credential(&cloud, b"api-token", "acme.atlassian.net").unwrap()
+        else {
+            panic!("a user name and password is Basic");
+        };
+        assert_eq!(username, "me@example.org");
+        assert_eq!(password.as_slice(), b"api-token");
+
+        let no_user = binding("jira.example.org", SecretKind::UserPassword, None);
+        assert_eq!(
+            http_credential(&no_user, b"x", "jira.example.org").unwrap_err(),
+            UseRefusal::NoUsername
+        );
+        // The host first: another host learns nothing of the kind or the content.
+        for (b, secret) in [(&token, &b"pat"[..]), (&no_user, &[0xff][..])] {
+            for host in [
+                "evil.example.org",
+                "jira.example.org.evil.org",
+                "jira.example.org:443",
+                "10.0.0.1",
+            ] {
+                assert_eq!(
+                    http_credential(b, secret, host).unwrap_err(),
+                    UseRefusal::HostNotBound,
+                    "{host}"
+                );
+            }
+        }
+        assert_eq!(
+            http_credential(&token, &[0xff, 0xfe], "jira.example.org").unwrap_err(),
+            UseRefusal::NotText
+        );
+        let shown = format!(
+            "{:?}",
+            http_credential(&cloud, b"super-secret-token", "acme.atlassian.net").unwrap()
+        );
+        assert!(!shown.contains("super-secret-token"), "{shown}");
+    }
+
+    proptest::proptest! {
+        /// For every binding, host and secret, the outcome follows the rule: a host the pattern does not match is
+        /// refused before anything else; then a secret that is not text; then a token is a bearer token of the
+        /// secret, and a user name and password is Basic with the binding's user name, or refused without one.
+        #[test]
+        fn an_http_credential_follows_the_rule_for_every_input(
+            pattern in proptest::prop_oneof![
+                proptest::strategy::Just("jira.example.org"),
+                proptest::strategy::Just("*.example.org"),
+                proptest::strategy::Just("*"),
+                proptest::strategy::Just("example.org:443"),
+            ],
+            host in proptest::prop_oneof![
+                proptest::strategy::Just("jira.example.org".to_string()),
+                proptest::strategy::Just("example.org".to_string()),
+                "[a-z]{1,8}\\.example\\.org",
+                "[a-z.:0-9-]{0,24}",
+            ],
+            token in proptest::prelude::any::<bool>(),
+            username in proptest::option::of("[a-z@.]{1,12}"),
+            secret in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..16),
+        ) {
+            let kind = if token { SecretKind::Token } else { SecretKind::UserPassword };
+            let b = binding(pattern, kind, username.as_deref());
+            let got = http_credential(&b, &secret, &host);
+            if !host_matches(pattern, &host) {
+                proptest::prop_assert_eq!(got.unwrap_err(), UseRefusal::HostNotBound);
+            } else if std::str::from_utf8(&secret).is_err() {
+                proptest::prop_assert_eq!(got.unwrap_err(), UseRefusal::NotText);
+            } else {
+                match (kind, &username, got) {
+                    (SecretKind::Token, _, Ok(HttpCredential::Bearer(t))) => {
+                        proptest::prop_assert_eq!(t.as_slice(), secret.as_slice())
+                    }
+                    (SecretKind::UserPassword, Some(u), Ok(HttpCredential::Basic { username, password })) => {
+                        proptest::prop_assert_eq!(&username, u);
+                        proptest::prop_assert_eq!(password.as_slice(), secret.as_slice());
+                    }
+                    (SecretKind::UserPassword, None, Err(UseRefusal::NoUsername)) => {}
+                    (kind, username, got) => {
+                        proptest::prop_assert!(false, "{kind:?} {username:?}: {got:?}")
+                    }
+                }
+            }
+        }
     }
 
     #[test]

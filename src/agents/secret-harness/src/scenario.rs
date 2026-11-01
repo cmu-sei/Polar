@@ -301,6 +301,13 @@ mod tests {
         ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
             Err(CryptoError::NoReply)
         }
+        async fn http_credential(
+            &self,
+            _: String,
+            _: String,
+        ) -> Result<polar_crypto::registry::HttpCredential, CryptoError> {
+            Err(CryptoError::NoReply)
+        }
         async fn encrypt_for_recipient(
             &self,
             _: String,

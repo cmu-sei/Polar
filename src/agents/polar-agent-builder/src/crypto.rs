@@ -35,7 +35,7 @@
 //! network connection needed at all.
 
 use async_trait::async_trait;
-use polar_crypto::registry::{GitCredential, SecretBinding};
+use polar_crypto::registry::{GitCredential, HttpCredential, SecretBinding};
 use polar_crypto::{CryptoError, CryptoMessage};
 use ractor::ActorRef;
 
@@ -84,6 +84,13 @@ pub trait CryptoClient: Send + Sync {
         name: String,
         host: String,
     ) -> Result<GitCredential, CryptoError>;
+
+    /// See CryptoMessage::HttpCredential's own doc comment.
+    async fn http_credential(
+        &self,
+        name: String,
+        host: String,
+    ) -> Result<HttpCredential, CryptoError>;
 }
 
 /// The real, live implementation of CryptoClient -- a thin wrapper
@@ -206,6 +213,19 @@ impl CryptoClient for CryptoHandle {
         host: String,
     ) -> Result<GitCredential, CryptoError> {
         let result = ractor::call!(self.actor, |reply| CryptoMessage::GitCredential {
+            name,
+            host,
+            reply,
+        });
+        flatten_call_result(result)
+    }
+
+    async fn http_credential(
+        &self,
+        name: String,
+        host: String,
+    ) -> Result<HttpCredential, CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::HttpCredential {
             name,
             host,
             reply,

@@ -238,6 +238,15 @@ pub enum CryptoMessage {
         host: String,
         reply: RpcReplyPort<Result<registry::GitCredential, CryptoError>>,
     },
+    /// The credential an HTTP request is given to reach `host` with the registered secret `name`: a bearer token,
+    /// or a user name and password for Basic, wiped when dropped (`registry::http_credential`). Refused as
+    /// `GitCredential` is: no secret under the name, a binding that does not name the host, a user name and password
+    /// with no user name, or content that is not text. The sibling of `GitCredential` for an HTTP API (Jira).
+    HttpCredential {
+        name: String,
+        host: String,
+        reply: RpcReplyPort<Result<registry::HttpCredential, CryptoError>>,
+    },
     /// Asks the credentials agent for a secret by name. It comes back encrypted to this identity's own
     /// escrow public key and is decrypted here, with the key in custody, so the plaintext is only ever
     /// in this process. `Ok(None)` means nothing is stored under the name. Whether this identity may
@@ -656,6 +665,17 @@ impl Actor for CryptoActor {
                     match registry.get(&name) {
                         None => Err(CryptoError::SecretNotRegistered(name)),
                         Some(held) => registry::git_credential(&held.binding, &held.secret, &host)
+                            .map_err(CryptoError::Use),
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            CryptoMessage::HttpCredential { name, host, reply } => {
+                let result = {
+                    let registry = state.registry.lock().await;
+                    match registry.get(&name) {
+                        None => Err(CryptoError::SecretNotRegistered(name)),
+                        Some(held) => registry::http_credential(&held.binding, &held.secret, &host)
                             .map_err(CryptoError::Use),
                     }
                 };
@@ -2208,6 +2228,60 @@ mod tests {
                 "{host}: {refused:?}"
             );
         }
+        stop_and_release_key(&r.actor).await;
+    }
+
+    /// The sibling for an HTTP API: the same registered secret, given as a bearer token for a bound host only.
+    #[tokio::test]
+    async fn a_registered_secret_is_given_to_an_http_request_for_a_bound_host_and_never_for_another()
+     {
+        let r = rig(vec![], vec![], false).await;
+        register(
+            &r,
+            "jira",
+            b"pat-token",
+            b"ctx-1",
+            token_binding("jira.example.org"),
+        )
+        .await
+        .unwrap();
+        let ask = |host: &str| {
+            let host = host.to_string();
+            let actor = r.actor.clone();
+            async move {
+                ractor::call!(actor, |reply| CryptoMessage::HttpCredential {
+                    name: "jira".to_string(),
+                    host,
+                    reply,
+                })
+                .unwrap()
+            }
+        };
+        let Ok(registry::HttpCredential::Bearer(token)) = ask("jira.example.org").await else {
+            panic!("a bearer token");
+        };
+        assert_eq!(token.as_slice(), b"pat-token");
+        for host in [
+            "evil.example.org",
+            "jira.example.org.evil.org",
+            "jira.example.org:443",
+        ] {
+            let refused = ask(host).await;
+            assert!(
+                matches!(refused, Err(CryptoError::Use(UseRefusal::HostNotBound))),
+                "{host}: {refused:?}"
+            );
+        }
+        let unknown = ractor::call!(r.actor, |reply| CryptoMessage::HttpCredential {
+            name: "other".to_string(),
+            host: "jira.example.org".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(unknown, Err(CryptoError::SecretNotRegistered(_))),
+            "{unknown:?}"
+        );
         stop_and_release_key(&r.actor).await;
     }
 

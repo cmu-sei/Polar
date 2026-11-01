@@ -195,6 +195,13 @@ mod tests {
         ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
             Err(CryptoError::SecretNotRegistered(name))
         }
+        async fn http_credential(
+            &self,
+            name: String,
+            _host: String,
+        ) -> Result<polar_crypto::registry::HttpCredential, CryptoError> {
+            Err(CryptoError::SecretNotRegistered(name))
+        }
     }
 
     struct FakeBroker {

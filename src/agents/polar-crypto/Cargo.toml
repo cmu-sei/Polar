@@ -61,3 +61,5 @@ rcgen.workspace = true
 polar-signing = { workspace = true, features = ["testing"] }
 time.workspace = true
 tempfile.workspace = true
+# The rule an HTTP credential follows, for every binding, host and secret (registry.rs).
+proptest.workspace = true

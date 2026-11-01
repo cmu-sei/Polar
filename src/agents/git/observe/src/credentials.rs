@@ -463,6 +463,14 @@ pub(crate) mod test_support {
                 Answer::HostNotBound => Err(CryptoError::Use(UseRefusal::HostNotBound)),
             }
         }
+        async fn http_credential(
+            &self,
+            name: String,
+            _host: String,
+        ) -> Result<polar_crypto::registry::HttpCredential, CryptoError> {
+            // The git observer never asks for one.
+            Err(CryptoError::SecretNotRegistered(name))
+        }
     }
 }
 

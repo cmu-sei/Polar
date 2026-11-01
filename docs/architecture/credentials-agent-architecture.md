@@ -532,6 +532,14 @@ escrow, and one operation, the git credential for a host. The I/O actors and der
 | `RegisterSecret { name, secret, context, binding }` | Decrypts `secret` (the `EscrowedSecret` bytes) under `context`, keeps the value with its binding (`host_pattern`, `kind`, `username`), and starts escrowing both together under `<identity>/<name>` with `StoreSecret`, retried until acknowledged. | `Ok` once registered, without waiting for the acknowledgement |
 | `LoadSecret { name }` | At start, asks the credentials agent for `<identity>/<name>` (`RetrieveSecret`) and registers what comes back, binding included. | whether it was found, or a policy denial |
 | `GitCredential { name, host }` | Checks that `host` matches the binding. | a username and token for libgit2, wiped when dropped (the username defaults to `oauth2` for a token), or a refusal: unknown secret, host not bound, kind not usable for git |
+| `HttpCredential { name, host }` (2026-11-01, jira-observer) | Checks that `host` matches the binding, then that the secret is text. | a bearer token for a `token`, or a username and password for Basic for a `user-password` (the binding's username; refused without one), wiped when dropped, or the same refusals as `GitCredential` |
+
+`HttpCredential` (`polar-crypto/src/registry.rs`, `http_credential`; `CryptoClient::http_credential`) is a sibling of
+`GitCredential`, not a generalisation of it: git is given a username for a token too (`oauth2`), which an HTTP API is
+not, so one operation for both would change git's answer. DECIDED, to review: it hands the caller the header's
+material, as `GitCredential` does for libgit2, rather than going through an HTTP I/O actor as the first bullet above
+designs; jira-observer sends its requests with reqwest, and no I/O actor is built yet. Its first user is jira-observer
+(`jira.md`, "The credential").
 
 A **host pattern** is a bare host name, matched case-insensitively and exactly (`github.com`), or `*.` followed by
 a domain (`*.example.org`), which matches that domain with one or more labels before it, at any depth
