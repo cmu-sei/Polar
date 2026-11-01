@@ -42,7 +42,8 @@ pub static BIND_ADDR: Defaulted<String> = Defaulted::text(
 pub static ISSUERS: Required<String> = Required::text(
     "CERT_ISSUER_ISSUERS",
     "every token issuer cert-issuer trusts, as a JSON list of {issuer, audience, jwks_uri, workload_identity_claim, \
-     instance_binding_claim, identity_normalization, identity_scope_claim, allowed_algorithms, jwks_cache_ttl_min, \
+     instance_binding_claim, instance_name_claim (optional), identity_normalization, identity_scope_claim, \
+     allowed_algorithms, jwks_cache_ttl_min, \
      jwks_cache_ttl_max}",
 );
 

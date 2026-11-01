@@ -87,6 +87,7 @@ fn issuer_config() -> IssuerConfig {
         jwks_uri: Some("https://test-issuer.example.com/jwks".to_string()),
         workload_identity_claim: "sub".to_string(),
         instance_binding_claim: "kubernetes.io/pod/uid".to_string(),
+        instance_name_claim: Some("kubernetes.io/pod/name".to_string()),
         identity_normalization: IdentityNormalization::KubernetesServiceAccount {
             cluster_domain: "cluster.local".to_string(),
         },

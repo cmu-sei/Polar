@@ -153,7 +153,8 @@ pub fn admit_vouched(
         .find(|b| b.workload == workload && &b.cert_type == cert_type);
     for name in extra_sans.iter().filter(|n| {
         let n = n.trim().to_ascii_lowercase();
-        !(n.starts_with("p:") || n.starts_with("g:"))
+        // An instance's names (`i:`) are not names either: the handler holds them to the token's own pod.
+        !(n.starts_with("p:") || n.starts_with("g:") || n.starts_with("i:"))
     }) {
         if !entry.is_some_and(|e| e.names.iter().any(|allowed| allowed == name)) {
             return Err(Refusal::NameNotAllowed(name.clone()));

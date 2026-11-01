@@ -377,6 +377,7 @@ mod tests {
                     workload_identity: identity.to_string(),
                     instance_binding: None,
                     jti: None,
+                    instance_name: None,
                     normalized_identity: None,
                 },
             ))

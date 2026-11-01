@@ -32,7 +32,8 @@
 
 use crate::escrow::EscrowKeypair;
 use crate::issuance::{
-    call_admit, call_append, call_check_grant, check_request_shape, extra_sans_for, signing_type,
+    call_admit, call_append, call_check_grant, check_request_shape, extra_sans_for,
+    instance_sans_for, signing_type,
 };
 use crate::ledger::LedgerMessage;
 use crate::state::CertificateRecord;
@@ -54,6 +55,9 @@ pub struct Custodian {
     pub instance_binding: String,
     /// When its certificate ends (Unix seconds): none of its workload's may end later.
     pub expires_at: i64,
+    /// Its pod's name, as its certificate names its instance (a multi-instance workload's custodian's): what its
+    /// workload's certificates name the pod by, beside `instance_binding`.
+    pub instance_pod: Option<String>,
 }
 
 /// Why a requester is not answered as a custodian.
@@ -99,10 +103,17 @@ pub fn judge(
     else {
         return not("its certificate has no end that can be read");
     };
+    // A multi-instance workload's custodian names its pod (docs/architecture/authority-model.md, "Multi-instance
+    // workloads"); a certificate whose instance names do not read as one is no custodian's.
+    let Ok(instance) = cert_issuer_common::instance::extract_instance(&record.certificate_pem)
+    else {
+        return not("its certificate's instance names do not read as one instance");
+    };
     Ok(Custodian {
         workload: workload.to_string(),
         instance_binding: record.instance_binding.clone(),
         expires_at,
+        instance_pod: instance.and_then(|instance| instance.pod),
     })
 }
 
@@ -235,7 +246,7 @@ impl CustodianIssuanceHandler {
         let grant_key = grant.as_ref().and(grant_key);
         let permissions = grant.map(|g| g.permissions).unwrap_or_default();
         // ---- Step 5: sign, for the workload, never past the custodian's end ----
-        let extra_sans = extra_sans_for(
+        let mut extra_sans = extra_sans_for(
             request.cert_type,
             &request.names,
             &permissions,
@@ -243,6 +254,23 @@ impl CustodianIssuanceHandler {
                 .as_ref()
                 .and_then(|model| model.issued_by_the_credentials_agent(&identity)),
         );
+        // A multi-instance workload's client certificate names its pod, as its custodian's does: the UID its token
+        // proved, and the name its custodian's certificate carries (docs/architecture/authority-model.md,
+        // "Multi-instance workloads").
+        match instance_sans_for(
+            self.authority_model.as_deref(),
+            &identity,
+            request.cert_type,
+            &custodian.instance_binding,
+            custodian.instance_pod.as_deref(),
+        ) {
+            Ok(names) => extra_sans.extend(names),
+            Err(e) => {
+                warn!(%identity, "refused: the custodian's pod cannot be named in a certificate: {e}");
+                release();
+                return refused(IssuanceRefusalReason::RequestNotPermitted);
+            }
+        }
         let issued = match self
             .cert_issuer
             .issue_internal(cert_issuer_common::InternalIssueRequest {
@@ -302,7 +330,21 @@ pub(crate) mod tests {
 
     /// A custodian's certificate naming `permissions`, ending `ends_in` seconds from now.
     pub(crate) fn custodian_pem(permissions: &[CustodyPermission], ends_in: i64) -> String {
+        custodian_pem_naming(permissions, ends_in, &[])
+    }
+
+    /// [`custodian_pem`], its certificate naming `others` too (an instance's names).
+    pub(crate) fn custodian_pem_naming(
+        permissions: &[CustodyPermission],
+        ends_in: i64,
+        others: &[&str],
+    ) -> String {
         let mut params = rcgen::CertificateParams::new(vec![CUSTODIAN.to_string()]).unwrap();
+        for name in others {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI((*name).to_string().try_into().unwrap()));
+        }
         for p in permissions {
             params
                 .subject_alt_names
@@ -426,6 +468,79 @@ pub(crate) mod tests {
             .await;
         assert_eq!(reason(&again), Some(IssuanceRefusalReason::TooSoon));
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// docs/architecture/authority-model.md, "Multi-instance workloads": a multi-instance workload's client certificate
+    /// names its pod as its custodian's certificate does (the UID its token proved, and the pod's name); a custodian
+    /// whose certificate's instance names do not read as one instance is no custodian.
+    #[tokio::test]
+    async fn a_multi_instance_workload_s_certificate_names_its_custodian_s_pod() {
+        let pod_name = "i:pod:kube-consumer-7f9c-x2";
+        let uid = format!("i:uid:{POD}");
+        let ledger = spawn_test_ledger().await;
+        call_append(
+            &ledger,
+            CredentialsEvent::IssuanceCompleted {
+                identity: CUSTODIAN.to_string(),
+                instance_binding: POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: custodian_pem_naming(
+                    &[CustodyPermission::Client],
+                    3600,
+                    &[&uid, pod_name],
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .and(body_partial_json(serde_json::json!({
+                "identity": X,
+                "instance_binding": POD,
+                "extra_sans": [
+                    "p:pub:polar.provenance.discovery",
+                    "p:sub:kubernetes.cluster.consumer.Pod",
+                    "g:cassini-client",
+                    "g:encryption",
+                    uid,
+                    pod_name
+                ],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
+            .mount(&server)
+            .await;
+        let handler = CustodianIssuanceHandler {
+            authority_model: crate::issuance::tests::model_with_kube_consumer_many(),
+            ..handler(ledger, &server)
+        };
+        let reply = handler
+            .handle(
+                asking(WorkloadCertType::Client),
+                Some(CUSTODIAN.to_string()),
+            )
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+
+        let mut two_uids = record(&[CustodyPermission::Client], 0, false);
+        two_uids.certificate_pem = custodian_pem_naming(
+            &[CustodyPermission::Client],
+            3600,
+            &[&uid, "i:uid:pod-uid-2"],
+        );
+        assert!(matches!(
+            judge(
+                CUSTODIAN,
+                Some(&two_uids),
+                CustodyPermission::Client,
+                polar::time::now_millis()
+            ),
+            Err(CustodianRefusal::NotACustodian(_))
+        ));
     }
 
     #[tokio::test]

@@ -95,6 +95,7 @@ fn issuer_config() -> IssuerConfig {
         jwks_uri: Some("https://test-issuer.example.com/jwks".to_string()),
         workload_identity_claim: "sub".to_string(),
         instance_binding_claim: "kubernetes.io/pod/uid".to_string(),
+        instance_name_claim: Some("kubernetes.io/pod/name".to_string()),
         identity_normalization: IdentityNormalization::KubernetesServiceAccount {
             cluster_domain: "cluster.local".to_string(),
         },
@@ -460,6 +461,126 @@ async fn a_workload_certificate_asked_for_a_custodian_records_its_pod_and_ends_b
         Some(IssueOutcome::CallerNotAuthorized)
     );
     assert!(ca.asked().is_empty());
+}
+
+// ---- the instance of a multi-instance workload (docs/architecture/authority-model.md, "Multi-instance workloads") ----
+
+/// The pod `mint_default_token` is for.
+const POD_NAME: &str = "git-observer-abc";
+
+fn instance_names(uid: &str, pod: &str) -> [String; 2] {
+    [format!("i:uid:{uid}"), format!("i:pod:{pod}")]
+}
+
+#[tokio::test]
+async fn a_certificate_on_a_token_carries_the_token_s_own_pod_as_its_instance_and_no_other() {
+    let own = instance_names(POD_UID, POD_NAME);
+    for (cert_type, csr_identity, mut names) in [
+        (CertType::Client, IDENTITY, vec![]),
+        (CertType::Custody, CUSTODIAN, vec!["p:custody:client"]),
+    ] {
+        names.extend(own.iter().map(String::as_str));
+        let (handler, ca) = rig(Some(vec![]));
+        let response = handler
+            .handle(
+                Some(CREDENTIALS_AGENT),
+                &mint_default_token(),
+                request(csr_identity, cert_type.clone(), &names),
+            )
+            .await;
+        assert_eq!(response.status, 200, "{cert_type:?}: {:?}", response.body);
+        let sans = &ca.asked()[0].sans;
+        assert!(own.iter().all(|name| sans.contains(name)), "{sans:?}");
+
+        // Another pod's UID, another pod's name, a name with no UID, two UIDs: refused, nothing signed.
+        let other_uid = instance_names("99999999-2222-3333-4444-555555555555", POD_NAME);
+        let other_pod = instance_names(POD_UID, "git-observer-xyz");
+        let two_uids = [own[0].clone(), other_uid[0].clone()];
+        let pod_alone = [own[1].clone()];
+        for wrong in [
+            &other_uid[..],
+            &other_pod[..],
+            &two_uids[..],
+            &pod_alone[..],
+        ] {
+            let mut names: Vec<&str> = if cert_type == CertType::Custody {
+                vec!["p:custody:client"]
+            } else {
+                vec![]
+            };
+            names.extend(wrong.iter().map(String::as_str));
+            let (handler, ca) = rig(Some(vec![]));
+            let response = handler
+                .handle(
+                    Some(CREDENTIALS_AGENT),
+                    &mint_default_token(),
+                    request(csr_identity, cert_type.clone(), &names),
+                )
+                .await;
+            assert_eq!(
+                outcome(&response.body),
+                Some(IssueOutcome::InvalidCsr),
+                "{cert_type:?} {wrong:?}"
+            );
+            assert!(ca.asked().is_empty(), "{wrong:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn validate_says_the_pod_s_name_beside_its_uid() {
+    let (handler, _) = rig(Some(vec![]));
+    let validated = handler
+        .handle_validate(
+            Some(CREDENTIALS_AGENT),
+            &mint_default_token(),
+            cert_issuer_common::ValidateRequest::default(),
+        )
+        .await;
+    match validated.body {
+        cert_issuer::handler::ValidateHandlerBody::Success(v) => {
+            assert_eq!(v.instance_binding.as_deref(), Some(POD_UID));
+            assert_eq!(v.instance_name.as_deref(), Some(POD_NAME));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn on_the_internal_path_an_instance_names_the_pod_the_request_is_for() {
+    let with = |names: Vec<String>, binding: Option<&str>| {
+        let mut r = internal(IDENTITY, IDENTITY, CertType::Client);
+        r.extra_sans = names;
+        r.instance_binding = binding.map(str::to_string);
+        r
+    };
+    let own = instance_names(POD_UID, "build-job-7-abcde").to_vec();
+    let (handler, ca) = rig(None);
+    let response = handler
+        .handle_internal_issue(Some(CREDENTIALS_AGENT), with(own.clone(), Some(POD_UID)))
+        .await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    assert!(own.iter().all(|name| ca.asked()[0].sans.contains(name)));
+    for (names, binding) in [
+        (own.clone(), Some("99999999-2222-3333-4444-555555555555")),
+        (own.clone(), None),
+        (
+            vec![own[0].clone(), "i:uid:another".to_string()],
+            Some(POD_UID),
+        ),
+        (vec!["i:what:x".to_string()], Some(POD_UID)),
+    ] {
+        let (handler, ca) = rig(None);
+        let response = handler
+            .handle_internal_issue(Some(CREDENTIALS_AGENT), with(names.clone(), binding))
+            .await;
+        assert_eq!(
+            outcome(&response.body),
+            Some(IssueOutcome::InvalidCsr),
+            "{names:?} {binding:?}"
+        );
+        assert!(ca.asked().is_empty());
+    }
 }
 
 #[tokio::test]

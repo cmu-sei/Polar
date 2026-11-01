@@ -213,7 +213,12 @@ impl CaClient for RcgenCaClient {
                 // defining syntax there. Every other extra SAN keeps its
                 // existing DnsName treatment.
                 // A group (`g:`) is the same kind of metadata.
-                if s.starts_with("p:") || s.starts_with("c:") || s.starts_with("g:") {
+                // An instance's (`i:`) names too (cert_issuer_common::instance).
+                if s.starts_with("p:")
+                    || s.starts_with("c:")
+                    || s.starts_with("g:")
+                    || s.starts_with("i:")
+                {
                     Ok(rcgen::SanType::URI(ia5))
                 } else {
                     Ok(rcgen::SanType::DnsName(ia5))

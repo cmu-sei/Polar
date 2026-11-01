@@ -55,6 +55,7 @@ let IssuerConfig =
           , jwks_uri : Optional Text
           , workload_identity_claim : Text
           , instance_binding_claim : Text
+          , instance_name_claim : Optional Text
           , allowed_algorithms : List Text
           , jwks_cache_ttl_min : Duration
           , jwks_cache_ttl_max : Duration
@@ -81,6 +82,8 @@ let IssuerConfig =
             -- `extract_string_claim` in oidc.rs for why this
             -- isn't dot-separated.
             instance_binding_claim = "kubernetes.io/pod/uid"
+          , -- The pod's name, which a multi-instance workload's certificate names its instance by, for people.
+            instance_name_claim = Some "kubernetes.io/pod/name"
           , -- HS256/HS384/HS512 and "none" are rejected by the
             -- Rust config validator regardless of what's here, so
             -- there's no way to accidentally enable them through

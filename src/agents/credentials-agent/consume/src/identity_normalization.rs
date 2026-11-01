@@ -85,6 +85,7 @@ mod tests {
                     workload_identity: "testuser".to_string(),
                     instance_binding: None,
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
                 },
             ))

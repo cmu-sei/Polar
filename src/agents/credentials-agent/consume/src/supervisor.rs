@@ -1878,6 +1878,7 @@ mod issuance_wiring_tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                     ),
@@ -2047,6 +2048,7 @@ mod issuance_wiring_tests {
                     workload_identity: "system:serviceaccount:polar:git-server".to_string(),
                     instance_binding: Some("pod-1".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "git-server.polar.serviceaccount.cluster.local".to_string(),
                     ),
@@ -2856,6 +2858,7 @@ mod identity_normalization_wiring_tests {
                     workload_identity: "testuser".to_string(),
                     instance_binding: None,
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
                 },
             ))

@@ -428,6 +428,7 @@ async fn validate_sends_bearer_token_in_authorization_header() {
             workload_identity: "testuser".to_string(),
             instance_binding: None,
             jti: None,
+            instance_name: None,
             normalized_identity: None,
         }))
         .mount(&server)
@@ -448,6 +449,7 @@ async fn validate_successful_response_returns_workload_identity() {
             workload_identity: "testuser".to_string(),
             instance_binding: Some("pod-uid-1".to_string()),
             jti: None,
+            instance_name: None,
             normalized_identity: None,
         }))
         .mount(&server)

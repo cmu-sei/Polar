@@ -64,6 +64,7 @@ fn test_issuer_config() -> IssuerConfig {
         // `extract_string_claim` in oidc.rs for why this isn't
         // dot-separated.
         instance_binding_claim: "kubernetes.io/pod/uid".to_string(),
+        instance_name_claim: None,
         identity_normalization: IdentityNormalization::KubernetesServiceAccount {
             cluster_domain: "cluster.local".to_string(),
         },

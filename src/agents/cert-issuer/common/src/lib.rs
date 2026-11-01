@@ -37,6 +37,7 @@ pub mod group;
 pub mod held;
 pub mod hierarchy;
 pub mod identity;
+pub mod instance;
 pub mod key_match;
 pub mod keypair;
 pub mod permission;
@@ -181,6 +182,12 @@ pub struct ValidateResponse {
     /// attached here either; credentials-agent decides what (if
     /// anything) to do with it.
     pub jti: Option<String>,
+    /// The pod's name, from the issuer's `instance_name_claim` (`kubernetes.io/pod/name` for a Kubernetes token), when
+    /// it has one: what a multi-instance workload's certificate names its instance by, for people, beside the pod UID in
+    /// `instance_binding` (docs/architecture/authority-model.md, "Multi-instance workloads"). Absent from a reply of a
+    /// cert-issuer before it existed.
+    #[serde(default)]
+    pub instance_name: Option<String>,
     /// The normalized, DNS-safe identity /issue's CSR-matching logic
     /// will actually check against -- computed via the same
     /// normalize_identity call /issue itself uses, so a client

@@ -92,6 +92,12 @@ pub struct IssuerConfig {
     /// in oidc.rs).
     pub instance_binding_claim: String,
 
+    /// The same, for the instance's name, read for people beside the binding: for Kubernetes "kubernetes.io/pod/name"
+    /// (a bound ServiceAccount token's `kubernetes.io.pod.name`). A multi-instance workload's certificate names its pod
+    /// by it (docs/architecture/authority-model.md, "Multi-instance workloads"). None: no name is read.
+    #[serde(default)]
+    pub instance_name_claim: Option<String>,
+
     /// How this issuer's identity claim is turned into a DNS-safe SAN.
     /// See `cert_issuer_common::identity::IdentityNormalization` for
     /// the full design rationale.

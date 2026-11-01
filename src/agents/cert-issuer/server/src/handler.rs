@@ -457,6 +457,16 @@ impl Handler {
             warn!(identity = %dns_identity, "{detail}");
             return error_response(IssueOutcome::InvalidCsr, &detail);
         }
+        // An instance's names are the token's own pod, UID and name, and nothing else: whoever asks, the instance is
+        // never their word (docs/architecture/authority-model.md, "Multi-instance workloads").
+        if let Some(detail) = instance_names_refusal(
+            &request.extra_sans,
+            claims.instance_binding.as_deref(),
+            Some(claims.instance_name.as_deref()),
+        ) {
+            warn!(identity = %dns_identity, "{detail}");
+            return error_response(IssueOutcome::InvalidCsr, &detail);
+        }
 
         // ---- Step 3.2: administrative capabilities are not requestable here ----
         //
@@ -770,6 +780,17 @@ impl Handler {
         if let Some(detail) = custody_names_refusal(&request.cert_type, &request.extra_sans) {
             return error_response(IssueOutcome::InvalidCsr, &detail);
         }
+        // An instance's names name the pod the request is for, and no other (docs/architecture/authority-model.md,
+        // "Multi-instance workloads"): its UID is the caller's `instance_binding`. The pod's name is the caller's word,
+        // read from the same pod's token.
+        if let Some(detail) = instance_names_refusal(
+            &request.extra_sans,
+            request.instance_binding.as_deref(),
+            None,
+        ) {
+            warn!(peer_identity = %caller, identity = %request.identity, "internal issuance refused: {detail}");
+            return error_response(IssueOutcome::InvalidCsr, &detail);
+        }
 
         // ---- Step 1.7: a server certificate's names are its workload's ----
         //
@@ -891,6 +912,7 @@ impl Handler {
                 workload_identity: claims.workload_identity,
                 instance_binding: claims.instance_binding,
                 jti: claims.jti,
+                instance_name: claims.instance_name,
                 normalized_identity,
             }),
         }
@@ -1038,8 +1060,11 @@ fn custody_names_refusal(
 ) -> Option<String> {
     use cert_issuer_common::custody::{CustodyPermission, names_custody};
     if cert_type == &cert_issuer_common::CertType::Custody {
+        // Beside its custody names, a multi-instance workload's custodian carries its pod's instance, which
+        // `instance_names_refusal` holds to the token's own.
         extra_sans
             .iter()
+            .filter(|name| !cert_issuer_common::instance::names_instance(name))
             .find(|name| CustodyPermission::from_san_string(name).is_err())
             .map(|name| {
                 format!("a custodian's certificate carries custody names only, not `{name}`")
@@ -1049,6 +1074,41 @@ fn custody_names_refusal(
             .iter()
             .find(|name| names_custody(name))
             .map(|name| format!("a custody name is a custodian's certificate's alone: `{name}`"))
+    }
+}
+
+/// Why a request's instance names (`i:`, `cert_issuer_common::instance`) are refused, or none: they must read as one
+/// instance, its UID `uid` (the pod the request is for: a token's `instance_binding`, or what the credentials agent
+/// states), and, when `pod` is given (a token's own name for the pod, itself maybe absent), its pod name exactly that.
+/// No instance names at all is no refusal: a single-instance workload's certificate carries none.
+fn instance_names_refusal(
+    extra_sans: &[String],
+    uid: Option<&str>,
+    pod: Option<Option<&str>>,
+) -> Option<String> {
+    use cert_issuer_common::instance::Instance;
+    let named = match Instance::from_san_strings(extra_sans.iter().map(String::as_str)) {
+        Ok(None) => return None,
+        Ok(Some(named)) => named,
+        Err(e) => {
+            return Some(format!(
+                "the instance names do not read as one instance: {e}"
+            ));
+        }
+    };
+    if uid != Some(named.uid.as_str()) {
+        return Some(format!(
+            "the instance names name pod {}, and the request is for {}",
+            named.uid,
+            uid.unwrap_or("no pod")
+        ));
+    }
+    match pod {
+        Some(pod) if pod != named.pod.as_deref() => Some(format!(
+            "the instance names name the pod {:?}, and the token names it {:?}",
+            named.pod, pod
+        )),
+        _ => None,
     }
 }
 

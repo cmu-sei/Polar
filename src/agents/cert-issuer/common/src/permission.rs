@@ -272,7 +272,12 @@ pub fn extract_permissions(
 pub(crate) fn san_strings(certificate_pem: &str) -> Result<Vec<String>, PermissionExtractionError> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
         .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
-    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
+    san_strings_der(&pem.contents)
+}
+
+/// As [`san_strings`], of a DER certificate.
+pub(crate) fn san_strings_der(der: &[u8]) -> Result<Vec<String>, PermissionExtractionError> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der)
         .map_err(|e| PermissionExtractionError::InvalidDer(e.to_string()))?;
 
     let Some(san_extension) = cert

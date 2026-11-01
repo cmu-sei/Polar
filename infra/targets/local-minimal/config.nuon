@@ -44,6 +44,7 @@
           jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
           workload_identity_claim: "sub"
           instance_binding_claim: "kubernetes.io/pod/uid"
+          instance_name_claim: "kubernetes.io/pod/name"
           identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
           identity_scope_claim: null
           allowed_algorithms: ["RS256" "ES256" "EdDSA"]

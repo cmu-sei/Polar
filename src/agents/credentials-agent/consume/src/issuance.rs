@@ -128,6 +128,27 @@ pub(crate) fn extra_sans_for(
     }
 }
 
+/// The instance names a certificate of `cert_type` for the workload known by `workload` carries: its pod `uid` and
+/// `pod` name, when the authority model says the workload is multi-instance and the certificate is one a session is
+/// made with (its client certificate, and its custodian's); none otherwise, so a single-instance workload's certificates
+/// are as they were (docs/architecture/authority-model.md, "Multi-instance workloads"). Refused when the pod's UID or
+/// name is not one a certificate can carry.
+pub(crate) fn instance_sans_for(
+    model: Option<&credentials_agent_model::Model>,
+    workload: &str,
+    cert_type: WorkloadCertType,
+    uid: &str,
+    pod: Option<&str>,
+) -> Result<Vec<String>, cert_issuer_common::instance::InstanceError> {
+    let many = model.is_some_and(|model| {
+        model.instances_of(workload) == credentials_agent_model::Instances::Many
+    });
+    if !many || cert_type == WorkloadCertType::Server {
+        return Ok(Vec::new());
+    }
+    cert_issuer_common::instance::Instance::new(uid, pod).map(|instance| instance.san_strings())
+}
+
 pub(crate) fn signing_type(cert_type: WorkloadCertType) -> CertType {
     match cert_type {
         WorkloadCertType::Client => CertType::Client,
@@ -261,6 +282,23 @@ impl IssuanceHandler {
         // A custodian's certificate is its own identity's, `custody.<X>`, not the workload's: it is admitted and
         // recorded under that, where the custodian's later requests look it up (docs/architecture/key-custody.md,
         // "Part A's bootstrap: the custodian").
+        // A multi-instance workload's pod is named in its client certificate and its custodian's, from this token: its
+        // UID and its name, as cert-issuer read them (docs/architecture/authority-model.md, "Multi-instance workloads").
+        let instance_sans = match instance_sans_for(
+            self.authority_model.as_deref(),
+            &identity,
+            request.cert_type,
+            &instance_binding,
+            validated.instance_name.as_deref(),
+        ) {
+            Ok(names) => names,
+            Err(e) => {
+                warn!(%identity, "refused: the token's pod cannot be named in a certificate: {e}");
+                return IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TokenInvalid,
+                };
+            }
+        };
         let identity = if request.cert_type == WorkloadCertType::Custody {
             cert_issuer_common::custody::custodian_identity(&identity)
         } else {
@@ -324,7 +362,7 @@ impl IssuanceHandler {
         }
 
         // ---- Step 6: sign, via cert-issuer's /issue ----
-        let extra_sans = extra_sans_for(
+        let mut extra_sans = extra_sans_for(
             request.cert_type,
             &request.names,
             &permissions,
@@ -333,6 +371,7 @@ impl IssuanceHandler {
                 .as_ref()
                 .and_then(|model| model.issued_by_the_credentials_agent(&identity)),
         );
+        extra_sans.extend(instance_sans);
         let issued = match self
             .cert_issuer
             .issue(
@@ -514,6 +553,7 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                     ),
@@ -569,6 +609,7 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                     ),
@@ -616,6 +657,7 @@ pub(crate) mod tests {
                     workload_identity: format!("system:serviceaccount:polar:{workload}"),
                     instance_binding: Some(format!("{workload}-uid")),
                     jti: None,
+                    instance_name: Some(format!("{workload}-pod")),
                     normalized_identity: Some(format!(
                         "{workload}.polar.serviceaccount.cluster.local"
                     )),
@@ -725,6 +767,63 @@ pub(crate) mod tests {
         );
     }
 
+    /// `model_with_kube_consumer`, with kube-consumer multi-instance.
+    pub(crate) fn model_with_kube_consumer_many() -> Option<Arc<credentials_agent_model::Model>> {
+        let mut model = (*model_with_kube_consumer().unwrap()).clone();
+        model.workloads[0].instances = credentials_agent_model::Instances::Many;
+        Some(Arc::new(model))
+    }
+
+    /// docs/architecture/authority-model.md, "Multi-instance workloads": a multi-instance workload's client certificate
+    /// and its custodian's name the token's own pod, its UID and its name, beside what each carries already; a server
+    /// certificate does not, and a single-instance workload's certificates are as they were (the tests above).
+    #[tokio::test]
+    async fn a_multi_instance_workload_s_certificates_name_the_token_s_pod() {
+        let pod = ["i:uid:kube-consumer-uid", "i:pod:kube-consumer-pod"];
+        for (cert_type, mut sans, names) in [
+            (
+                WorkloadCertType::Client,
+                vec![
+                    "p:pub:polar.provenance.discovery",
+                    "p:sub:kubernetes.cluster.consumer.Pod",
+                    "g:cassini-client",
+                    "g:encryption",
+                ],
+                vec![],
+            ),
+            (
+                WorkloadCertType::Custody,
+                vec!["p:custody:client"],
+                vec!["p:custody:client"],
+            ),
+        ] {
+            sans.extend(pod);
+            let server = issuer_expecting("kube-consumer", &sans).await;
+            let handler = IssuanceHandler {
+                authority_model: model_with_kube_consumer_many(),
+                ..handler_for(&server, spawn_test_ledger().await).await
+            };
+            let reply = handler.handle(request_for(cert_type, &names)).await;
+            assert!(
+                matches!(reply, IssuanceReply::Issued { .. }),
+                "{cert_type:?}: {reply:?}"
+            );
+        }
+        let server =
+            issuer_expecting("kube-consumer", &["kube-consumer.polar.svc.cluster.local"]).await;
+        let handler = IssuanceHandler {
+            authority_model: model_with_kube_consumer_many(),
+            ..handler_for(&server, spawn_test_ledger().await).await
+        };
+        let reply = handler
+            .handle(request_for(
+                WorkloadCertType::Server,
+                &["kube-consumer.polar.svc.cluster.local"],
+            ))
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+    }
+
     #[test]
     fn a_custodian_asks_for_custody_names_each_once_and_nothing_else() {
         use CredentialKind::{Kubernetes, LikelyIdp};
@@ -787,6 +886,7 @@ pub(crate) mod tests {
                     workload_identity: "testuser".to_string(),
                     instance_binding: Some("session-1".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some("testuser.polar-auth".to_string()),
                 },
             ))
@@ -895,6 +995,7 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: None,
                 },
             ))
@@ -936,6 +1037,7 @@ pub(crate) mod tests {
                     workload_identity: "nobody-granted-this-user".to_string(),
                     instance_binding: Some("session-1".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some("nobody-granted-this-user.polar-auth".to_string()),
                 },
             ))
@@ -986,6 +1088,7 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                     ),
@@ -1236,6 +1339,7 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:git-server".to_string(),
                     instance_binding: Some(instance_binding.to_string()),
                     jti: None,
+                    instance_name: None,
                     normalized_identity: Some(
                         "git-server.polar.serviceaccount.cluster.local".to_string(),
                     ),

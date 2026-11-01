@@ -42,6 +42,7 @@ fn valid_issuer() -> IssuerConfig {
         jwks_uri: None,
         workload_identity_claim: "sub".to_string(),
         instance_binding_claim: "kubernetes.io.pod.uid".to_string(),
+        instance_name_claim: None,
         identity_normalization: IdentityNormalization::KubernetesServiceAccount {
             cluster_domain: "cluster.local".to_string(),
         },

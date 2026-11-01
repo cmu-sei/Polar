@@ -114,6 +114,9 @@ pub struct ValidatedClaims {
     /// admin-bootstrap section. That's credentials-agent's own,
     /// narrowly-scoped policy decision, not enforced or assumed here.
     pub jti: Option<String>,
+    /// The instance's name, by the issuer's `instance_name_claim`, when it has one and the token carries it.
+    #[serde(default)]
+    pub instance_name: Option<String>,
     pub issuer: String,
     pub audience: String,
     pub raw: serde_json::Value,
@@ -462,6 +465,10 @@ impl Validator {
         // same, fixed location. See ValidatedClaims::jti's own doc
         // comment for what this is (and isn't) used for downstream.
         let jti = extract_optional_string_claim(&raw_claims, "jti");
+        let instance_name = issuer_cfg
+            .instance_name_claim
+            .as_ref()
+            .and_then(|path| extract_optional_string_claim(&raw_claims, path));
 
         // Only meaningful for issuers using SuffixedClaim -- None here
         // for KubernetesServiceAccount, whose scoping comes from its
@@ -501,6 +508,7 @@ impl Validator {
             workload_identity,
             instance_binding,
             jti,
+            instance_name,
             issuer,
             audience,
             raw: raw_claims,
