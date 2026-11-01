@@ -196,17 +196,20 @@ def main [] {
             assert equal (parallelism_problems [$plain]) []
         }
 
-        "a workload's instances is one or many, and many only for a workload the credentials agent issues": {
+        "a workload's instances is one or many, never many for a bootstrap service, and many in effect only where the credentials agent issues it": {
             assert equal (instances_problems "kube-observer" { instances: "one", issuer: "credentials-agent", bootstrap: false }) []
             assert equal (instances_problems "harness-producer" { instances: "many", issuer: "credentials-agent", bootstrap: false }) []
             assert equal (instances_problems "x" { issuer: "cert-issuer", bootstrap: true }) [] "absent is one"
             let bad = (instances_problems "x" { instances: "several", issuer: "credentials-agent", bootstrap: false })
             assert equal ($bad | length) 1
             assert (has $bad "\"one\" or \"many\"") $"($bad)"
-            # Only the credentials agent writes the instance into a certificate: a bootstrap service, or a workload still
-            # issued by cert-issuer, would be one certificate whose pods supersede each other.
-            assert (has (instances_problems "cassini" { instances: "many", issuer: "cert-issuer", bootstrap: true }) "credentials agent")
-            assert (has (instances_problems "x" { instances: "many", issuer: "cert-issuer", bootstrap: false }) "credentials agent")
+            assert (has (instances_problems "cassini" { instances: "many", issuer: "cert-issuer", bootstrap: true }) "bootstrap service")
+            # Only the credentials agent writes the instance into a certificate: where a target still has cert-issuer
+            # issue a workload directly, it is one instance there.
+            assert equal (effective_instances { instances: "many", issuer: "credentials-agent", bootstrap: false }) "many"
+            assert equal (effective_instances { instances: "many", issuer: "cert-issuer", bootstrap: false }) "one"
+            assert equal (effective_instances { instances: "one", issuer: "credentials-agent", bootstrap: false }) "one"
+            assert equal (effective_instances { issuer: "credentials-agent" }) "one"
         }
 
         "a Job that replaces pods only after they are gone passes": {

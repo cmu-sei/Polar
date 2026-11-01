@@ -301,7 +301,7 @@ def issuance_record [w: record, target: string, kinds: record] {
         service_account: ($s.service_account? | default $w.name)
         issuer: $s.issuer
         bootstrap: $s.bootstrap
-        instances: ($s.instances? | default "one")
+        instances: (effective_instances $s)
         topics: $scaffold.topics?
         groups: $scaffold.groups?
     }
@@ -668,8 +668,8 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         # Kept by the pod and restarted in place (a Deployment), or a Job's, which the Job controller replaces.
         restart_policy: (if $in_place { "Always" } else { "Never" })
         job: ($spec.job? | default null)
-        # "one" or "many": the template marks a multi-instance workload's object (rules.nu, INSTANCES_ANNOTATION).
-        instances: $spec.instances
+        # "one" or "many", in effect (rules.nu effective_instances): the template marks a multi-instance workload's object.
+        instances: (effective_instances $spec)
         probe: $spec.probe
         termination_grace_secs: $grace
         fs_group: ($spec.fs_group? | default null)

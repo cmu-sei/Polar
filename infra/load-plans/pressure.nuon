@@ -1,0 +1,51 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+# infra/load-plans/pressure.nuon
+#
+# The broker's budget past its growth threshold (docs/architecture/broker-baseline.md, the fifth set, (b)): its
+# controller grows the budget only while it holds three quarters of it, and one publisher and one held-back subscriber
+# hold about three eighths (a connection's window is a quarter of the budget, a subscriber's high water an eighth), so
+# reaching three quarters needs about three publishers held back at once. harness-producer is multi-instance
+# (docs/architecture/authority-model.md, "Multi-instance workloads"), so 3 and 6 producers run as 3 and 6 sessions, each
+# at 1,000 messages a second, against one sink spending its delay before it acknowledges each delivery
+# (`sink_slow: "before_ack"`): 1.1 ms (about a quarter of three producers' rate) or 10 ms, at 64 KiB and 1 MiB. Ten
+# seconds of messages a producer, at most 1 GiB each. The broker restarted before every run (`fresh_broker`), so each
+# begins at its floor; acceptance: `budget_max` above the floor (268,435,456) and `limited_by` past `Floor`, nothing
+# lost, the peak within the container's limit. The producer waits 120 s for an acknowledgement and the sink 60 s for a
+# message. 8 runs.
+#
+#   nu infra/load-harness.nu run infra/load-plans/pressure.nuon --target sandbox-local
+{
+  name: "pressure"
+  fresh_broker: true
+  defaults: {
+    rate: 1000, seconds: 10, max_count: 10000, max_bytes: 1073741824, warmup: 100,
+    sink_slow: "before_ack", stall_secs: 120, idle_secs: 60
+  }
+  grid: {
+    size: [65536 1048576]
+    sink_delay_us: [1100 10000]
+    shape: [
+      { producers: 3, sinks: 1, lanes: 1 }
+      { producers: 6, sinks: 1, lanes: 1 }
+    ]
+  }
+}

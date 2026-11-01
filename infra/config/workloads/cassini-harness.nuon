@@ -33,6 +33,9 @@
     kind: "run"
     image: "harness-producer"
     config: "document"
+    # A plan's `producers: k` runs k of its pods at once, each an instance with its own certificate and session
+    # (docs/architecture/authority-model.md, "Multi-instance workloads"); as one instance they superseded each other.
+    instances: "many"
   }
 
   {

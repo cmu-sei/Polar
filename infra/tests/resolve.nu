@@ -437,6 +437,22 @@ def main [] {
             }
         }
 
+        # docs/architecture/authority-model.md, "Multi-instance workloads": the load harness's producer is multi-instance
+        # where the credentials agent issues it (its object marked, its pods each an instance in the model), and one
+        # instance where a target still has cert-issuer issue it; every other workload is one.
+        "the harness producer is multi-instance where the credentials agent issues it, and nothing else is": {
+            use ../rules.nu [is_multi_instance, parallelism_problems]
+            let o = (object_of "harness-producer" "sandbox-local")
+            assert (is_multi_instance $o) "sandbox-local"
+            assert equal (parallelism_problems [($o | update spec.parallelism 3)]) [] "it may run three at once"
+            assert equal (resolve_for "sandbox-local" "harness-producer").instances "many"
+            assert equal (resolve_for "local" "harness-producer").instances "one" "issued by cert-issuer there"
+            assert (not (is_multi_instance (object_of "harness-sink" "sandbox-local")))
+            for n in (^nu $RESOLVER names --target sandbox-local | from json | where {|n| $n != "harness-producer" }) {
+                assert equal (resolve_for "sandbox-local" $n).instances "one" $n
+            }
+        }
+
         # docs/architecture/deployments.md, step 4: every workload restarts in place, a Deployment of one; the load harness,
         # which runs to completion, is a Job of the `run` kind.
         "every workload is a Deployment that restarts in place, and the load harness a Job": {

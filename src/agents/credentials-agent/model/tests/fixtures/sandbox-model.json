@@ -6,6 +6,7 @@
       "identity": "cassini.polar.serviceaccount.cluster.local",
       "issuer": "cert-issuer",
       "bootstrap": true,
+      "instances": "one",
       "groups": [],
       "topics": []
     },
@@ -14,6 +15,7 @@
       "identity": "cert-issuer.polar.serviceaccount.cluster.local",
       "issuer": "cert-issuer",
       "bootstrap": true,
+      "instances": "one",
       "groups": [
         "cassini-client"
       ],
@@ -158,6 +160,7 @@
       "identity": "credentials-agent.polar.serviceaccount.cluster.local",
       "issuer": "cert-issuer",
       "bootstrap": true,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -635,6 +638,7 @@
       "identity": "credentials-agent-observer.polar.serviceaccount.cluster.local",
       "issuer": "cert-issuer",
       "bootstrap": true,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -912,6 +916,7 @@
       "identity": "git-repo-controller.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -1079,6 +1084,7 @@
       "identity": "git-repo-observer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "encryption",
@@ -1303,6 +1309,7 @@
       "identity": "git-repo-processor.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -1446,6 +1453,7 @@
       "identity": "harness-producer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "many",
       "groups": [
         "cassini-client",
         "self-test"
@@ -1627,6 +1635,7 @@
       "identity": "harness-sink.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -1800,6 +1809,7 @@
       "identity": "jira-observer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -1973,6 +1983,7 @@
       "identity": "jira-processor.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -2122,6 +2133,7 @@
       "identity": "kube-consumer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "encryption",
@@ -2332,6 +2344,7 @@
       "identity": "kube-observer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -2469,6 +2482,7 @@
       "identity": "polar-git-server.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -2606,6 +2620,7 @@
       "identity": "polar-scheduler.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"
@@ -2981,6 +2996,7 @@
       "identity": "polar-scheduler-observer.polar.serviceaccount.cluster.local",
       "issuer": "credentials-agent",
       "bootstrap": false,
+      "instances": "one",
       "groups": [
         "cassini-client",
         "self-test"

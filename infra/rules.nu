@@ -132,21 +132,26 @@ export def parallelism_problems [docs: list]: nothing -> list<string> {
 }
 
 # What is wrong with a workload's `instances` (docs/architecture/authority-model.md, "Multi-instance workloads"): it is
-# "one" (the default, when absent) or "many", and many only for a workload the credentials agent issues, since it alone
-# writes the instance into a certificate (a bootstrap service's, or one still issued by cert-issuer, would be one
-# certificate whose pods supersede each other).
+# "one" (the default, when absent) or "many", and never many for a bootstrap service, whose certificates cert-issuer
+# signs on its token alone, naming no instance (Cassini and the credentials agent are one each by design).
 export def instances_problems [who: string, spec: record]: nothing -> list<string> {
     let instances = ($spec.instances? | default "one")
     if not ($instances in ["one" "many"]) {
         return [$"($who): instances is \"one\" or \"many\", not ($instances | to nuon)"]
     }
-    let bootstrap = ($spec.bootstrap? | default false)
-    let issuer = ($spec.issuer? | default "nobody")
-    if $instances == "many" and ($bootstrap or $issuer != "credentials-agent") {
-        let what = (if $bootstrap { $"($issuer), as a bootstrap service" } else { $issuer })
-        return [$"($who): a multi-instance workload is issued by the credentials agent, which writes each pod's instance into its certificates; this one is issued by ($what)"]
+    if $instances == "many" and ($spec.bootstrap? | default false) {
+        return [$"($who): a bootstrap service is one instance: cert-issuer signs its certificates on its token alone, and they name no pod"]
     }
     []
+}
+
+# How many pods of a workload a target runs at once, in effect: many only where its entry says so and the credentials
+# agent issues it, since only the credentials agent writes each pod's instance into its certificates; where a target
+# still has cert-issuer issue it directly, its certificates name no instance, so it is one instance there (its object
+# unmarked, and the render keeps it to one pod at a time) until the target moves it.
+export def effective_instances [spec: record]: nothing -> string {
+    let many = (($spec.instances? | default "one") == "many") and (($spec.issuer? | default "") == "credentials-agent")
+    if $many and not ($spec.bootstrap? | default false) { "many" } else { "one" }
 }
 
 # The pod spec of a rendered object, or null when it has none: a Pod's own, a workload's template, a CronJob's.

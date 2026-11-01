@@ -267,6 +267,37 @@ def main [] {
             }
         }
         {
+            # docs/architecture/authority-model.md, "Multi-instance workloads": k producers at once are k instances of the
+            # one identity only when the workload is multi-instance; otherwise they would supersede each other.
+            name: "many producers at once need a multi-instance producer, and a run's Job stays one"
+            body: {
+                use ../rules.nu [INSTANCES_ANNOTATION, is_multi_instance]
+                let one = { kind: "Job", metadata: { name: "harness-producer", namespace: "polar" }, spec: { template: { metadata: { name: "harness-producer" }, spec: { volumes: [] } } } }
+                let many = ($one | update metadata { merge { annotations: { $INSTANCES_ANNOTATION: "many" } } })
+                assert equal (producers_problem $one 1) null
+                assert equal (producers_problem $many 6) null
+                let p = (producers_problem $one 3)
+                assert ($p | str contains "harness-producer") $p
+                assert ($p | str contains "multi-instance") $p
+                # A run's copy of the Job is still the multi-instance workload's.
+                assert (is_multi_instance (job_for $many "harness-producer-p-0-2" "c" "p-0"))
+            }
+        }
+        {
+            # broker-baseline.md, the fifth set, (b): three quarters of the budget needs about three publishers held back.
+            name: "the pressure plan holds several producers back with a slow sink at 64 KiB and 1 MiB, on a fresh broker"
+            body: {
+                let plan = (open ($ROOT | path join "infra/load-plans/pressure.nuon"))
+                let runs = (expand $plan)
+                assert equal ($runs | length) 8
+                assert ($plan.fresh_broker? | default false)
+                assert ($runs | all {|r| $r.producers >= 3 and $r.sinks == 1 })
+                assert ($runs | all {|r| $r.sink_slow == "before_ack" and $r.sink_delay_us > 0 })
+                assert equal ($runs | get size | uniq | sort) [65536 1048576]
+                assert ($runs | all {|r| $r.count > 0 and $r.count * $r.size <= $r.max_bytes })
+            }
+        }
+        {
             name: "result lines are read out of a coloured log with other lines in it; a broken one is skipped"
             body: {
                 let esc = (char --integer 27)

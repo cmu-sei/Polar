@@ -526,6 +526,10 @@ fn a_workload_is_one_instance_unless_the_model_says_many() {
     assert_eq!(m.instances_of(&id("one")), Instances::One);
     assert_eq!(m.instances_of(&id("unsaid")), Instances::One);
     assert_eq!(m.instances_of(&id("nobody")), Instances::One);
+    // The sandbox's: the load harness's producer runs many pods at once, everything else one.
+    let sandbox = model();
+    assert_eq!(sandbox.instances_of(&id("harness-producer")), Instances::Many);
+    assert_eq!(sandbox.instances_of(&id("harness-sink")), Instances::One);
     let several = Model::parse(
         &serde_json::json!({"format": 1, "workloads": [workload("x", Some("several"))]})
             .to_string(),

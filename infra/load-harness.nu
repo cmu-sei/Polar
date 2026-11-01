@@ -38,6 +38,8 @@
 #
 # The pure parts are exported and tested (infra/tests/load-harness.nu); the rest asks the cluster.
 
+use rules.nu [is_multi_instance]
+
 const NAMESPACE = "polar"
 const RESULT_MARK = "HARNESS LOAD RESULT"
 const READY_MARK = "HARNESS LOAD READY"
@@ -173,6 +175,15 @@ export def job_for [job: record, name: string, config_map: string, run_id: strin
             if ($v.configMap?.name? == $"($workload)-config") { $v | update configMap.name $config_map } else { $v }
         }
     }
+}
+
+# Why a run of `producers` producers cannot run on the rendered producer Job `job`, or null: more than one at once are
+# instances of the one identity, each its own session, only when the workload is multi-instance (its entry's
+# `instances: "many"`, rules.nu is_multi_instance; docs/architecture/authority-model.md, "Multi-instance workloads").
+# Otherwise their sessions would supersede one another, as they did before.
+export def producers_problem [job: record, producers: int]: nothing -> any {
+    if $producers <= 1 or (is_multi_instance $job) { return null }
+    $"($producers) producers at once need ($job.metadata.name) to be multi-instance \(instances: \"many\" in its catalog entry\): its pods would supersede each other"
 }
 
 # The ConfigMap a run's Job reads: the workload's, renamed, labelled with the run, holding `document`.
@@ -549,6 +560,8 @@ def "main run" [plan_file: string, --target: string = "local-minimal", --image-t
     let plan = (open $plan_file)
     let runs = (expand $plan)
     let templates = (templates $target)
+    let wrong = ($runs | each {|r| producers_problem $templates.producer.job $r.producers } | compact | uniq)
+    if ($wrong | is-not-empty) { error make { msg: ($wrong | str join "; ") } }
     let started = (date now | format date "%Y%m%dT%H%M%S")
     let out = ($env.HOME | path join ".cache/polar/harness" $"($plan.name)-($started).nuon")
     mkdir ($out | path dirname)
