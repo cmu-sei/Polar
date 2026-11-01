@@ -142,7 +142,7 @@ fn dynamic_field_ops(
         Ok(k) => k,
         Err(e) => {
             warn!(
-                "Skipping dynamic field node -- label '{node_label}' failed \
+                "Issue {issue_key}: skipping dynamic field node -- label '{node_label}' failed \
                  validation even after sanitization: {e}"
             );
             return;
@@ -150,7 +150,9 @@ fn dynamic_field_ops(
     };
     let rel_type = format!("HAS_{}", label.to_uppercase());
     if let Err(e) = polar::graph::controller::validate_cypher_identifier(&rel_type) {
-        warn!("Skipping dynamic field edge -- relationship type '{rel_type}' invalid: {e}");
+        warn!(
+            "Issue {issue_key}: skipping dynamic field edge -- relationship type '{rel_type}' invalid: {e}"
+        );
         return;
     }
 
@@ -353,7 +355,7 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
     match &issue.system_updated {
         Some(text) => match parse_updated_ms(text) {
             Some(ms) => issue_props.push(Property(UPDATED_MS.to_string(), GraphValue::I64(ms))),
-            None => debug!(
+            None => warn!(
                 "Issue {}: its system field `updated` is not a time as Jira writes one, so no {UPDATED_MS} is written",
                 issue.key
             ),
@@ -441,6 +443,29 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
         }
     }
 
+    keep_what_the_graph_accepts(&issue.key, ops)
+}
+
+/// The ops with every property whose name the graph refuses taken out, each logged with the issue's key. Property
+/// names cannot be Cypher parameters, so the graph controller validates each (`validate_cypher_identifier`), and the
+/// issue's ops are one transaction: one refused name (`Est. hours`, `Fälligkeitsdatum`, `Issue & fix info`) would
+/// otherwise fail the whole issue, and the cursor would then pass over it for good.
+fn keep_what_the_graph_accepts(issue_key: &str, mut ops: Vec<GraphOp>) -> Vec<GraphOp> {
+    for op in &mut ops {
+        if let GraphOp::UpsertNode { props, .. } | GraphOp::EnsureEdge { props, .. } = op {
+            props.retain(|Property(name, _)| {
+                match polar::graph::controller::validate_cypher_identifier(name) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(
+                            "Issue {issue_key}: not writing the property {name:?}, a name the graph refuses: {e}"
+                        );
+                        false
+                    }
+                }
+            });
+        }
+    }
     ops
 }
 
@@ -459,7 +484,12 @@ pub fn handle_issue(
     let issue: JiraIssue = match serde_json::from_str(issue_json) {
         Ok(i) => i,
         Err(e) => {
-            warn!("Failed to deserialize issue: {e}");
+            // Which issue is lost, if what arrived says.
+            let key = serde_json::from_str::<serde_json::Value>(issue_json)
+                .ok()
+                .and_then(|v| v["key"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "(no key)".to_string());
+            warn!("Issue {key}: not written, it does not decode: {e}");
             return Ok(());
         }
     };
@@ -1036,6 +1066,131 @@ mod tests {
         // Only the issue node -- the invalid dynamic field is skipped
         // entirely, not partially applied.
         assert_eq!(ops.len(), 1);
+    }
+
+    /// Every op compiles to a query, as the graph controller compiles each op of the issue's one transaction: one that
+    /// did not would fail the whole issue.
+    fn all_compile(ops: &[GraphOp]) -> Result<(), String> {
+        for op in ops {
+            polar::graph::controller::compile_graph_op(op).map_err(|e| format!("{e}"))?;
+        }
+        Ok(())
+    }
+
+    /// A field whose name the graph refuses as a property (`.`, `&`, a letter that is not ASCII) loses that property
+    /// and nothing else: the issue and its other fields are written.
+    #[test]
+    fn a_field_name_the_graph_refuses_skips_that_property_not_the_issue() {
+        let mut issue = empty_issue("PROJ-13");
+        issue
+            .fields
+            .insert("Est. hours".to_string(), FieldValue::Number(3.0));
+        issue.fields.insert(
+            "Fälligkeitsdatum".to_string(),
+            FieldValue::OptionValue(Some("2024-01-02".to_string())),
+        );
+        issue.fields.insert(
+            "Issue & fix info".to_string(),
+            FieldValue::OptionValue(Some("x".to_string())),
+        );
+        issue.fields.insert(
+            "Summary".to_string(),
+            FieldValue::OptionValue(Some("kept".to_string())),
+        );
+        let mut status = HashMap::new();
+        status.insert(
+            "name".to_string(),
+            FirstTierField::Option(Some("Open".to_string())),
+        );
+        status.insert(
+            "colour.name".to_string(),
+            FirstTierField::Option(Some("blue".to_string())),
+        );
+        issue
+            .fields
+            .insert("Status".to_string(), FieldValue::Object(status));
+
+        let ops = build_ops_for_issue(&issue);
+        assert_eq!(all_compile(&ops), Ok(()));
+        let names: Vec<&str> = issue_props(&ops).iter().map(|p| p.0.as_str()).collect();
+        assert_eq!(names, ["Summary"]);
+        // The status node is written, without its refused property.
+        let GraphOp::UpsertNode { props, .. } = &ops[1] else {
+            panic!("expected the status node");
+        };
+        assert_eq!(
+            props,
+            &[Property(
+                "name".to_string(),
+                GraphValue::String("Open".to_string())
+            )]
+        );
+    }
+
+    /// Any field value as it can come from Jira, at the first tier.
+    fn any_value() -> impl proptest::strategy::Strategy<Value = FieldValue> {
+        use proptest::prelude::*;
+        let scalar = prop_oneof![
+            any::<String>().prop_map(|s| FirstTierField::Option(Some(s))),
+            any::<i32>().prop_map(|n| FirstTierField::Number(f64::from(n))),
+            any::<bool>().prop_map(FirstTierField::Bool),
+        ];
+        prop_oneof![
+            any::<String>().prop_map(|s| FieldValue::OptionValue(Some(s))),
+            any::<i32>().prop_map(|n| FieldValue::Number(f64::from(n))),
+            any::<bool>().prop_map(FieldValue::Bool),
+            proptest::collection::hash_map(
+                prop_oneof![any::<String>(), "[a-z.&]{1,8}".prop_map(String::from)],
+                scalar,
+                0..4
+            )
+            .prop_map(FieldValue::Object),
+            proptest::collection::vec(
+                any::<String>().prop_map(|s| NestedListTypes::Option(Some(s))),
+                0..3
+            )
+            .prop_map(FieldValue::List),
+        ]
+    }
+
+    /// A field name: anything at all, or the kind a site really has (a space, a dot, an ampersand, a slash, a
+    /// letter that is not ASCII, a Cypher keyword).
+    fn any_name() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            any::<String>(),
+            "[A-Za-z0-9 ._&/?()#ßΣé-]{1,16}".prop_map(String::from),
+            Just("MATCH".to_string()),
+            Just("Summary".to_string()),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Whatever the fields are called, the issue is written: every op compiles, the issue's node comes first, and
+        /// every scalar field whose name the graph accepts is one of its properties.
+        #[test]
+        fn a_refused_name_never_fails_an_issue(
+            fields in proptest::collection::hash_map(any_name(), any_value(), 0..12)
+        ) {
+            let mut issue = empty_issue("PROJ-14");
+            issue.fields = fields;
+            let ops = build_ops_for_issue(&issue);
+            proptest::prop_assert_eq!(all_compile(&ops), Ok(()));
+            let GraphOp::UpsertNode { key, props } = &ops[0] else {
+                return Err(proptest::test_runner::TestCaseError::fail("the issue's node is not first"));
+            };
+            proptest::prop_assert!(key_pattern(key.as_ref()).0.contains(":JiraIssue "));
+            for (name, value) in &issue.fields {
+                let scalar = matches!(
+                    value,
+                    FieldValue::OptionValue(Some(_)) | FieldValue::Number(_) | FieldValue::Bool(_)
+                );
+                let property = sanitize_label(name);
+                if scalar && polar::graph::controller::validate_cypher_identifier(&property).is_ok() {
+                    proptest::prop_assert!(props.iter().any(|p| p.0 == property), "{} is missing", property);
+                }
+            }
+        }
     }
 
     #[test]
