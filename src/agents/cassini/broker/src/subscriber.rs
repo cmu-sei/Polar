@@ -907,9 +907,10 @@ impl SubscriberAgent {
         }
     }
 
-    /// Looks whether it has stalled, from its own backlog, and says so to its session, which decides by the one stall
-    /// policy (`crate::pressure::verdict`): above its high water for the stall bound, or, while the budget is
-    /// exhausted, holding anything with nothing acknowledged for the stall bound.
+    /// Looks whether it may have stalled, from its own backlog, and says so to its session, which decides by the one
+    /// stall policy (`crate::pressure::verdict`) from its connection's progress: above its high water for the stall
+    /// bound, or, while the budget is exhausted, holding anything with nothing acknowledged for the stall bound. Only
+    /// a connection that acknowledged nothing for the bound is ended; a slow one is held back by its topic.
     fn look_for_stall(
         myself: &ActorRef<BrokerMessage>,
         state: &SubscriberAgentState,
@@ -920,10 +921,10 @@ impl SubscriberAgent {
             .backlog
             .above_for()
             .filter(|above_for| state.backlog.holds_back() && *above_for >= stall);
-        let (stalled_for, by_exhaustion) = match above {
-            Some(above_for) => (above_for, false),
+        let stalled_for = match above {
+            Some(above_for) => above_for,
             None if exhausted => match state.backlog.stalled_for().filter(|s| *s >= stall) {
-                Some(stalled_for) => (stalled_for, true),
+                Some(stalled_for) => stalled_for,
                 None => return,
             },
             None => return,
@@ -934,7 +935,6 @@ impl SubscriberAgent {
                 topic: state.topic.clone(),
                 held: state.backlog.bytes(),
                 stalled_for,
-                exhausted: by_exhaustion,
                 stall,
                 subscriber: myself.clone(),
             });

@@ -337,20 +337,24 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   while the budget is exhausted and `StallCheck` otherwise; every second it samples memory and sets the budget's
   limit. It ends with the drain; one that ends otherwise is started again by the broker. It answers a typed snapshot
   (`PressureMsg::Snapshot`) and takes a warm start (`PressureMsg::WarmStart`).
-- **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s): a subscriber looks at its own
-  backlog (`look_for_stall`, `subscriber.rs`), and has stalled when it is above its high water for the bound, or, while
-  the budget is exhausted, holds anything with nothing acknowledged for the bound. The clock counts only time spent
+- **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s): only a connection that
+  acknowledges nothing for the bound is ended (*since 2026-11-01*; cassini-backpressure.md, "The stall rule ends only a
+  subscriber that makes no progress"); a slow one that keeps acknowledging is held back by its topic and never ended. A
+  subscriber looks at its own backlog (`look_for_stall`, `subscriber.rs`), and may have stalled when it is above its
+  high water for the bound, or, while the budget is exhausted, holds anything with nothing acknowledged for the bound. The clock counts only time spent
   connected: a subscriber that went above its mark while away starts it when it comes back (`Backlog::set_connected`).
   It tells its session (`SubscriberStalled`), which decides by the one stall policy (`pressure::verdict`) from its own
   facts: what its connection's reader told it, beside the Listener's mailbox (`ConnectionProgress` when it reads an
   acknowledgement, `ConnectionWaiting` when it waits for an admission). A connection spared less than the bound ago is
-  not judged again; while the budget is exhausted, an acknowledgement on any topic within the bound is progress; a
-  connection whose reader waits for room is spared (its reader refuses for now, and reads on), again only once it has
+  not judged again; one that read an acknowledgement on any topic within the bound is left alone, whatever its
+  subscriber reported; a connection whose reader waits for room is spared (its reader refuses for now, and reads on), again only once it has
   made progress since; otherwise it is condemned, and a later look (an eighth of the bound on) that still finds so cuts
   it, from outside its Listener (which may be waiting on a write to
   that client) through the control the Listener gave it (`ConnectionOpened`, a weak handle), and the session manager
   logs it with the identity, the topic, the bytes held and for how long. The session detaches for `R` as on any lost
-  connection, and the topic moves again. Recovery from an exhausted budget is so bounded by the stall bound.
+  connection, and the topic moves again. Recovery from an exhausted budget is so bounded: nothing is admitted while it
+  is exhausted, so what it holds falls with each acknowledgement, at the pace of the slowest subscribers that still
+  acknowledge, and the bound ends those that acknowledge nothing.
 - **Refused for now** (`admit_or_refuse`, `listener.rs:391`): a spared connection's reader refuses each publish it
   cannot admit at once (`PublishRefusal::Unavailable`, `REFUSED_FOR_NOW`), and reads on; a large one's body is read
   past under one global slot within the stall bound and let go (`REFUSED_BODY`), so the budget is passed by at most
@@ -381,8 +385,10 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   `broker/tests/backpressure.rs` (a subscriber that stops reading, with 256 KiB and with 16 KiB messages, under a
   budget its alarm never reaches: its backlog goes above the high water and holds the topic back, the publisher's
   acknowledgements stop, the connection is ended after the stall bound, the publisher completes, the session is kept;
-  a slow subscriber within the bound receives everything in order; one back from away is given the bound to catch
-  up; the frame-byte count; the recovery from an exhausted budget, with acknowledgements read around a waiting
+  a slow subscriber within the bound receives everything in order; one that keeps acknowledging below the old rule's
+  drain rate is not ended and holds its topic back, one that then stops is ended the bound after its last
+  acknowledgement, and slow ones above their high water cannot hold an exhausted budget for good; one back from away is
+  given the bound to catch up; the frame-byte count; the recovery from an exhausted budget, with acknowledgements read around a waiting
   publish, a processor that publishes to itself, subscribers under their mark that stop reading, and a subscriber
   away that lets go of all it held; a processor not cut under an exhausted budget, with small and with large frames,
   or holding back its own topic; one that never acknowledges spared once, then ended; progress per connection; a

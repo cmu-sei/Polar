@@ -443,17 +443,17 @@ pub enum BrokerMessage {
     },
     /// Internal, from a topic to a subscriber it takes: where to say whether it holds the topic back.
     TopicAttached { topic: ActorRef<BrokerMessage> },
-    /// Internal, from the pressure manager through the subscriber manager to each subscriber: look whether you have
-    /// stalled (above your high water for the stall bound), and say so to your session.
+    /// Internal, from the pressure manager through the subscriber manager to each subscriber: look whether you may
+    /// have stalled (above your high water for the stall bound), and say so to your session.
     StallCheck,
-    /// Internal, from a subscriber to its session: it has stalled for `stalled_for`, holding `held` bytes, above its
-    /// high water or, if `exhausted`, with nothing acknowledged while the budget is exhausted. The session decides from
-    /// its own facts, by the one stall policy (`pressure::verdict`), and tells `subscriber` if it ended it (`StallEnded`).
+    /// Internal, from a subscriber to its session: it may have stalled, for `stalled_for`, holding `held` bytes, above
+    /// its high water or with nothing acknowledged while the budget is exhausted. The session decides from its own
+    /// facts, by the one stall policy (`pressure::verdict`): it ends the connection only if that made no progress for
+    /// the stall bound, and tells `subscriber` if it ended it (`StallEnded`).
     SubscriberStalled {
         topic: String,
         held: usize,
         stalled_for: std::time::Duration,
-        exhausted: bool,
         stall: std::time::Duration,
         subscriber: ActorRef<BrokerMessage>,
     },

@@ -58,7 +58,9 @@ The broker is installed on machines with little memory, where less memory under 
   does not accept a publish while any of its subscribers is above its high-water mark; the publish waits in the topic
   (bounded by the publisher's window), unacknowledged, so the publisher's window fills and its connection stops being
   read. Lossless, at the price of head-of-line blocking on that topic.
-- **The stall bound:** a subscriber above high water for longer than `T_stall` is slow. The rule is decision 1 below;
+- **The stall bound** (*revised 2026-11-01*: only a subscriber that acknowledges nothing for `T_stall` is ended; see
+  "The stall rule ends only a subscriber that makes no progress"): a subscriber above high water for longer than
+  `T_stall` is slow. The rule is decision 1 below;
   the recommendation is to end that subscriber's connection (as NATS does with a slow consumer): its session detaches
   for `R` as any disconnect does, what it was owed stays only while the budget allows, and the topic moves again.
   `T_stall` must be under `TCP_USER_TIMEOUT` (60 s, `types/src/socket.rs`), which may already cut a peer that shows a
@@ -112,6 +114,8 @@ rule stay.
 
 1. **A subscriber that stays slow past `T_stall` has its connection ended.** Nothing is lost before then; after, its
    session detaches for `R` as on any disconnect, it is owed what the budget still holds, and the topic moves again.
+   *Revised 2026-11-01:* only one that acknowledges nothing for `T_stall`; a slow one that keeps acknowledging is held
+   back by its topic, never ended ("The stall rule ends only a subscriber that makes no progress").
 2. **The budget comes from the container's memory limit:** a share of its cgroup's `memory.max`, overridable by a broker
    setting; the per-connection window and the per-subscriber high water are fractions of it.
 3. **The frame limit is 64 MiB.** Consequences: a connection's window is never below one frame (64 MiB), and a budget
@@ -565,6 +569,65 @@ grew the budget off its floor.
 **Planned next, not built:** the broker publishing in-process into its own topics, stamped with its own identity, so
 that soft-state's StateActor and pulled health reach it. The learned warm start is to come from soft-state, which itself
 needs the broker; hence nothing waits for it.
+
+## The stall rule ends only a subscriber that makes no progress (2026-11-01)
+
+**Decided** (the maintainer, 2026-11-01; broker-baseline.md, the fifth set, (c)): a subscriber is ended only when it
+acknowledges nothing for `T_stall`. A slow subscriber that keeps acknowledging is never ended: its topic holds back
+through its high water, as before, so its publishers go at its pace. Until then the rule ended a subscriber above its
+high water whose outbox could not fall to half of it within `T_stall`, acknowledging or not: a drain-rate threshold of
+(high water / 2) / `T_stall`, 0.56 MB/s at the floor and the default bound, which rose with the budget.
+
+**The change** is to the one policy and its facts (paths relative to `src/agents/cassini/`):
+- `pressure::verdict` (`broker/src/pressure.rs:311`): a connection that made progress within the bound (an
+  acknowledgement read on any topic) is never ended, spared nor condemned, whether its subscriber was seen above high
+  water or under an exhausted budget. Before, progress excused it only under an exhausted budget.
+- `StallFacts` (`pressure.rs:265`) loses `exhausted`, which only that distinction read, and so does the message that
+  carries a subscriber's report (`BrokerMessage::SubscriberStalled`, `types/src/lib.rs`) and `judge_stall`
+  (`broker/src/session.rs:941`).
+- **Kept:** the refusal window, the sparing of a connection whose reader waits for room (again only after progress), the
+  two-step end (condemned, then ended at a later look at least an eighth of the bound on), progress being the
+  connection's, and what a subscriber reports (`look_for_stall`, `subscriber.rs:914`: above its high water for the
+  bound, or holding anything with nothing acknowledged for the bound while the budget is exhausted). The report is now a
+  "may have stalled", which the session ends only on its connection's lack of progress.
+
+**Can acknowledging but very slow subscribers hold an exhausted budget for good?** No.
+- While the budget is exhausted no charge is taken (`Budget::try_charge` refuses under the alarm), so what it holds
+  never grows, and every acknowledgement that lets a message's last holder go refunds it. What waits in a topic was
+  charged when its reader admitted it; a topic resuming moves it into outboxes and charges nothing.
+- Progress under an exhausted budget is finite unless it refunds: each acknowledgement removes one delivery the broker
+  holds, and with nothing admitted there are only so many. A connection that runs out of deliveries to acknowledge while
+  it still holds anything makes no progress, and is ended at the bound; away, it lets go of all it held at the next
+  look (`shed_if_away`). So the truly stuck are still ended by the "no progress" path, and a session away still sheds.
+- The topic hold bounds what any one subscriber can hold to its high water and what waits for it in its topic (its
+  publishers' windows, all charged to the budget); admission refusal stops everything else.
+- **So it always recovers, but at the slow subscribers' pace, not within `T_stall`:** the time to fall to the low water
+  is what must be refunded over the rate they acknowledge, plus the bound for any that acknowledge nothing. Under the
+  old rule a slow subscriber above its high water was ended after the bound; now, as subscribers under their high water
+  always were, it is waited for. Meanwhile the alarm stops every reader, on every topic. A pathological set (subscribers
+  each acknowledging one small message just within every bound) could keep the budget exhausted for hours: bounded, not
+  for good, and a cost the decision accepts.
+
+**Tests** (`broker/tests/backpressure.rs`), each failing first against the old rule:
+- `a_slow_subscriber_that_keeps_acknowledging_is_not_ended_and_holds_its_topic_back` (221): half a MiB a second, under
+  0.56 MB/s, above its high water for four stall bounds; not ended, its topic held back and its publisher held to its
+  pace, then given everything in order. Before: ended in its slow phase.
+- `a_subscriber_that_stops_acknowledging_is_ended_the_stall_bound_after_its_last_acknowledgement` (307): slow for three
+  bounds, then acknowledging nothing: ended, no sooner than the bound after its last acknowledgement; the publisher
+  completes. Before: ended while it still acknowledged.
+- `slow_subscribers_that_keep_acknowledging_cannot_hold_an_exhausted_budget_for_good` (362): seven slow subscribers, each
+  above its high water at a quarter of a MiB a second, and one that reads nothing, exhaust a 64 MiB budget; it stays
+  exhausted longer than the bound, what it holds never grows meanwhile, the silent one alone is ended, the budget
+  recovers, and the slow ones are given everything in order. Before: all eight were ended.
+- **Changed because the rule changed** (`broker/src/pressure.rs`): the example test's assertion "above high water,
+  progress does not excuse it" expected `End` for a connection that made progress (seen above high water); it now
+  expects `Ignore`. The property `a_connection_is_ended_only_when_nothing_spares_it` counted progress only under an
+  exhausted budget (`exhausted && since_progress < STALL`); it now counts it always, and also asserts that a connection
+  that made progress is only ever ignored. Added to the example: a progressing connection whose reader waits is not
+  spared. No other assertion was changed or removed.
+- **Mutations killed:** the progress check removed (the example, the property, the three tests above and
+  `a_client_acknowledging_one_topic_is_not_cut_for_a_delivery_waiting_behind_it_on_another` fail); the sparing checked
+  before progress (the example and the property fail).
 
 ## Open decisions
 

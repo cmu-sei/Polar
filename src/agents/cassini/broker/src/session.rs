@@ -937,14 +937,12 @@ impl SessionAgent {
     /// of its connection (`crate::pressure::verdict`). Spared, its reader refuses for now and reads on; ended, its
     /// connection is cut from outside its Listener (which may be waiting on a write to this client), and the session
     /// detaches as on any lost connection.
-    #[allow(clippy::too_many_arguments)]
     fn judge_stall(
         myself: &ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
         topic: String,
         held: usize,
         stalled_for: std::time::Duration,
-        exhausted: bool,
         stall: std::time::Duration,
         subscriber: ActorRef<BrokerMessage>,
     ) {
@@ -954,7 +952,6 @@ impl SessionAgent {
         };
         let now = tokio::time::Instant::now();
         let facts = StallFacts {
-            exhausted,
             since_progress: now - connection.progress_at,
             reader_waiting: connection.waiting,
             since_spared: connection.spared.map(|(at, _)| now - at),
@@ -1159,19 +1156,9 @@ impl Actor for SessionAgent {
                 topic,
                 held,
                 stalled_for,
-                exhausted,
                 stall,
                 subscriber,
-            } => Self::judge_stall(
-                &myself,
-                state,
-                topic,
-                held,
-                stalled_for,
-                exhausted,
-                stall,
-                subscriber,
-            ),
+            } => Self::judge_stall(&myself, state, topic, held, stalled_for, stall, subscriber),
             BrokerMessage::PushMessage {
                 payload,
                 topic,

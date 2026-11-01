@@ -263,8 +263,6 @@ impl PressureManager {
 /// What a session knows of a stalled subscriber and its own connection, at the moment it decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StallFacts {
-    /// The stall was seen while the budget was exhausted (nothing acknowledged), not above high water.
-    pub exhausted: bool,
     /// How long since the connection's reader last read an acknowledgement, on any topic (or since it opened).
     pub since_progress: Duration,
     /// The connection's reader waits for a frame's admission, so what follows (its acknowledgements among it) is not
@@ -300,10 +298,12 @@ pub fn confirmation(stall: Duration) -> Duration {
     stall / 8
 }
 
-/// The one stall policy (cassini-backpressure.md, the second review and the decisions reviewed with the maintainer):
+/// The one stall policy (cassini-backpressure.md, the second review, the decisions reviewed with the maintainer, and
+/// "The stall rule ends only a subscriber that makes no progress"):
 /// - a connection spared less than the stall bound ago is in its refusal window, and not judged again;
-/// - while the budget is exhausted, progress is the connection's: an acknowledgement read on any topic within the
-///   bound is progress for every subscription of the session;
+/// - a connection that made progress within the bound is never ended, however slowly it goes: progress is the
+///   connection's, an acknowledgement read on any topic is progress for every subscription of the session, and a slow
+///   subscriber above its high water is held back by its topic instead (its publishers go at its pace);
 /// - a connection whose reader waits for room may be stalled by the broker, not by its client: it is spared, and spared
 ///   again only once it has made progress since;
 /// - otherwise it is condemned, and ended at a later look that still finds so: the reader's facts reach the session
@@ -312,7 +312,7 @@ pub fn verdict(stall: Duration, facts: StallFacts) -> Verdict {
     if facts.since_spared.is_some_and(|since| since < stall) {
         return Verdict::Ignore;
     }
-    if facts.exhausted && facts.since_progress < stall {
+    if facts.since_progress < stall {
         return Verdict::Ignore;
     }
     if facts.reader_waiting && (facts.since_spared.is_none() || facts.progressed_since_spared) {
@@ -336,7 +336,6 @@ mod tests {
 
     fn facts() -> StallFacts {
         StallFacts {
-            exhausted: true,
             since_progress: STALL,
             reader_waiting: false,
             since_spared: None,
@@ -383,16 +382,24 @@ mod tests {
             Verdict::Ignore,
             "progress is the connection's"
         );
+        // Before 2026-11-01 a stall seen above high water was ended though the connection made progress (`End`): the
+        // facts said why it was seen. Now nothing but progress decides, so they no longer say.
+        assert_eq!(
+            verdict(STALL, progressing),
+            Verdict::Ignore,
+            "above high water, progress excuses it too: a slow subscriber that acknowledges is never ended, its topic \
+             holds it back"
+        );
         assert_eq!(
             verdict(
                 STALL,
                 StallFacts {
-                    exhausted: false,
+                    reader_waiting: true,
                     ..progressing
                 }
             ),
-            Verdict::End,
-            "above high water, progress does not excuse it"
+            Verdict::Ignore,
+            "nor spared: its acknowledgements are read"
         );
         let waiting = StallFacts {
             reader_waiting: true,
@@ -436,7 +443,6 @@ mod tests {
 
     fn any_facts() -> impl Strategy<Value = StallFacts> {
         (
-            any::<bool>(),
             0u64..5_000,
             any::<bool>(),
             proptest::option::of(0u64..5_000),
@@ -444,8 +450,7 @@ mod tests {
             proptest::option::of(0u64..5_000),
         )
             .prop_map(
-                |(exhausted, progress, reader_waiting, spared, progressed, condemned)| StallFacts {
-                    exhausted,
+                |(progress, reader_waiting, spared, progressed, condemned)| StallFacts {
                     since_progress: Duration::from_millis(progress),
                     reader_waiting,
                     since_spared: spared.map(Duration::from_millis),
@@ -456,17 +461,22 @@ mod tests {
     }
 
     proptest! {
-        /// A connection is ended only if it is out of its refusal window, made no progress within the bound while the
-        /// budget is exhausted, cannot be spared (its reader does not wait, or it was spared and made no progress
-        /// since), and was condemned at an earlier look.
+        /// A connection is ended only if it is out of its refusal window, made no progress within the bound (whether
+        /// or not the budget is exhausted, and however far above its high water), cannot be spared (its reader does
+        /// not wait, or it was spared and made no progress since), and was condemned at an earlier look. One that made
+        /// progress within the bound is neither ended nor spared, nor condemned.
         #[test]
         fn a_connection_is_ended_only_when_nothing_spares_it(facts in any_facts()) {
-            let ended = verdict(STALL, facts) == Verdict::End;
+            let decided = verdict(STALL, facts);
+            let ended = decided == Verdict::End;
             let in_window = facts.since_spared.is_some_and(|s| s < STALL);
-            let progressing = facts.exhausted && facts.since_progress < STALL;
+            let progressing = facts.since_progress < STALL;
             let sparable = facts.reader_waiting && (facts.since_spared.is_none() || facts.progressed_since_spared);
             let confirmed = facts.since_condemned.is_some_and(|s| s >= confirmation(STALL));
             prop_assert_eq!(ended, !in_window && !progressing && !sparable && confirmed);
+            if progressing {
+                prop_assert_eq!(decided, Verdict::Ignore);
+            }
         }
 
         /// A client that never makes progress is spared at most once, however its reader waits, and is ended within
@@ -480,7 +490,6 @@ mod tests {
             let mut ended_at = None;
             for (n, reader_waiting) in waits.iter().enumerate() {
                 let facts = StallFacts {
-                    exhausted: true,
                     since_progress: STALL + tick * n as u32,
                     reader_waiting: *reader_waiting,
                     since_spared,

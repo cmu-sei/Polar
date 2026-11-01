@@ -23,9 +23,9 @@
 
 //! The broker's bounds under a subscriber that does not keep up (docs/architecture/cassini-backpressure.md, "Tests,
 //! first"): one that stops reading holds its topic back, the publisher is slowed by TCP and its acknowledgements stop,
-//! the budget holds no more than its limit, and once the subscriber has been above its high water for the stall bound
-//! its connection is ended and the publisher goes on; one that is slow but within the bound receives everything, in
-//! order.
+//! the budget holds no more than its limit, and once the subscriber has acknowledged nothing for the stall bound its
+//! connection is ended and the publisher goes on; one that is slow but keeps acknowledging is never ended, holds its
+//! topic back for as long as it is above its high water, and receives everything, in order.
 mod support;
 use cassini_types::MAX_FRAME_BYTES;
 use std::time::{Duration, Instant};
@@ -187,6 +187,318 @@ async fn a_slow_subscriber_within_the_stall_bound_receives_everything_in_order()
             .await;
         let stats = budget.stats();
         assert_eq!(stats.slow_disconnections, 0, "{stats:?}");
+    })
+    .await;
+}
+
+/// A subscriber's backlog on `topic`, as the budget counts it.
+fn backlog_of(
+    budget: &cassini_broker::budget::Budget,
+    topic: &str,
+) -> std::sync::Arc<cassini_types::held::Backlog> {
+    budget
+        .holders()
+        .into_iter()
+        .find(|b| b.owner().is_some_and(|(_, t)| t == topic))
+        .expect("the subscriber's backlog")
+}
+
+/// Publishes `count` messages of `MESSAGE` bytes to `topic`, each numbered in its first four bytes from `first`.
+fn publish_numbered(publisher: &TestClient, topic: &str, first: u32, count: u32) {
+    for n in first..first + count {
+        let mut payload = vec![0u8; MESSAGE];
+        payload[..4].copy_from_slice(&n.to_be_bytes());
+        publisher.publish(topic, &payload);
+    }
+}
+
+/// The stall rule ends only a subscriber that makes no progress (the maintainer, 2026-11-01): one that keeps
+/// acknowledging, however slowly, is never ended. Here it acknowledges half a MiB a second, under the 0.56 MB/s below
+/// which the old rule ended a subscriber at the default bound (its outbox had to fall to half its high water within
+/// the bound; 8 MiB/s at this test's), and stays above its high water for four stall bounds. Its topic is held back
+/// meanwhile, so its publisher goes at its pace, and once it reads faster it is given everything, in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_subscriber_that_keeps_acknowledging_is_not_ended_and_holds_its_topic_back() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(ROOMY, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut slow = RawConnection::open(&broker, "slow.test", Some(4096)).await;
+        let session = slow.register().await;
+        slow.subscribe(&session, "news").await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        // 120 MiB: its high water (32 MiB) and the publisher's window (64 MiB) over.
+        let count = (120 * 1024 * 1024 / MESSAGE) as u32;
+        publish_numbered(&publisher, "news", 0, count);
+
+        // A message every half second for four stall bounds: 16 of the 64 it would take to fall to its low water.
+        let slow_for = stall * 4;
+        let began = Instant::now();
+        let mut received = Vec::new();
+        while began.elapsed() < slow_for {
+            let delivery = slow
+                .next_delivery("news", Duration::from_secs(10))
+                .await
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a subscriber that acknowledges is not ended (after {} in {:?}): {:?}",
+                        received.len(),
+                        began.elapsed(),
+                        budget.stats()
+                    )
+                });
+            received.push(u32::from_be_bytes(
+                delivery.payload[..4].try_into().unwrap(),
+            ));
+            slow.acknowledge(delivery.delivery_id).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let rate = (received.len() * MESSAGE) as f64 / began.elapsed().as_secs_f64();
+        assert!(
+            rate < 560_000.0,
+            "it acknowledged under the old rule's threshold: {rate} bytes a second"
+        );
+        let owed = backlog_of(&budget, "news");
+        assert!(
+            owed.holds_back(),
+            "still above its high water, it holds its topic back ({} bytes owed)",
+            owed.bytes()
+        );
+        assert!(
+            publisher.acknowledged("news") < count as usize,
+            "its publisher is held to its pace"
+        );
+        let stats = budget.stats();
+        assert_eq!(stats.slow_disconnections, 0, "not ended: {stats:?}");
+        assert_eq!(
+            stats.alarms, 0,
+            "its high water held the topic back, not the budget: {stats:?}"
+        );
+
+        // It reads at full speed now, and loses nothing.
+        while received.len() < count as usize {
+            let delivery = slow
+                .next_delivery("news", Duration::from_secs(10))
+                .await
+                .expect("the subscriber is given every message");
+            received.push(u32::from_be_bytes(
+                delivery.payload[..4].try_into().unwrap(),
+            ));
+            slow.acknowledge(delivery.delivery_id).await;
+        }
+        assert_eq!(
+            received,
+            (0..count).collect::<Vec<_>>(),
+            "everything, in order"
+        );
+        publisher
+            .wait_for("every acknowledgement", Duration::from_secs(30), |c| {
+                c.acknowledged("news") == count as usize
+            })
+            .await;
+        assert_eq!(
+            budget.stats().slow_disconnections,
+            0,
+            "{:?}",
+            budget.stats()
+        );
+    })
+    .await;
+}
+
+/// The stall rule's other half, as before: a subscriber that acknowledges nothing for the stall bound is ended. The
+/// bound runs from its last acknowledgement, however long it was above its high water acknowledging slowly before, and
+/// the publisher then goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscriber_that_stops_acknowledging_is_ended_the_stall_bound_after_its_last_acknowledgement()
+ {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(ROOMY, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut slow = RawConnection::open(&broker, "slow.test", Some(4096)).await;
+        let session = slow.register().await;
+        slow.subscribe(&session, "news").await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        let count = (120 * 1024 * 1024 / MESSAGE) as u32;
+        publish_numbered(&publisher, "news", 0, count);
+
+        // Slow, above its high water, for three stall bounds: not ended.
+        let began = Instant::now();
+        let mut last_acknowledged = Instant::now();
+        while began.elapsed() < stall * 3 {
+            let delivery = slow
+                .next_delivery("news", Duration::from_secs(10))
+                .await
+                .expect("a subscriber that acknowledges is not ended");
+            slow.acknowledge(delivery.delivery_id).await;
+            last_acknowledged = Instant::now();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(backlog_of(&budget, "news").holds_back());
+        assert_eq!(
+            budget.stats().slow_disconnections,
+            0,
+            "{:?}",
+            budget.stats()
+        );
+
+        // Then it acknowledges nothing (it reads on): ended, the stall bound after its last acknowledgement.
+        assert!(
+            slow.closed_within(stall * 4).await,
+            "a subscriber that acknowledges nothing for the stall bound is ended: {:?}",
+            budget.stats()
+        );
+        let after = last_acknowledged.elapsed();
+        assert!(
+            after >= stall,
+            "not before the stall bound from its last acknowledgement: {after:?}"
+        );
+        assert_eq!(
+            budget.stats().slow_disconnections,
+            1,
+            "{:?}",
+            budget.stats()
+        );
+        publisher
+            .wait_for("every acknowledgement", Duration::from_secs(30), |c| {
+                c.acknowledged("news") == count as usize
+            })
+            .await;
+    })
+    .await;
+}
+
+/// The budget still always recovers (design goal 4) with no slow subscriber ended. While it is exhausted nothing is
+/// admitted, so what it holds only falls, by each acknowledgement; a subscriber that acknowledges nothing is still
+/// ended and, away under the exhausted budget, lets go of what it held. Seven slow subscribers, each above its high
+/// water and holding its topic back, and one that reads nothing, exhaust it. The slow ones acknowledge a message a
+/// second (a quarter of a MiB a second each): none is ended, though the budget stays exhausted for longer than the
+/// stall bound; the silent one is ended; what is held never grows while the budget is exhausted; and it recovers, at
+/// the slow ones' pace. Then they read at full speed and are given everything, in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_subscribers_that_keep_acknowledging_cannot_hold_an_exhausted_budget_for_good() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stall = Duration::from_secs(3);
+    with_broker_bounded(BUDGET, stall, move |broker| async move {
+        let budget = broker.budget();
+        let high_water = broker.bounds().high_water();
+        let topics = 7u32; // each above its 8 MiB high water: 56 MiB of the 64 MiB budget
+        let rounds = 40u32; // 10 MiB a topic
+        let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;
+        let session = silent.register().await;
+        silent.subscribe(&session, "stuck").await;
+        let fast = Arc::new(AtomicBool::new(false));
+        let mut slow = Vec::new();
+        for t in 0..topics {
+            let mut connection =
+                RawConnection::open(&broker, &format!("slow-{t}.test"), Some(4096)).await;
+            let session = connection.register().await;
+            let topic = format!("t{t}");
+            connection.subscribe(&session, &topic).await;
+            let fast = fast.clone();
+            slow.push(tokio::spawn(async move {
+                let mut received = Vec::new();
+                while received.len() < rounds as usize {
+                    let delivery = connection
+                        .next_delivery(&topic, Duration::from_secs(30))
+                        .await
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "a slow subscriber is not ended ({topic}, after {})",
+                                received.len()
+                            )
+                        });
+                    received.push(u32::from_be_bytes(
+                        delivery.payload[..4].try_into().unwrap(),
+                    ));
+                    connection.acknowledge(delivery.delivery_id).await;
+                    if !fast.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+                received
+            }));
+        }
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publish_numbered(&publisher, "stuck", 0, 16); // 4 MiB, under its high water
+        for n in 0..rounds {
+            for t in 0..topics {
+                publish_numbered(&publisher, &format!("t{t}"), n, 1);
+            }
+        }
+
+        // Watch the budget through its first exhaustion: what it holds never grows while it is exhausted.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut exhausted_at: Option<(Instant, u64)> = None;
+        let mut held = usize::MAX;
+        let mut above = 0;
+        let lifted_after = loop {
+            let stats = budget.stats();
+            match exhausted_at {
+                None if stats.exhausted => {
+                    exhausted_at = Some((Instant::now(), stats.alarms));
+                    held = stats.used;
+                    above = (0..topics)
+                        .filter(|t| backlog_of(&budget, &format!("t{t}")).holds_back())
+                        .count();
+                }
+                Some((at, alarms)) if !stats.exhausted || stats.alarms != alarms => {
+                    break at.elapsed();
+                }
+                Some(_) => {
+                    assert!(
+                        stats.used <= held,
+                        "what is held never grows while the budget is exhausted ({} after {held}): {stats:?}",
+                        stats.used
+                    );
+                    held = stats.used;
+                }
+                None => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the budget recovers: {stats:?}, {:?}",
+                budget.largest_holders(9)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            above, topics as usize,
+            "every slow subscriber was above its high water ({high_water}) when the budget was exhausted: {:?}",
+            budget.largest_holders(9)
+        );
+        assert!(
+            lifted_after > stall,
+            "exhausted for longer than the stall bound, so the rule had its time to act: {lifted_after:?}"
+        );
+        assert!(
+            silent.closed_within(Duration::from_secs(5)).await,
+            "the subscriber that acknowledged nothing was ended: {:?}",
+            budget.stats()
+        );
+        assert_eq!(
+            budget.stats().slow_disconnections,
+            1,
+            "only it: {:?}",
+            budget.stats()
+        );
+
+        // They read at full speed now, and lose nothing.
+        fast.store(true, Ordering::SeqCst);
+        for subscriber in slow {
+            assert_eq!(
+                subscriber.await.unwrap(),
+                (0..rounds).collect::<Vec<_>>(),
+                "everything, in order"
+            );
+        }
+        publisher
+            .wait_for("every acknowledgement", Duration::from_secs(30), |c| {
+                (0..topics).all(|t| c.acknowledged(&format!("t{t}")) == rounds as usize)
+                    && c.acknowledged("stuck") == 16
+            })
+            .await;
+        assert_eq!(budget.stats().slow_disconnections, 1, "{:?}", budget.stats());
     })
     .await;
 }
