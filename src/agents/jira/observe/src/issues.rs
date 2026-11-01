@@ -772,6 +772,53 @@ mod tests {
         assert_eq!(issue["fields"], json!({}));
     }
 
+    mod apache {
+        include!("../../common/fixtures/apache.rs");
+    }
+
+    /// Real issues from Apache's Jira, prepared as the observer publishes them: exactly the pinned form
+    /// jira-processor's tests write, each of which decodes as a `JiraIssue`, its authors without email included.
+    #[test]
+    fn apache_s_issues_are_published_in_the_pinned_form() {
+        let fields: Vec<JiraField> = serde_json::from_str(apache::FIELDS).unwrap();
+        let site = SiteFields::new(&fields);
+        let search: Value = serde_json::from_str(apache::SEARCH).unwrap();
+        let issues = search["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), apache::PUBLISHED.len());
+        for (issue, pinned) in issues.iter().zip(apache::PUBLISHED) {
+            let mut issue = issue.clone();
+            assert!(site.prepare(&mut issue));
+            let pinned: Value = serde_json::from_str(pinned).unwrap();
+            assert_eq!(issue, pinned, "{}", issue["key"]);
+
+            let decoded: jira_common::types::JiraIssue =
+                serde_json::from_value(issue.clone()).unwrap();
+            assert!(!decoded.changelog.histories.is_empty(), "{}", decoded.key);
+            assert!(
+                decoded.changelog.histories.iter().all(|h| h
+                    .author
+                    .as_ref()
+                    .is_some_and(|a| a.email_address.is_none() && a.identity().is_some())),
+                "{}",
+                decoded.key
+            );
+            // The system field `project`, never Apache's custom field of the same display name.
+            assert_eq!(issue["polar_system"]["project"]["key"], "COMDEV");
+            assert!(issue["fields"]["Project"].is_null());
+        }
+    }
+
+    #[test]
+    fn apache_s_server_info_says_server() {
+        let info: Value = serde_json::from_str(apache::SERVER_INFO).unwrap();
+        assert_eq!(
+            info["deploymentType"]
+                .as_str()
+                .and_then(JiraDeployment::from_server_info),
+            Some(JiraDeployment::ServerOrDataCenter)
+        );
+    }
+
     #[test]
     fn without_the_system_field_nothing_is_marked() {
         assert_eq!(

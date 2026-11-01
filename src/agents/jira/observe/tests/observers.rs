@@ -1023,6 +1023,66 @@ async fn the_deployment_is_what_the_site_says_it_is_and_otherwise_the_setting() 
     }
 }
 
+mod apache {
+    include!("../../common/fixtures/apache.rs");
+}
+
+/// A site that answers as Apache's Jira did (its serverInfo, its fields, a page of its issues with their changelogs,
+/// total 300): the issue observer, reading anonymously as it would there, publishes each issue in the pinned form.
+#[tokio::test]
+async fn apache_s_answers_are_published_as_the_processor_expects() {
+    let server = MockServer::start().await;
+    for (endpoint, body) in [
+        (SERVER_INFO, apache::SERVER_INFO),
+        ("/rest/api/2/field", apache::FIELDS),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(SEARCH))
+        .and(wiremock::matchers::query_param("startAt", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(apache::SEARCH, "application/json"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // The rest of the 300 are not here: the next page is empty, which ends the walk.
+    Mock::given(method("GET"))
+        .and(path(SEARCH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({ "startAt": 3, "maxResults": 50, "total": 300, "issues": [] }),
+            ),
+        )
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    mount_site(&server).await;
+    let (client, topics, published) = recording().await;
+    let mut args = args(&server, client);
+    args.auth = JiraAuth::Anonymous;
+    let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
+
+    assert!(published_on(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 3).await);
+    let sent: Vec<serde_json::Value> = decoded(&published, JIRA_ISSUES_CONSUMER_TOPIC)
+        .into_iter()
+        .map(|data| match data {
+            JiraData::Issues(issue) => serde_json::from_str(&issue.json).unwrap(),
+            _ => panic!("not an issue"),
+        })
+        .collect();
+    let pinned: Vec<serde_json::Value> = apache::PUBLISHED
+        .iter()
+        .map(|p| serde_json::from_str(p).unwrap())
+        .collect();
+    assert_eq!(sent, pinned);
+    observer.stop(None);
+}
+
 /// Reading anonymously (JIRA_ANONYMOUS): no request carries a credential, and the token is never checked, since
 /// there is none.
 #[tokio::test]

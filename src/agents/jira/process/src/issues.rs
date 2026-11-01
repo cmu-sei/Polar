@@ -1194,6 +1194,75 @@ mod tests {
         assert_eq!(ops.len(), 1);
     }
 
+    #[allow(
+        dead_code,
+        reason = "the processor reads only what the observer publishes; the rest is the observer's input"
+    )]
+    mod apache {
+        include!("../../common/fixtures/apache.rs");
+    }
+
+    /// Real issues from Apache's Jira, as jira-observer publishes them: each decodes (its changelog authors have no
+    /// email), every op compiles, and the issue is written with its last update, who reported and created it, its
+    /// type, its project (the system field, not Apache's custom field named "Project") and each change in its
+    /// history with who made it.
+    #[test]
+    fn apache_s_issues_are_written_whole() {
+        let mut authors = Vec::new();
+        for published in apache::PUBLISHED {
+            let issue: JiraIssue = serde_json::from_str(published).unwrap();
+            let ops = build_ops_for_issue(&issue);
+            assert_eq!(all_compile(&ops), Ok(()), "{}", issue.key);
+            assert!(
+                issue_props(&ops).iter().any(|p| p.0 == UPDATED_MS),
+                "{}",
+                issue.key
+            );
+            assert!(
+                issue_props(&ops).iter().any(|p| p.0 == "Summary"),
+                "{}",
+                issue.key
+            );
+            let edges = edge_types(&ops);
+            for expected in ["REPORTED", "CREATED", "HAS_TYPE", "PART_OF", "Transitioned"] {
+                assert!(
+                    edges.iter().any(|e| e == expected),
+                    "{}: no {expected} in {edges:?}",
+                    issue.key
+                );
+            }
+            assert!(!edges.iter().any(|e| e == "HAS_PROJECT"), "{}", issue.key);
+            authors.push((issue.key.clone(), changelog_authors(&ops)));
+        }
+        assert_eq!(
+            authors,
+            [
+                ("COMDEV-3".to_string(), vec!["btsulliv".to_string(); 2]),
+                // One entry per item: the second change has three.
+                (
+                    "COMDEV-4".to_string(),
+                    vec![
+                        "sri_kumar_4u".to_string(),
+                        "rgardler".to_string(),
+                        "rgardler".to_string(),
+                        "rgardler".to_string()
+                    ]
+                ),
+                ("COMDEV-5".to_string(), vec!["tanjiaqi".to_string(); 2]),
+            ]
+        );
+        // COMDEV-4 is assigned; the others are not.
+        let assigned: Vec<bool> = apache::PUBLISHED
+            .iter()
+            .map(|p| {
+                edge_types(&build_ops_for_issue(&serde_json::from_str(p).unwrap()))
+                    .iter()
+                    .any(|e| e == "ASSIGNED")
+            })
+            .collect();
+        assert_eq!(assigned, [false, true, false]);
+    }
+
     /// Every op compiles to a query, as the graph controller compiles each op of the issue's one transaction: one that
     /// did not would fail the whole issue.
     fn all_compile(ops: &[GraphOp]) -> Result<(), String> {
