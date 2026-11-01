@@ -35,9 +35,12 @@
 //! Unlike escrow_key.rs's own request/reply pair, a real failure mode
 //! exists here -- the identity asked about may never have been issued
 //! a certificate at all, or its only one may have been revoked. Found
-//! carries the actual signed PEM, sourced from
-//! CredentialsState::certificate_for (see state.rs), which already
-//! guarantees at most one non-revoked entry can exist per identity.
+//! carries the actual signed PEM: the identity's escrow certificate
+//! (`CertType::Service`), one per workload and shared by its instances,
+//! sourced from CredentialsState::agent_escrow_certificate_for (see
+//! state.rs), never a revoked one. Never an instance's mTLS certificate
+//! (until 2026-11-01 it was: the wrong key for every workload;
+//! docs/architecture/authority-model.md, "Multi-instance workloads").
 
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};

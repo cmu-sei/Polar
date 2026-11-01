@@ -21,9 +21,17 @@
    DM26-0670
 */
 
+//! The certificate one agent encrypts to another with is that agent's
+//! escrow certificate (`CertType::Service`), one per workload, shared
+//! by its instances -- never an instance's mTLS client certificate
+//! (docs/architecture/authority-model.md, "Multi-instance workloads").
+//! Until 2026-11-01 this answered with the mTLS certificate
+//! (`CredentialsState::certificate_for`), which pointed every caller at
+//! the wrong key for every workload.
+//!
 //! Unlike EscrowKeyHandler (a synchronous read of an already-loaded,
 //! in-memory key), this handler genuinely needs to ask LedgerActor
-//! for the current state -- CredentialsState::certificate_for lives
+//! for the current state -- CredentialsState::agent_escrow_certificate_for lives
 //! inside LedgerActor's own state, not something this handler can
 //! hold a direct reference to. Mirrors issuance.rs's own
 //! call_check_grant/call_check_renewal pattern: a local, Result-based
@@ -32,7 +40,7 @@
 //! helpers, never used by real handler logic).
 
 use crate::ledger::LedgerMessage;
-use crate::state::CertificateRecord;
+use crate::state::AgentEscrowCertificateRecord;
 use credentials_agent_common::certificate::{CertificateReply, CertificateRequest};
 use ractor::ActorRef;
 use tracing::error;
@@ -43,7 +51,7 @@ pub struct CertificateHandler {
 
 impl CertificateHandler {
     pub async fn handle(&self, request: CertificateRequest) -> CertificateReply {
-        match call_check_certificate(&self.ledger, &request.identity).await {
+        match call_check_escrow_certificate(&self.ledger, &request.identity).await {
             Ok(Some(record)) => CertificateReply::Found {
                 certificate_pem: record.certificate_pem,
             },
@@ -56,13 +64,13 @@ impl CertificateHandler {
     }
 }
 
-async fn call_check_certificate(
+async fn call_check_escrow_certificate(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
-) -> Result<Option<CertificateRecord>, String> {
+) -> Result<Option<AgentEscrowCertificateRecord>, String> {
     match ractor::rpc::call(
         ledger,
-        |reply| LedgerMessage::CheckCertificate {
+        |reply| LedgerMessage::CheckAgentEscrowKey {
             identity: identity.to_string(),
             reply,
         },
@@ -117,6 +125,65 @@ mod tests {
         assert!(matches!(reply, CertificateReply::NotFound));
     }
 
+    /// What one agent encrypts to another with is that agent's escrow certificate, one per workload: the lookup answers
+    /// with it, never with an instance's mTLS certificate (docs/architecture/authority-model.md, "Multi-instance
+    /// workloads"). Until 2026-11-01 it answered with the mTLS certificate; this test, then, asserted that.
+    #[tokio::test]
+    async fn answers_with_the_workload_s_escrow_certificate_and_never_its_mtls_certificate() {
+        let ledger = spawn_test_ledger().await;
+        let mtls_pem = "-----BEGIN CERTIFICATE-----\nmtls\n-----END CERTIFICATE-----\n";
+        let escrow_pem = "-----BEGIN CERTIFICATE-----\nescrow\n-----END CERTIFICATE-----\n";
+        let append = |event| {
+            let ledger = ledger.clone();
+            async move {
+                ractor::rpc::call(
+                    &ledger,
+                    |reply| LedgerMessage::Append { event, reply },
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+        };
+        append(CredentialsEvent::IssuanceCompleted {
+            identity: "alice".to_string(),
+            instance_binding: "pod-uid-1".to_string(),
+            serial: "serial-1".to_string(),
+            timestamp: 2000,
+            cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+            grant_key: None,
+            certificate_pem: mtls_pem.to_string(),
+        })
+        .await;
+        let handler = CertificateHandler {
+            ledger: ledger.clone(),
+        };
+        let ask = || {
+            handler.handle(CertificateRequest {
+                identity: "alice".to_string(),
+            })
+        };
+        assert_eq!(
+            ask().await,
+            CertificateReply::NotFound,
+            "an mTLS certificate alone is nothing to encrypt to"
+        );
+        append(CredentialsEvent::AgentEscrowIssuanceCompleted {
+            identity: "alice".to_string(),
+            instance_binding: "pod-uid-1".to_string(),
+            serial: "service-1".to_string(),
+            timestamp: 2500,
+            certificate_pem: escrow_pem.to_string(),
+        })
+        .await;
+        assert_eq!(
+            ask().await,
+            CertificateReply::Found {
+                certificate_pem: escrow_pem.to_string()
+            }
+        );
+    }
+
     #[tokio::test]
     async fn returns_the_real_certificate_pem_once_issued() {
         let ledger = spawn_test_ledger().await;
@@ -143,13 +210,12 @@ mod tests {
         let _ = ractor::rpc::call(
             &ledger,
             |reply| LedgerMessage::Append {
-                event: CredentialsEvent::IssuanceCompleted {
+                // The workload's escrow certificate: what the lookup is for.
+                event: CredentialsEvent::AgentEscrowIssuanceCompleted {
                     identity: "alice".to_string(),
                     instance_binding: "pod-uid-1".to_string(),
                     serial: "serial-1".to_string(),
                     timestamp: 2000,
-                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
-                    grant_key: None,
                     certificate_pem: expected_pem.to_string(),
                 },
                 reply,
