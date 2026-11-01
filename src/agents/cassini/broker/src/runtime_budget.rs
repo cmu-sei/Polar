@@ -138,6 +138,9 @@ pub struct Tunables {
     pub available_share: (u64, u64),
     /// What the broker never pushes the host's `MemAvailable` below, in bytes.
     pub reserve: u64,
+    /// The share of the container's `memory.max` the budget may grow into, as (numerator, denominator); the rest is the
+    /// broker's own working memory.
+    pub limit_share: (u64, u64),
     /// PSI `some avg10` (percent) above which memory is under pressure.
     pub psi_threshold: f64,
     /// How much the budget grows, or falls toward the target, in one sample, in bytes.
@@ -162,6 +165,7 @@ impl Default for Tunables {
             floor_frames: 4,
             available_share: (1, 2),
             reserve: 512 * MIB,
+            limit_share: (1, 2),
             psi_threshold: 10.0,
             step: 16 * MIB,
             cut: (1, 2),
@@ -184,12 +188,18 @@ fn share(value: u64, (num, den): (u64, u64)) -> u64 {
     ((value as u128 * num as u128) / den.max(1) as u128) as u64
 }
 
-/// What memory allows at start: the lesser of the room under the container's limit and the host's `MemAvailable`.
-pub fn available_at_start(sample: &MemorySample) -> Option<u64> {
-    let under_limit = match (sample.limit, sample.current) {
-        (Some(limit), current) => Some(limit.saturating_sub(current.unwrap_or(0))),
-        (None, _) => None,
-    };
+/// What the container's limit allows the budget: its share of the limit (half: the rest is the broker's own working
+/// memory, the maintainer, 2026-11-01), and never more than the room the working memory leaves under the limit.
+fn under_limit(limit: u64, working: u64, t: &Tunables) -> u64 {
+    share(limit, t.limit_share).min(limit.saturating_sub(working))
+}
+
+/// What memory allows at start: the lesser of what the container's limit allows (`under_limit`) and the host's
+/// `MemAvailable`.
+pub fn available_at_start(sample: &MemorySample, t: &Tunables) -> Option<u64> {
+    let under_limit = sample
+        .limit
+        .map(|limit| under_limit(limit, sample.current.unwrap_or(0), t));
     match (under_limit, sample.mem_available) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -213,13 +223,14 @@ pub fn startup_check(
             tunables.floor_frames
         ));
     }
-    if let Some(available) = available_at_start(sample)
+    if let Some(available) = available_at_start(sample, tunables)
         && available < floor
     {
         return Err(format!(
             "the broker needs at least {floor} bytes of memory for its budget ({} frames of {MAX_FRAME_BYTES} bytes) \
-             and has {available} (memory.max {:?}, memory.current {:?}, MemAvailable {:?}): give the container at \
-             least {floor} bytes more than its working memory",
+             and has {available} (memory.max {:?}, memory.current {:?}, MemAvailable {:?}): give the container a \
+             memory limit of at least twice {floor} bytes (half of it is the budget's), and that much more than its \
+             working memory",
             tunables.floor_frames, sample.limit, sample.current, sample.mem_available
         ));
     }
@@ -231,7 +242,7 @@ pub fn startup_check(
 pub enum CeilingKind {
     /// A share of the host's `MemAvailable`, above the reserve.
     MemAvailable,
-    /// The container's `memory.max`, less the broker's working memory.
+    /// The container's `memory.max`: half of it, or less when the broker's working memory takes more than the other half.
     Limit,
     /// Memory pressure cut the budget.
     Pressure,
@@ -414,10 +425,9 @@ impl Controller {
             ));
         }
         if let (Some(limit), Some(current)) = (memory.limit, memory.current) {
-            let working = current.saturating_sub(held);
-            let under_limit = limit.saturating_sub(working);
-            if under_limit < ceiling {
-                ceiling = under_limit;
+            let allowed = under_limit(limit, current.saturating_sub(held), &t);
+            if allowed < ceiling {
+                ceiling = allowed;
                 kind = CeilingKind::Limit;
             }
         }
@@ -531,8 +541,9 @@ mod tests {
         };
         let refused = startup_check(&short, &t, None).unwrap_err();
         assert!(refused.contains(&t.floor().to_string()), "{refused}");
+        // Half of the 300 MiB limit (the maintainer, 2026-11-01), under the 200 MiB the working memory leaves.
         assert!(
-            refused.contains(&(200 * MIB).to_string()),
+            refused.contains(&(150 * MIB).to_string()),
             "the room it has: {refused}"
         );
         let host = MemorySample {
@@ -658,11 +669,10 @@ mod tests {
 
     /// The broker's container has a 1 GiB limit in the catalog (infra/config/workloads/cassini.nuon, 2026-11-01): the
     /// controller reads it from the cgroup's `memory.max`, the floor of four frames fits under it at start, and the
-    /// ceiling is the limit less the broker's working memory outside the budget, not a share of it, and well under
-    /// the share of the host's `MemAvailable` that bounded it without one.
+    /// ceiling is half the limit (the maintainer, 2026-11-01: the other half is the broker's own working memory), well
+    /// under the share of the host's `MemAvailable` that bounded it without one.
     #[test]
-    fn under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_the_limit_less_its_working_memory()
-     {
+    fn under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_half_the_limit() {
         let t = Tunables::default();
         let dir = tempfile::tempdir().unwrap();
         let write = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
@@ -680,7 +690,7 @@ mod tests {
         let sample = memory.sample();
         assert_eq!(sample.limit, Some(GIB), "memory.max, read");
         assert_eq!(sample.current, Some(30 * MIB));
-        assert_eq!(available_at_start(&sample), Some(GIB - 30 * MIB));
+        assert_eq!(available_at_start(&sample, &t), Some(GIB / 2));
         assert!(
             startup_check(&sample, &t, None).is_ok(),
             "the floor, 256 MiB, fits"
@@ -689,10 +699,26 @@ mod tests {
         let mut c = Controller::new(t.clone(), STALL, None);
         c.sample(second(0), &sample, 0, 0);
         let s = c.snapshot(false, 0);
-        assert_eq!(
-            s.ceiling,
-            GIB - 30 * MIB,
-            "the limit less the working memory"
+        assert_eq!(s.ceiling, GIB / 2, "half the limit");
+
+        // Half the limit, or less when the broker's own memory already takes more than the other half.
+        let busy = MemorySample {
+            current: Some(700 * MIB),
+            ..sample.clone()
+        };
+        let mut c2 = Controller::new(t.clone(), STALL, None);
+        c2.sample(second(0), &busy, 0, 0);
+        assert_eq!(c2.snapshot(false, 0).ceiling, GIB - 700 * MIB);
+
+        // A limit whose half is under the floor is refused at start, saying so.
+        let small = MemorySample {
+            limit: Some(400 * MIB),
+            current: Some(30 * MIB),
+            ..sample.clone()
+        };
+        assert!(
+            startup_check(&small, &t, None).is_err(),
+            "half of 400 MiB is under the floor"
         );
         assert!(
             s.ceiling < 49 * GIB / 2,
@@ -704,7 +730,7 @@ mod tests {
             ..sample.clone()
         };
         c.sample(second(1), &holding, 200 * MIB, 0);
-        assert_eq!(c.snapshot(false, 200 * MIB).ceiling, GIB - 30 * MIB);
+        assert_eq!(c.snapshot(false, 200 * MIB).ceiling, GIB / 2);
 
         // The floor holds at start only while the working memory leaves it room: 768 MiB of it leaves 256 MiB.
         let crowded = MemorySample {

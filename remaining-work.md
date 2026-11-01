@@ -761,9 +761,8 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
     no progress": the budget still recovers, at the slow subscribers' pace rather than within `T_stall`).
   - The broker's workload gets a memory limit in the catalog, 1 GiB, so the controller's ceiling is real (u7c had none:
     a ceiling of about 27 GB). DONE 2026-11-01, not deployed (cassini-backpressure.md, "The broker's memory limit,
-    1 GiB"): request and limit 1 GiB; the ceiling is the limit less the working memory, about 994 MiB, not half of it.
-    FOR THE MAINTAINER: whether the ceiling under a limit should be a share of it, to leave the broker's working memory
-    room before an OOM kill. To verify on u7c: that its nested rootless cgroup enforces and shows `memory.max`.
+    1 GiB"): request and limit 1 GiB; the ceiling was first the limit less the working memory (about 994 MiB); DECIDED by the maintainer the same day: half the limit (512 MiB), built.
+    To verify on u7c: that its nested rootless cgroup enforces and shows `memory.max`.
   - The harness runs several publisher identities, so the controller is exercised (one publisher and one subscriber held
     at most 145 MB, never the budget's 3/4); then the tunables are measured again.
   - Profile where the new broker's CPU goes: 8-20% more per message saturated, up to 45% at set rates; -13% at 64 KiB.

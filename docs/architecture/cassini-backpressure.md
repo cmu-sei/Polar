@@ -502,7 +502,8 @@ counters; `PressureManager::sample`, `pressure.rs:169`).
     recovers when memory returns. The broker does not exit.
 - **Ceiling,** sampled every second through a `MemorySource`: the least of
   - a share of `MemAvailable` above a reserve, plus what is held: `held + (MemAvailable − reserve) × share`;
-  - `memory.max − (memory.current − held)`, the limit less the broker's working memory outside the budget;
+  - under a container limit, half of `memory.max` (`limit_share`), and never more than `memory.max − (memory.current −
+    held)`, the room the broker's working memory leaves;
   - under pressure, the budget cut by a factor. Pressure is PSI `some avg10` above a threshold, or new `high` or
     `oom_kill` counts in `memory.events`. A first reading of the counts is not news. Both files are optional.
 - **Target,** Little's law: the smoothed drain rate (bytes refunded a second) × the latency target. The latency target
@@ -554,11 +555,13 @@ both `agent.dhall` and `ca.dhall`; `resolve.nu` refuses a quantity it cannot rea
 container's limit is its cgroup's `memory.max`, which `SystemMemory` reads (`runtime_budget.rs:88`); then:
 - **The floor holds at start:** `memory.max − memory.current`, 1 GiB less the broker's memory at start (tens of MiB),
   is well over four frames (256 MiB); it would not be once the working memory passed 768 MiB.
-- **The ceiling is the limit less the broker's working memory, not half of it:** `memory.max − (memory.current −
-  held)`, about 1 GiB − 30 MiB = 994 MiB at rest (the fifth set's broker sat at 17 to 22 MB between runs and peaked at
-  56 to 115 MB). The share (½) applies only to the host's `MemAvailable` above its reserve, which on u7c is some 24 GB,
-  so the limit is what bounds it. Tested: `runtime_budget.rs`'s
-  `under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_the_limit_less_its_working_memory`.
+- **The ceiling is half the limit** (decided by the maintainer 2026-11-01): 512 MiB of a 1 GiB limit, the other half
+  left for the broker's own working memory, which grows with load (the fifth set's broker sat at 17 to 22 MB between
+  runs and peaked at 56 to 115 MB); never more than `memory.max − (memory.current − held)`. First built as the limit less
+  the working memory (about 994 MiB at rest), which left a load spike in working memory to meet an OOM kill between two
+  samples. A limit whose half is under the floor (four frames) is refused at start, saying to give at least twice the
+  floor. Tested: `runtime_budget.rs`'s `under_the_catalog_s_one_gib_limit_the_broker_starts_and_its_ceiling_is_half_the_limit`
+  and `a_broker_below_its_floor_of_four_frames_does_not_start_and_says_why`.
 - **For the maintainer:** that ceiling leaves the broker only what is outside the budget at the last sample (one a
   second) between its budget and the kernel's OOM kill, while a write's copy of a frame, TLS buffers and the uncharged
   per-message overhead (review finding 6) grow with load. If the ceiling under a limit should be a share of it (half, as

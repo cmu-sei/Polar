@@ -316,8 +316,8 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   `infra/config/workloads/cassini.nuon`, `memory: { request: "1Gi", limit: "1Gi" }`, rendered as the container's
   resources by `infra/schema/functions.dhall`, `memoryOf`). The limit is the cgroup's `memory.max`, which the controller
   reads (`SystemMemory`, `runtime_budget.rs`): the floor of 256 MiB fits under it at start, and the ceiling becomes the
-  limit less the broker's working memory, about 994 MiB at rest (not half the limit: the share is of the host's
-  `MemAvailable` only), where without a limit it was half the host's free memory, 27.5 GB on u7c
+  half the limit, 512 MiB (the maintainer, 2026-11-01: the other half is the broker's own working memory; less if
+  the working memory takes more than that), where without a limit it was half the host's free memory, 27.5 GB on u7c
   (cassini-backpressure.md, "The broker's memory limit, 1 GiB").
 - **Exhausted** when a frame cannot be charged: from then every reader waits (a memory alarm), until what is held
   falls to three quarters of the budget. The pressure manager says when it rises (with the five largest holders by
