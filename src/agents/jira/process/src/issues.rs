@@ -333,7 +333,8 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
             }
             FieldValue::Object(v) => {
                 if key == "parent" {
-                    if let Some(FirstTierField::Option(Some(parent_key))) = v.get("name") {
+                    // Jira's `parent` is `id`, `key`, `self` and the parent's `fields`: its `key` names the issue.
+                    if let Some(FirstTierField::Option(Some(parent_key))) = v.get("key") {
                         ops.push(GraphOp::EnsureEdge {
                             from: JiraNodeKey::Issue {
                                 key: issue.key.clone(),
@@ -1106,11 +1107,11 @@ mod tests {
     }
 
     #[test]
-    fn parent_produces_child_of_edge_to_the_named_issue() {
+    fn parent_produces_child_of_edge_to_the_issue_its_key_names() {
         let mut issue = empty_issue("PROJ-9");
         let mut parent = HashMap::new();
         parent.insert(
-            "name".to_string(),
+            "key".to_string(),
             FirstTierField::Option(Some("PROJ-1".to_string())),
         );
         issue
@@ -1261,6 +1262,84 @@ mod tests {
             })
             .collect();
         assert_eq!(assigned, [false, true, false]);
+    }
+
+    /// The `parent` object of a sub-task, as Apache's Jira answers it (COMDEV-53's, read anonymously on 2026-11-01
+    /// with `fields=parent`): `id`, `key`, `self` and the parent's own `fields`, and no `name`.
+    const APACHE_PARENT: &str = r##"{
+            "id": "12468504",
+            "key": "COMDEV-52",
+            "self": "https://issues.apache.org/jira/rest/api/2/issue/12468504",
+            "fields": {
+                "summary": "Launch ASF Mentor programme",
+                "status": {
+                    "self": "https://issues.apache.org/jira/rest/api/2/status/6",
+                    "description": "The issue is considered finished, the resolution is correct. Issues which are not closed can be reopened.",
+                    "iconUrl": "https://issues.apache.org/jira/images/icons/statuses/closed.png",
+                    "name": "Closed",
+                    "id": "6",
+                    "statusCategory": {
+                        "self": "https://issues.apache.org/jira/rest/api/2/statuscategory/3",
+                        "id": 3,
+                        "key": "done",
+                        "colorName": "success",
+                        "name": "Done"
+                    }
+                },
+                "priority": {
+                    "self": "https://issues.apache.org/jira/rest/api/2/priority/2",
+                    "iconUrl": "https://issues.apache.org/jira/images/icons/priorities/critical.svg",
+                    "name": "Critical",
+                    "id": "2"
+                },
+                "issuetype": {
+                    "self": "https://issues.apache.org/jira/rest/api/2/issuetype/3",
+                    "id": "3",
+                    "description": "A task that needs to be done.",
+                    "iconUrl": "https://issues.apache.org/jira/secure/viewavatar?size=xsmall&avatarId=21148&avatarType=issuetype",
+                    "name": "Task",
+                    "subtask": false,
+                    "avatarId": 21148
+                }
+            }
+        }"##;
+
+    /// A sub-task is CHILD_OF its parent, named by the parent's `key`: a real issue from Apache's Jira with a real
+    /// parent object decodes, every op compiles, and the edge goes to the parent's issue, with no node made of it.
+    #[test]
+    fn a_sub_task_is_child_of_its_parent_by_the_parent_s_key() {
+        let mut published: serde_json::Value = serde_json::from_str(apache::PUBLISHED[0]).unwrap();
+        published["fields"]["parent"] = serde_json::from_str(APACHE_PARENT).unwrap();
+        let issue: JiraIssue = serde_json::from_value(published).unwrap();
+        let ops = build_ops_for_issue(&issue);
+        assert_eq!(all_compile(&ops), Ok(()));
+
+        let child_of: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::EnsureEdge { rel_type, to, .. } if rel_type == "CHILD_OF" => Some(to),
+                _ => None,
+            })
+            .collect();
+        let [to] = child_of[..] else {
+            panic!("one CHILD_OF: {:?}", edge_types(&ops));
+        };
+        let (pattern, params) = key_pattern(to.as_ref());
+        assert!(pattern.contains("JiraIssue"), "{pattern}");
+        assert!(
+            params
+                .iter()
+                .any(|(_, v)| matches!(v, neo4rs::BoltType::String(s) if s.value == "COMDEV-52")),
+            "{params:?}"
+        );
+        // The parent is an edge, not a node of its own.
+        assert!(
+            ops.iter().all(|op| match op {
+                GraphOp::UpsertNode { key, .. } => !key_pattern(key.as_ref()).0.contains("parent"),
+                _ => true,
+            }),
+            "a node was made of the parent"
+        );
     }
 
     /// Every op compiles to a query, as the graph controller compiles each op of the issue's one transaction: one that

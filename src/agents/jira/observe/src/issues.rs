@@ -809,6 +809,24 @@ mod tests {
         }
     }
 
+    /// Apache's `/field` does not list `parent`, so a sub-task's parent object reaches the processor under `parent`,
+    /// as it makes CHILD_OF from (by the parent's `key`).
+    #[test]
+    fn a_sub_task_s_parent_is_published_under_parent() {
+        let fields: Vec<JiraField> = serde_json::from_str(apache::FIELDS).unwrap();
+        assert!(fields.iter().all(|f| f.id != "parent"));
+        let site = SiteFields::new(&fields);
+        let search: Value = serde_json::from_str(apache::SEARCH).unwrap();
+        let mut issue = search["issues"][0].clone();
+        issue["fields"]["parent"] = serde_json::json!({
+            "id": "12468504", "key": "COMDEV-52",
+            "self": "https://issues.apache.org/jira/rest/api/2/issue/12468504",
+            "fields": { "summary": "Launch ASF Mentor programme" }
+        });
+        assert!(site.prepare(&mut issue));
+        assert_eq!(issue["fields"]["parent"]["key"], "COMDEV-52");
+    }
+
     #[test]
     fn apache_s_server_info_says_server() {
         let info: Value = serde_json::from_str(apache::SERVER_INFO).unwrap();
