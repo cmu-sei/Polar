@@ -102,7 +102,8 @@ fn log_anonymous(prepared: &Prepared) {
     if prepared.anonymous {
         info!(
             "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows the public \
-             (anonymous users); what it hides from them is not read"
+             (anonymous users); what it hides from them is not read. The users observer is not started: a Data Center \
+             lists users only to a login (an anonymous user search is refused, 401)"
         );
     }
 }

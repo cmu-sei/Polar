@@ -398,7 +398,9 @@ impl ObserverSupervisor {
             .await?;
             state.groups = Some(observer);
         }
-        if state.users.is_none() {
+        // Reading anonymously the users observer is not started (DECIDED, to review): a Data Center lists users only
+        // to a login (Apache answers 401 to the user search and 404 to the picker), so it could only hold Credentials.
+        if state.users.is_none() && !state.prepared.anonymous {
             let (observer, _) = Actor::spawn_linked(
                 Some(JIRA_USER_OBSERVER.to_string()),
                 JiraUserObserver,
@@ -773,6 +775,30 @@ mod tests {
         state.stop_observers("the test is over").await;
     }
 
+    /// Reading anonymously, the users observer is not started: a Data Center lists users only to a login. The other
+    /// three are, groups among them (anonymously a Data Center answers no groups, not a refusal).
+    #[tokio::test]
+    async fn reading_anonymously_the_users_observer_is_not_started() {
+        let _turn = NAMED.lock().await;
+        let server = site_without_data().await;
+        let (health, _) = health_recorder().await;
+        let mut state = supervisor_state(
+            server.uri(),
+            true,
+            None,
+            FakeCrypto::giving(Gives::NotRegistered),
+            health,
+        )
+        .await;
+        let myself = sink::<ObserverSupervisorMessage>().await;
+        ObserverSupervisor::start_observers(&myself, &mut state)
+            .await
+            .unwrap();
+        assert!(state.users.is_none());
+        assert!(state.projects.is_some() && state.groups.is_some() && state.issues.is_some());
+        state.stop_observers("the test is over").await;
+    }
+
     /// Starting again (a new credential, new settings) stops every observer first, releases every hold, since the
     /// observers that held are gone, and starts new ones, which hold again what they meet again.
     #[tokio::test]
@@ -859,7 +885,8 @@ mod tests {
         ObserverSupervisor::start_observers(&myself, &mut state)
             .await
             .unwrap();
-        assert_eq!(running(&state), 4);
+        // Read anonymously: three, the users observer not among them.
+        assert_eq!(running(&state), 3);
 
         // The placeholder address: nothing can be read.
         state.configuration = Some(
@@ -886,7 +913,8 @@ mod tests {
         ObserverSupervisor::settings_changed(&myself, &mut state)
             .await
             .unwrap();
-        assert_eq!(running(&state), 4);
+        // Read anonymously: three, the users observer not among them.
+        assert_eq!(running(&state), 3);
         assert_eq!(state.prepared.jira_url, server.uri());
         let after = told(&health, &recorded).await;
         assert!(
