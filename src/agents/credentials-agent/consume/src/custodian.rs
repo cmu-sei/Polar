@@ -739,8 +739,12 @@ pub(crate) mod tests {
             requester in prop::sample::select(vec![CUSTODIAN, X, "custody.", "custody.custody.x"]),
         ) {
             let named: Vec<_> = named.into_iter().collect();
-            let record = record(&named, age_secs * 1000, revoked);
-            match judge(requester, Some(&record), needs, polar::time::now_millis()) {
+            // One clock for the record and the judgement: the certificate is made between the two, and at an age of
+            // exactly the window that time closed it.
+            let now = polar::time::now_millis();
+            let mut record = record(&named, age_secs * 1000, revoked);
+            record.timestamp = now - age_secs * 1000;
+            match judge(requester, Some(&record), needs, now) {
                 Ok(custodian) => {
                     prop_assert_eq!(requester, CUSTODIAN);
                     prop_assert!(!revoked);

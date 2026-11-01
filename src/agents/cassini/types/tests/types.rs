@@ -232,7 +232,7 @@ fn test_client_event_variants() {
 
     assert_eq!(
         format!("{:?}", event),
-        "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None, published_by: None }"
+        "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None, published_by: None, published_instance: None }"
     );
 
     let event = ClientEvent::TransportError {
