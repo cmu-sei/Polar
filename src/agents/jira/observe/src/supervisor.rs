@@ -78,6 +78,11 @@ pub enum ObserverSupervisorMessage {
     RuntimeChanged {
         section: String,
     },
+    /// A signed update changed the variables named: one the observers are started with makes the supervisor read the
+    /// settings again and start them again.
+    ConfigChanged {
+        changed: Vec<String>,
+    },
 }
 
 pub struct ObserverSupervisor;
@@ -100,6 +105,9 @@ pub struct ObserverSupervisorState {
     credential: Option<String>,
     /// Why the latest `credentials` section gave no credential, when it was refused.
     credential_problem: Option<String>,
+    /// Why the settings in force cannot work, when a signed update made them so: no observer runs until another
+    /// update mends them.
+    settings_problem: Option<String>,
     /// Cassini has registered this agent: nothing calls Jira before.
     registered: bool,
     /// The standing problem the supervisor itself holds (no credential), apart from the observers' own.
@@ -208,6 +216,11 @@ impl ObserverSupervisor {
         if !state.registered {
             return Ok(());
         }
+        if let Some(why) = &state.settings_problem {
+            let message = format!("jira-observer: {why}");
+            state.hold(HoldReason::Configuration, message);
+            return Ok(());
+        }
         match state.auth() {
             None => {
                 let message = match &state.credential_problem {
@@ -239,6 +252,38 @@ impl ObserverSupervisor {
         state.healthcheck.release(HoldReason::Configuration);
         state.held = None;
         ObserverSupervisor::start_observers(myself, state).await
+    }
+
+    /// A signed update changed a setting: the settings are made again from the configuration in force
+    /// (`agent::prepare` on `current()`), and the observers start again with them, which releases every hold. Settings
+    /// that cannot work stop the observers, and the supervisor holds `Configuration` with why, until an update mends
+    /// them.
+    async fn settings_changed(
+        myself: &ActorRef<ObserverSupervisorMessage>,
+        state: &mut ObserverSupervisorState,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(configuration) = &state.configuration else {
+            return Ok(());
+        };
+        let current = match configuration.current().await {
+            Ok(current) => current,
+            Err(e) => {
+                warn!("could not read the configuration in force: {e}");
+                return Ok(());
+            }
+        };
+        match crate::agent::prepare(&current) {
+            Ok(prepared) => {
+                state.prepared = prepared;
+                state.settings_problem = None;
+            }
+            Err(why) => {
+                error!("the settings a signed update made cannot work: {why}");
+                state.settings_problem = Some(why);
+            }
+        }
+        ObserverSupervisor::restart_observers(myself, state, "a signed update changed the settings")
+            .await
     }
 
     /// Reads the latest `credentials` section and hands it to the CryptoActor; the name registered is the credential
@@ -401,6 +446,14 @@ impl Actor for ObserverSupervisor {
             });
         resources
             .configuration
+            .changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(ObserverSupervisorMessage::ConfigChanged {
+                    changed: changed.changed,
+                })
+            });
+        resources
+            .configuration
             .runtime_changes()
             .subscribe(myself.clone(), |changed| {
                 Some(ObserverSupervisorMessage::RuntimeChanged {
@@ -423,6 +476,7 @@ impl Actor for ObserverSupervisor {
             configuration: Some(resources.configuration),
             credential: None,
             credential_problem: None,
+            settings_problem: None,
             registered: false,
             held: None,
             infrastructure: resources.infrastructure,
@@ -460,6 +514,11 @@ impl Actor for ObserverSupervisor {
                 let _ = state
                     .infrastructure
                     .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+            }
+            ObserverSupervisorMessage::ConfigChanged { changed } => {
+                if crate::settings::touches_the_observers(&changed) {
+                    ObserverSupervisor::settings_changed(&myself, state).await?;
+                }
             }
             ObserverSupervisorMessage::RuntimeChanged { section } => {
                 if section == credentials::SECTION_NAME {
@@ -618,6 +677,7 @@ mod tests {
             configuration: None,
             credential: credential.map(str::to_string),
             credential_problem: None,
+            settings_problem: None,
             registered: true,
             held: None,
             infrastructure: sink().await,
@@ -731,6 +791,86 @@ mod tests {
                 .all(|t| matches!(t, Told::Hold(HoldReason::Configuration, _))),
             "{told:?}"
         );
+        state.stop_observers("the test is over").await;
+    }
+
+    /// The live configuration, as the builder gives it, holding `pairs`: what `current()` answers.
+    async fn configuration_of(pairs: &[(&str, &str)]) -> ConfigurationHandle {
+        let env: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let config = polar_env::Config::builder(&env)
+            .register(&crate::settings::SECTION)
+            .register(&polar::egress::SECTION)
+            .build();
+        let parent = sink::<()>().await;
+        ConfigurationHandle::spawn(None, BROKER_CLIENT_NAME, config, None, parent.get_cell())
+            .await
+            .unwrap()
+    }
+
+    /// A signed update that makes the settings unusable stops the observers and holds `Configuration` with why; one
+    /// that mends them releases it and starts them again, with the settings now in force.
+    #[tokio::test]
+    async fn a_signed_update_to_the_settings_starts_the_observers_again_or_holds_why_not() {
+        let _turn = NAMED.lock().await;
+        let server = site_without_data().await;
+        let (health, recorded) = health_recorder().await;
+        let mut state = supervisor_state(
+            "http://jira.invalid".into(),
+            true,
+            None,
+            FakeCrypto::giving(Gives::NotRegistered),
+            health.clone(),
+        )
+        .await;
+        let myself = sink::<ObserverSupervisorMessage>().await;
+        ObserverSupervisor::start_observers(&myself, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(running(&state), 4);
+
+        // The placeholder address: nothing can be read.
+        state.configuration = Some(
+            configuration_of(&[
+                ("JIRA_URL", "https://example.atlassian.net"),
+                ("JIRA_ANONYMOUS", "true"),
+            ])
+            .await,
+        );
+        ObserverSupervisor::settings_changed(&myself, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(running(&state), 0);
+        let told_now = told(&health, &recorded).await;
+        let Some(Told::Hold(HoldReason::Configuration, message)) = told_now.last() else {
+            panic!("a Configuration hold: {told_now:?}");
+        };
+        assert!(message.contains("placeholder"), "{message}");
+
+        // An update that mends it: the observers start again at the address now in force.
+        state.configuration = Some(
+            configuration_of(&[("JIRA_URL", &server.uri()), ("JIRA_ANONYMOUS", "true")]).await,
+        );
+        ObserverSupervisor::settings_changed(&myself, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(running(&state), 4);
+        assert_eq!(state.prepared.jira_url, server.uri());
+        let after = told(&health, &recorded).await;
+        assert!(
+            after[told_now.len()..].contains(&Told::Release(HoldReason::Configuration)),
+            "{after:?}"
+        );
+        // And they ask the new site.
+        for _ in 0..100 {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!server.received_requests().await.unwrap().is_empty());
         state.stop_observers("the test is over").await;
     }
 
