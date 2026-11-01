@@ -197,6 +197,7 @@ permit (principal == Identity::"d983a3d2-9b61-41c5-88a0-d123fb50ba33", action, r
         );
         let revoked = AuthorityBody::Revoked {
             serials: vec!["01".to_string()],
+            compromised: Vec::new(),
         };
         assert_eq!(convert(revoked.clone(), &names()).unwrap(), revoked);
     }

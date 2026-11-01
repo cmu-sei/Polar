@@ -87,8 +87,15 @@ pub enum AuthorityBody {
         )]
         hierarchy: cert_issuer_common::hierarchy::Hierarchy,
     },
-    /// The serials of the certificates that are revoked.
-    Revoked { serials: Vec<String> },
+    /// The serials of the certificates that are revoked, and among them those revoked for a compromise (the ledger's
+    /// `RevocationReason::Compromised`), which is what starts a rotation (docs/architecture/key-rotation.md); every other
+    /// is an ordinary end (superseded, decommissioned, offboarded, ...). Left out when there is none, so an update signed
+    /// before reasons travelled reads back as it was signed: every serial ordinary.
+    Revoked {
+        serials: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        compromised: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,6 +273,25 @@ pub fn verify(
 mod tests {
     use super::*;
 
+    /// The revoked set says which serials were revoked for a compromise; with none it is written as it was before it
+    /// could say, so an update signed then reads back as signed, every serial an ordinary end.
+    #[test]
+    fn a_revoked_set_names_its_compromised_serials_and_without_any_is_written_as_before() {
+        let plain = AuthorityBody::Revoked {
+            serials: vec!["0a".into()],
+            compromised: Vec::new(),
+        };
+        let text = serde_json::to_string(&plain).unwrap();
+        assert_eq!(text, r#"{"kind":"revoked","serials":["0a"]}"#);
+        assert_eq!(serde_json::from_str::<AuthorityBody>(&text).unwrap(), plain);
+        let named = AuthorityBody::Revoked {
+            serials: vec!["0a".into(), "0b".into()],
+            compromised: vec!["0b".into()],
+        };
+        let text = serde_json::to_string(&named).unwrap();
+        assert_eq!(serde_json::from_str::<AuthorityBody>(&text).unwrap(), named);
+    }
+
     #[test]
     fn a_groups_update_with_no_arrangement_is_written_as_it_was_before_there_could_be_one() {
         // Its signature was made over these bytes, so they must not change.
@@ -342,6 +368,7 @@ mod tests {
             },
             AuthorityBody::Revoked {
                 serials: vec!["01ab".into(), "02cd".into()],
+                compromised: Vec::new(),
             },
         ] {
             let sent = AuthorityPayload {

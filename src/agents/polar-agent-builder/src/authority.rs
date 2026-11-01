@@ -57,22 +57,47 @@ pub struct AuthorityAsk;
 /// The certificate serials the credentials agent says are revoked. Signer verification consults it, so a
 /// demotion by revocation is refused at this agent as soon as the update arrives.
 #[derive(Clone, Default)]
-pub struct RevokedSerials(Arc<RwLock<HashSet<String>>>);
+pub struct RevokedSerials(Arc<RwLock<HashMap<String, RevokedFor>>>);
+
+/// Why a certificate was revoked, as the signed revoked set says (`AuthorityBody::Revoked`): an ordinary end (superseded,
+/// decommissioned, ...), or a compromise, which is what starts a rotation (docs/architecture/key-rotation.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokedFor {
+    Ordinary,
+    Compromise,
+}
 
 impl RevokedSerials {
-    fn replace(&self, serials: Vec<String>) {
+    fn replace(&self, serials: Vec<String>, compromised: Vec<String>) {
+        let compromised: HashSet<String> = compromised.into_iter().collect();
         *self
             .0
             .write()
-            .expect("the revoked set is never held across a panic") = serials.into_iter().collect();
+            .expect("the revoked set is never held across a panic") = serials
+            .into_iter()
+            .map(|serial| {
+                let why = if compromised.contains(&serial) {
+                    RevokedFor::Compromise
+                } else {
+                    RevokedFor::Ordinary
+                };
+                (serial, why)
+            })
+            .collect();
     }
 
     /// Whether the certificate whose serial is `serial` (as `cert_issuer_common::serial` writes it) is revoked.
     pub fn contains(&self, serial: &str) -> bool {
+        self.revoked_for(serial).is_some()
+    }
+
+    /// Why the certificate whose serial is `serial` was revoked, or none if it is not.
+    pub fn revoked_for(&self, serial: &str) -> Option<RevokedFor> {
         self.0
             .read()
             .expect("the revoked set is never held across a panic")
-            .contains(serial)
+            .get(serial)
+            .copied()
     }
 }
 
@@ -197,7 +222,10 @@ impl AuthorityActorState {
                         error!("the permissions actor did not take the groups: {e}");
                     }
                 }
-                Effect::SetRevoked(serials) => self.args.revoked.replace(serials),
+                Effect::SetRevoked {
+                    serials,
+                    compromised,
+                } => self.args.revoked.replace(serials, compromised),
                 Effect::Changed { kind, version } => {
                     info!(?kind, version, "authority changed");
                     self.args.changes.send(AuthorityChanged { kind, version });
@@ -977,6 +1005,7 @@ mod actor_tests {
                 1,
                 AuthorityBody::Revoked {
                     serials: vec!["01ab".into()],
+                    compromised: Vec::new(),
                 },
             )]),
             Some(CREDENTIALS.into()),
@@ -984,6 +1013,30 @@ mod actor_tests {
         settle().await;
         assert!(rig.handle.revoked().is_revoked(&signer("01ab")));
         assert!(!rig.handle.revoked().is_revoked(&signer("02cd")));
+    }
+
+    /// The revoked set an agent holds (the broker's view among them) knows why each serial was revoked, as the signed
+    /// set says: a compromise, or an ordinary end where it says nothing (docs/architecture/authority-model.md,
+    /// "Multi-instance workloads").
+    #[tokio::test]
+    async fn the_revoked_set_held_says_which_were_revoked_for_a_compromise() {
+        let rig = rig().await;
+        rig.handle.snapshot(
+            snapshot(&[payload(
+                1,
+                1,
+                AuthorityBody::Revoked {
+                    serials: vec!["01ab".into(), "02cd".into()],
+                    compromised: vec!["02cd".into()],
+                },
+            )]),
+            Some(CREDENTIALS.into()),
+        );
+        settle().await;
+        let revoked = rig.handle.revoked();
+        assert_eq!(revoked.revoked_for("01ab"), Some(RevokedFor::Ordinary));
+        assert_eq!(revoked.revoked_for("02cd"), Some(RevokedFor::Compromise));
+        assert_eq!(revoked.revoked_for("03ef"), None);
     }
 
     #[tokio::test]

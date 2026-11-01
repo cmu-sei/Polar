@@ -219,6 +219,9 @@ pub struct CredentialsState {
     /// replaces a record, and a revoked certificate must go on being refused for as long as it would otherwise
     /// be valid.
     revoked_serials: BTreeSet<String>,
+    /// Those of `revoked_serials` an administrator revoked for a compromise (`RevocationReason::Compromised`): the
+    /// revoked set says so as it travels (`AuthorityBody::Revoked`); every other revocation is an ordinary end.
+    compromised_serials: BTreeSet<String>,
     /// The serial of every certificate the ledger has recorded, by any issuance or report: what a page of cert-issuer's
     /// record is checked against, so nothing is recorded twice.
     recorded_serials: BTreeSet<String>,
@@ -495,6 +498,16 @@ impl CredentialsState {
         (published, version)
     }
 
+    /// Those of `serials` revoked for a compromise, in the order given: what the published revoked set says of them; every
+    /// other is an ordinary end, a supersession included.
+    pub fn compromised_among(&self, serials: &[String]) -> Vec<String> {
+        serials
+            .iter()
+            .filter(|serial| self.compromised_serials.contains(*serial))
+            .cloned()
+            .collect()
+    }
+
     /// The highest sequence number published to the agents; 0 before any.
     pub fn last_authority_sequence(&self) -> u64 {
         self.last_authority_sequence
@@ -596,6 +609,9 @@ impl CredentialsState {
                 timestamp,
             } => {
                 self.revoked_serials.insert(serial.clone());
+                if reason.is_compromise() {
+                    self.compromised_serials.insert(serial.clone());
+                }
                 if let Some(pem) = self.certificate_of(serial)
                     && let Some(end) = cert_issuer_common::serial::not_after_from_pem(&pem)
                 {
@@ -2758,6 +2774,57 @@ mod pruning_tests {
                 .is_empty()
         );
         assert_eq!(state.revoked_serials(), ["0a"], "the ledger keeps it");
+    }
+
+    /// Revocation records why, and the published set says it (docs/architecture/authority-model.md, "Multi-instance
+    /// workloads"): a revocation for a compromise is named as one; any other reason, and a supersession, is an ordinary
+    /// end, which is how every revocation reads where nothing said otherwise.
+    #[test]
+    fn the_published_set_names_the_serials_revoked_for_a_compromise_and_no_other() {
+        let mut state = CredentialsState::new();
+        // Superseded: an ordinary end.
+        state.apply(&issued_ending("alice", "pod-1", "0a", T));
+        state.apply(&issued_ending("alice", "pod-2", "0b", T + 3600));
+        state.apply(&revoked("0c"));
+        state.apply(&CredentialsEvent::Revoke {
+            serial: "0d".to_string(),
+            reason: RevocationReason::Decommissioned,
+            revoked_by: "admin".to_string(),
+            timestamp: 3000,
+        });
+        let (serials, _) = state.published_revocations(T);
+        assert_eq!(serials, ["0a", "0c", "0d"]);
+        assert_eq!(state.compromised_among(&serials), ["0c"]);
+        assert!(state.compromised_among(&[]).is_empty());
+    }
+
+    proptest! {
+        /// For any revocations, each with any reason: what the published set names as compromised is exactly the
+        /// published serials whose revocation said `Compromised`, and never a serial that is not published.
+        #[test]
+        fn the_compromised_are_exactly_the_published_serials_revoked_for_a_compromise(
+            revocations in prop::collection::vec((0u8..6, any::<bool>()), 0..20),
+        ) {
+            let mut state = CredentialsState::new();
+            let mut compromised = std::collections::BTreeSet::new();
+            for (serial, compromise) in &revocations {
+                let serial = format!("{serial:02x}");
+                state.apply(&CredentialsEvent::Revoke {
+                    serial: serial.clone(),
+                    reason: if *compromise { RevocationReason::Compromised } else { RevocationReason::AccessNoLongerRequired },
+                    revoked_by: "admin".to_string(),
+                    timestamp: 3000,
+                });
+                if *compromise {
+                    compromised.insert(serial);
+                }
+            }
+            let (serials, _) = state.published_revocations(T);
+            let named = state.compromised_among(&serials);
+            prop_assert!(named.iter().all(|s| serials.contains(s)));
+            let expected: Vec<String> = serials.iter().filter(|s| compromised.contains(*s)).cloned().collect();
+            prop_assert_eq!(named, expected);
+        }
     }
 
     #[test]

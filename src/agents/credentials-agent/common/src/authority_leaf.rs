@@ -54,8 +54,11 @@ pub enum Effect {
         BTreeMap<String, Vec<String>>,
         cert_issuer_common::hierarchy::Hierarchy,
     ),
-    /// Replace the set of revoked certificate serials.
-    SetRevoked(Vec<String>),
+    /// Replace the set of revoked certificate serials, and which of them were revoked for a compromise.
+    SetRevoked {
+        serials: Vec<String>,
+        compromised: Vec<String>,
+    },
     /// Tell the agent's own actors that authority of this kind changed.
     Changed { kind: AuthorityKind, version: u64 },
     /// An update was missed: ask the credentials agent for the current authority.
@@ -202,7 +205,13 @@ impl AuthorityCore {
                 memberships,
                 hierarchy,
             } => Effect::SetGroups(memberships.clone(), hierarchy.clone()),
-            AuthorityBody::Revoked { serials } => Effect::SetRevoked(serials.clone()),
+            AuthorityBody::Revoked {
+                serials,
+                compromised,
+            } => Effect::SetRevoked {
+                serials: serials.clone(),
+                compromised: compromised.clone(),
+            },
         });
         effects.push(Effect::Changed {
             kind: body.kind(),
@@ -445,13 +454,20 @@ mod tests {
             version: 1,
             body: AuthorityBody::Revoked {
                 serials: vec!["01ab".into()],
+                compromised: Vec::new(),
             },
             authored_by: None,
         };
         let handled = core
             .on_update(&sign(&revoked, &key(0)).unwrap(), Some(CREDENTIALS))
             .unwrap();
-        assert_eq!(handled.effects[0], Effect::SetRevoked(vec!["01ab".into()]));
+        assert_eq!(
+            handled.effects[0],
+            Effect::SetRevoked {
+                serials: vec!["01ab".into()],
+                compromised: Vec::new(),
+            }
+        );
     }
 
     #[test]

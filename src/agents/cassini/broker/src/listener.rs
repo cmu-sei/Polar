@@ -1142,6 +1142,15 @@ impl Listener {
             .is_some_and(|serial| state.authority.handle().revoked().contains(serial))
     }
 
+    /// Why this connection's certificate was revoked, as the signed revoked set says (a compromise, or an ordinary end),
+    /// or none if it is not.
+    fn revoked_for(state: &ListenerState) -> Option<polar_agent_builder::authority::RevokedFor> {
+        state
+            .peer_serial
+            .as_deref()
+            .and_then(|serial| state.authority.handle().revoked().revoked_for(serial))
+    }
+
     /// Whether this connection may use `topic` this way: the broker's policy first, then the certificate's floor,
     /// refused by default. `Err` is the reason, which the client is told.
     /// A decision this connection made a moment ago, under the same authority, is not made again.
@@ -1631,7 +1640,7 @@ impl Actor for Listener {
                 // retention window, as after any lost connection, for the identity's next certificate to claim; this
                 // one cannot resume it, refused at registration.
                 if Self::is_revoked(state) {
-                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "the connection's certificate is revoked: closing it");
+                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, why = ?Self::revoked_for(state), "the connection's certificate is revoked: closing it");
                     let client_id = state.client_id.clone();
                     return self
                         .handle_disconnect_request(
@@ -1665,7 +1674,7 @@ impl Actor for Listener {
                 ..
             } => {
                 if Self::is_revoked(state) {
-                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "a revoked certificate asked to register: refused, and closed");
+                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, why = ?Self::revoked_for(state), "a revoked certificate asked to register: refused, and closed");
                     let msg = ClientMessage::RegistrationResponse {
                         result: Err(cassini_types::Refusal::revoked()),
                         trace_ctx: WireTraceCtx::from_current_span(),

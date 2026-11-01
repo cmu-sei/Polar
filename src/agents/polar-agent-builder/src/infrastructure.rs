@@ -1905,6 +1905,7 @@ mod tests {
                     version: 1,
                     body: AuthorityBody::Revoked {
                         serials: vec![serial],
+                        compromised: Vec::new(),
                     },
                     authored_by: None,
                 }],

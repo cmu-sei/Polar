@@ -142,7 +142,7 @@ impl Watch {
         let mut heard = Heard::Nothing;
         for effect in handled.effects {
             match effect {
-                Effect::SetRevoked(serials) => {
+                Effect::SetRevoked { serials, .. } => {
                     let revoked = custody
                         .write()
                         .expect("the custody is never held across a panic")
@@ -514,6 +514,7 @@ mod tests {
             version: sequence,
             body: AuthorityBody::Revoked {
                 serials: serials.to_vec(),
+                compromised: Vec::new(),
             },
             authored_by: None,
         }

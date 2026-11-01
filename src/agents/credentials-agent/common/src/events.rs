@@ -112,6 +112,15 @@ pub enum RevocationReason {
     IssuedInError,
 }
 
+impl RevocationReason {
+    /// Whether this is a compromise, against an ordinary end: what the revoked set carries for each serial as it
+    /// travels (`authority_update::AuthorityBody::Revoked`), and what starts a rotation (docs/architecture/
+    /// key-rotation.md). Only `Compromised` is; every other reason, and a supersession, is an ordinary end.
+    pub fn is_compromise(&self) -> bool {
+        matches!(self, RevocationReason::Compromised)
+    }
+}
+
 /// Why a permission was granted. Unlike RevocationReason, this has no
 /// RFC to anchor against -- genuinely Polar-specific, but held to the
 /// same discipline: a deliberately closed set, not free text.
@@ -539,6 +548,18 @@ impl CredentialsEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_compromise_is_a_compromise_and_every_other_end_is_ordinary() {
+        use clap::ValueEnum;
+        for reason in RevocationReason::value_variants() {
+            assert_eq!(
+                reason.is_compromise(),
+                *reason == RevocationReason::Compromised,
+                "{reason:?}"
+            );
+        }
+    }
 
     fn sample_grant() -> CredentialsEvent {
         CredentialsEvent::Grant {

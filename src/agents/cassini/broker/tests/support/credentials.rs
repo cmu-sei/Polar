@@ -154,6 +154,7 @@ impl CredentialsAgent {
             version,
             body: AuthorityBody::Revoked {
                 serials: serials.to_vec(),
+                compromised: Vec::new(),
             },
             authored_by: None,
         };

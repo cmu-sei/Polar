@@ -316,7 +316,7 @@ impl Actor for AuthorityPublisher {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                let (serials, version) = ractor::call!(state.args.ledger, |reply| {
+                let (serials, compromised, version) = ractor::call!(state.args.ledger, |reply| {
                     LedgerMessage::PublishedRevocations { now, reply }
                 })
                 .map_err(|e| ActorProcessingErr::from(format!("the ledger did not answer: {e}")))?;
@@ -324,7 +324,10 @@ impl Actor for AuthorityPublisher {
                     state
                         .publish(
                             &myself,
-                            AuthorityBody::Revoked { serials },
+                            AuthorityBody::Revoked {
+                                serials,
+                                compromised,
+                            },
                             version,
                             None,
                             None,
@@ -824,7 +827,9 @@ mod tests {
         assert_eq!(
             payload.body,
             AuthorityBody::Revoked {
-                serials: vec!["0c".into()]
+                serials: vec!["0c".into()],
+                // An administrator's revocation for a compromise says so in the set.
+                compromised: vec!["0c".into()],
             }
         );
         assert_eq!(payload.version, 3, "two revoked, one of them ended");
@@ -860,7 +865,8 @@ mod tests {
         assert_eq!(
             payload.body,
             AuthorityBody::Revoked {
-                serials: vec!["0a".into(), "0b".into()]
+                serials: vec!["0a".into(), "0b".into()],
+                compromised: vec!["0a".into(), "0b".into()],
             }
         );
         // Here too.
