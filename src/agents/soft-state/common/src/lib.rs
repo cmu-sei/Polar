@@ -35,6 +35,10 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// The state agent's workload name.
 pub const OBSERVER_NAME: &str = "soft-state-observer";
 
+/// The state agent's writer's workload name: it asks every agent about its health and writes what it hears
+/// (docs/architecture/soft-state.md, "As built: pulled health").
+pub const PROCESSOR_NAME: &str = "soft-state-processor";
+
 /// Where every asker publishes its requests, and the state agent subscribes.
 pub const REQUESTS_TOPIC: &str = "soft-state-requests";
 

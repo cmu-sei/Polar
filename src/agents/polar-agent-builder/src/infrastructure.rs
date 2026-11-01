@@ -133,6 +133,12 @@ pub enum InfrastructureSupervisorMessage {
     AuthorityAsk,
     /// What the Cassini client says about the topics the agent was refused.
     Refusals(cassini_client::facade::RefusalNews),
+    /// Internal: a question on the agent's own health topic, with the identity the broker stamped on it
+    /// (`health_query.rs`). Judged and answered off this actor's thread.
+    HealthQuery {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -200,6 +206,9 @@ pub struct InfrastructureSupervisorArgs {
     /// For an agent with the `soft-state` capability, the state agent's identity, which its replies must come from:
     /// the builder starts a state actor for it (`state.rs`).
     pub(crate) state_agent: Option<String>,
+    /// For a Cassini client, the identity the floor lets ask about its health: the state agent's writer of its own
+    /// namespace and domain (`health_query.rs`). None admits nobody but whom a policy permits.
+    pub(crate) health_writer: Option<String>,
     /// Whether this is a Cassini client: a router, a client and its subscriptions. A service
     /// that is the broker, or otherwise not a client, has none of them.
     pub(crate) with_client: bool,
@@ -317,6 +326,8 @@ pub struct InfrastructureSupervisorState {
     shutdown_budget: Duration,
     process_exit: ProcessExit,
     self_test: Option<SelfTestState>,
+    /// What answers a health question, for a Cassini client.
+    health_answerer: Option<crate::health_query::Answerer>,
 }
 
 pub struct InfrastructureSupervisor;
@@ -343,6 +354,8 @@ impl InfrastructureSupervisor {
         }
 
         tracing::warn!("InfrastructureSupervisor: beginning an orderly shutdown: {reason}");
+        // Asked about its health from now on, the agent says it is draining.
+        state.healthcheck.draining();
         Self::start_watchdog(state.shutdown_budget, state.process_exit.clone(), &reason);
         // Nothing new is started while the agent is going down.
         state.commands.drain();
@@ -475,6 +488,12 @@ impl InfrastructureSupervisor {
         // And the credentials agent's policy and permissions: a live update, and a snapshot (asked for or
         // republished). Whether either is believed, and from whom, is the authority actor's to decide.
         subscriptions.extend(crate::authority::subscriptions(&setup.authority));
+        // And questions about its health, answered by the builder from the health actor's report: the domain is never
+        // asked (docs/architecture/soft-state.md, "Self-state and introspection").
+        subscriptions.push(crate::health_query::subscription(
+            service_name,
+            myself.clone(),
+        ));
         // An agent that reads its own soft state hears the state agent on its own reply topic.
         let state_replies = setup.state_agent.map(|expected| {
             let router = Arc::new(soft_state_common::ReplyRouter::new());
@@ -853,6 +872,16 @@ impl Actor for InfrastructureSupervisor {
             shutdown::spawn_signal_listener(myself.clone());
         }
 
+        let healthcheck = HealthHandle::new(healthcheck);
+        let health_answerer = client.as_ref().map(|client| crate::health_query::Answerer {
+            topic: polar_health::report::health_topic(&args.service_name),
+            writer: args.health_writer.clone(),
+            policy: crate::PolicyLookup::for_service(&args.service_name),
+            health: healthcheck.clone(),
+            configuration: configuration.clone(),
+            client: client.tcp_client.clone(),
+        });
+
         Ok(InfrastructureSupervisorState {
             config: args.config,
             configuration,
@@ -860,12 +889,13 @@ impl Actor for InfrastructureSupervisor {
             authority,
             infrastructure_events,
             client,
-            healthcheck: HealthHandle::new(healthcheck),
+            healthcheck,
             service_name: args.service_name,
             shutdown: ShutdownMachine::new(),
             shutdown_budget: args.shutdown_budget,
             process_exit: args.process_exit,
             self_test,
+            health_answerer,
         })
     }
 
@@ -936,6 +966,14 @@ impl Actor for InfrastructureSupervisor {
                 Self::begin_shutdown(state, reason);
             }
             InfrastructureSupervisorMessage::SelfTestTick => Self::self_test_tick(state),
+            InfrastructureSupervisorMessage::HealthQuery {
+                payload,
+                published_by,
+            } => {
+                if let Some(answerer) = state.health_answerer.clone() {
+                    tokio::spawn(async move { answerer.answer(payload, published_by).await });
+                }
+            }
             InfrastructureSupervisorMessage::CommandOutcome(outcome) => {
                 let Some(client) = &state.client else {
                     tracing::debug!(
@@ -1479,6 +1517,7 @@ mod tests {
             runtime: &'static [&'static crate::runtime::RuntimeSection],
             state_agent: Option<String>,
         ) -> Self {
+            let health_writer = Some(RIG_WRITER.to_string());
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
             if crypto {
@@ -1534,6 +1573,7 @@ mod tests {
                     subscriptions: vec![],
                     wants_crypto: crypto,
                     state_agent,
+                    health_writer,
                     with_client: true,
                     shutdown_budget: budget,
                     listen_for_signals,
@@ -2864,6 +2904,104 @@ mod tests {
         );
     }
 
+    // -- pulled health -------------------------------------------------------------------
+
+    /// The identity a rig's floor lets ask about its health.
+    const RIG_WRITER: &str = "soft-state-processor.polar.serviceaccount.cluster.local";
+
+    /// Asks the rig's agent about its health as `asker`, as the broker would deliver the question.
+    fn ask_health(rig: &Rig, service: &str, asker: Option<&str>, round: &str) {
+        rig.resources
+            .router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: polar_health::report::health_topic(service),
+                    payload: polar_health::report::encode_query(&polar_health::HealthQuery {
+                        correlation_id: round.to_string(),
+                    }),
+                    published_by: asker.map(str::to_string),
+                    published_instance: None,
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+    }
+
+    /// The health answers the rig's agent published.
+    fn answers(rig: &Rig) -> Vec<polar_health::HealthAnswer> {
+        rig.spawner
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(topic, _)| topic == polar_health::report::HEALTH_REPLIES_TOPIC)
+            .map(|(_, payload)| polar_health::report::decode_answer(payload).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_writer_s_question_is_answered_with_the_health_actor_s_report_and_anyone_else_s_is_not()
+     {
+        let rig = Rig::standard("infra-health").await;
+        rig.registered().await;
+        rig.settle().await;
+        ask_health(&rig, "infra-health", Some(RIG_WRITER), "round-1");
+        ask_health(
+            &rig,
+            "infra-health",
+            Some("kube-observer.polar.serviceaccount.cluster.local"),
+            "round-2",
+        );
+        ask_health(&rig, "infra-health", None, "round-3");
+        rig.settle().await;
+        let answers = answers(&rig);
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert_eq!(answers[0].correlation_id, "round-1");
+        assert_eq!(
+            answers[0].report.status,
+            polar_health::ReportStatus::Healthy
+        );
+        assert!(answers[0].report.cassini_connected);
+    }
+
+    #[tokio::test]
+    async fn a_held_configuration_problem_is_answered_and_never_ends_the_agent() {
+        let rig = Rig::standard("infra-held").await;
+        rig.registered().await;
+        rig.resources.healthcheck.hold(
+            polar_health::HoldReason::Configuration,
+            "JIRA_URL is still the example placeholder",
+        );
+        rig.settle().await;
+        ask_health(&rig, "infra-held", Some(RIG_WRITER), "round-1");
+        rig.settle().await;
+        let answers = answers(&rig);
+        assert_eq!(answers.len(), 1);
+        let report = &answers[0].report;
+        assert_eq!(report.status, polar_health::ReportStatus::Unhealthy);
+        assert_eq!(
+            report.reason,
+            Some(polar_health::HealthReason::Configuration)
+        );
+        assert_eq!(
+            report.message.as_deref(),
+            Some("JIRA_URL is still the example placeholder")
+        );
+        assert!(rig.events().is_empty(), "the agent was told to end");
+        assert!(rig.exits().is_empty());
+
+        // An agent that begins to end says it is draining.
+        rig.begin("told to");
+        rig.settle().await;
+        ask_health(&rig, "infra-held", Some(RIG_WRITER), "round-2");
+        rig.settle().await;
+        let answers = self::answers(&rig);
+        assert_eq!(
+            answers.last().unwrap().report.status,
+            polar_health::ReportStatus::Draining
+        );
+    }
+
     #[tokio::test]
     async fn the_crypto_actor_dying_starts_an_orderly_shutdown() {
         let rig = Rig::with_crypto("infra-crypto-dies").await;
@@ -3068,6 +3206,7 @@ mod service_tests {
                     subscriptions: vec![],
                     wants_crypto: false,
                     state_agent: None,
+                    health_writer: None,
                     with_client: false,
                     shutdown_budget: budget,
                     listen_for_signals: false,

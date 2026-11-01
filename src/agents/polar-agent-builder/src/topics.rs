@@ -287,7 +287,8 @@ pub fn served_workloads(text: &str) -> Vec<String> {
 #[serde(rename_all = "snake_case")]
 pub enum Rule {
     /// Every agent that is a Cassini client: its configuration and command topics, asking for a replay and
-    /// reporting outcomes, and the credentials agent's authority topics.
+    /// reporting outcomes, the credentials agent's authority topics, and pulled health (its question topic and the
+    /// answers').
     Agent,
     /// An agent whose self-test is on probes itself on its own topic.
     SelfTest,
@@ -382,6 +383,13 @@ pub fn implied_by(rule: Rule, name: &str) -> Vec<(String, Access)> {
             // subscriber for each topic (docs/architecture/soft-state.md). It hears nothing unless the agent asks,
             // and an agent without the soft-state capability that asks is refused there.
             (soft_state_common::replies_topic(name), Access::Subscribe),
+            // Pulled health: the question on its own topic, of the state agent's writer's family, and the answer,
+            // which the builder gives from the health actor's report (health_query.rs).
+            (polar_health::report::health_topic(name), Access::Subscribe),
+            (
+                polar_health::report::HEALTH_REPLIES_TOPIC.to_string(),
+                Access::Publish,
+            ),
         ],
         Rule::SelfTest => {
             let topic = crate::infrastructure::self_test_topic(name);
@@ -450,6 +458,15 @@ fn implied_causes(rule: Rule, name: &str) -> BTreeMap<(String, Access), Causes> 
             (
                 (AUTHORITY_SNAPSHOT_REPLIES_TOPIC.to_string(), Access::Subscribe),
                 answering(CauseEntry::Registered),
+            ),
+            (
+                (
+                    polar_health::report::HEALTH_REPLIES_TOPIC.to_string(),
+                    Access::Publish,
+                ),
+                caused(vec![CauseEntry::Topic(polar_health::report::health_topic(
+                    name,
+                ))]),
             ),
         ]),
         Rule::SelfTest => {
@@ -1084,6 +1101,35 @@ mod tests {
         );
         assert!(said.contains("is declared twice"), "{said}");
         assert!(family_problems(&[FAMILY]).is_empty());
+    }
+
+    #[test]
+    fn every_cassini_client_is_asked_about_its_health_on_its_own_topic_and_answers_on_the_shared_one()
+     {
+        let set = TopicSet::compute(&agent("jira-observer"), &[]);
+        assert!(set.allows("agent.jira-observer.health", Access::Subscribe));
+        assert!(!set.allows("agent.kube-observer.health", Access::Subscribe));
+        assert!(set.allows("polar-health-replies", Access::Publish));
+        assert!(!set.allows("polar-health-replies", Access::Subscribe));
+        let implied = implied_by(Rule::Agent, "jira-observer");
+        assert!(implied.contains(&("agent.jira-observer.health".to_string(), Access::Subscribe)));
+        // The answer is caused by the question.
+        let causes = implied_causes(Rule::Agent, "jira-observer");
+        let answer = causes
+            .get(&("polar-health-replies".to_string(), Access::Publish))
+            .expect("the answer has a cause");
+        assert_eq!(
+            answer.causes,
+            vec![CauseEntry::Topic("agent.jira-observer.health".to_string())]
+        );
+        // A service that is not a client is asked nothing.
+        let service = Facts {
+            cassini_client: false,
+            ..agent("cassini")
+        };
+        assert!(
+            !TopicSet::compute(&service, &[]).allows("agent.cassini.health", Access::Subscribe)
+        );
     }
 
     #[test]

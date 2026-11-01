@@ -34,6 +34,7 @@
 
 use crate::certs::CertReading;
 use crate::custody::Custody;
+use crate::report::{HealthCounters, HealthReason, HealthReport, HoldReason, ReportStatus};
 use crate::{
     DEFAULT_JITTER_WINDOW_SECS, HealthCheckMessage, HealthConfig, HealthPhase, HealthState,
     HealthVerdict, RejuvenationPhase,
@@ -106,6 +107,18 @@ pub(crate) struct HealthMachine {
     concluded: Option<HealthVerdict>,
     /// The topics the agent was last told it is refused, carried in every write.
     refused: Vec<crate::RefusedTopic>,
+    /// Why the verdict was given, for the report; none for a rejuvenation.
+    concluded_reason: Option<HealthReason>,
+    /// The standing problem the domain holds, with its message, already one bounded line.
+    held: Option<(HoldReason, String)>,
+    /// The supervisor began to end the agent for a reason of its own.
+    draining: bool,
+    /// Its connections have all been up at least once: before that it is starting.
+    ever_ready: bool,
+    /// It has been told anything about the graph.
+    graph_seen: bool,
+    cassini_disconnects: u64,
+    graph_op_failures: u64,
     /// Ticks in a row the custody daemon could not be asked.
     custody_unreachable_ticks: u32,
 }
@@ -128,6 +141,13 @@ impl HealthMachine {
             concluded: None,
             refused: Vec::new(),
             custody_unreachable_ticks: 0,
+            concluded_reason: None,
+            held: None,
+            draining: false,
+            ever_ready: false,
+            graph_seen: false,
+            cassini_disconnects: 0,
+            graph_op_failures: 0,
         }
     }
 
@@ -166,8 +186,81 @@ impl HealthMachine {
     /// Records that a verdict has been given. The actor calls this for a verdict
     /// it raised itself (a health file that cannot be written); the machine does
     /// it for the ones it emits.
+    /// Records the verdict. One that is not a rejuvenation is the agent's own machinery's unless the caller says
+    /// otherwise ([`conclude_because`](Self::conclude_because)).
     pub(crate) fn conclude(&mut self, verdict: &HealthVerdict) {
+        let reason = match verdict {
+            HealthVerdict::Rejuvenate => None,
+            HealthVerdict::Unhealthy(_) => Some(HealthReason::Internal),
+        };
+        self.conclude_because(verdict, reason);
+    }
+
+    /// Records the verdict and why. A verdict is only ever for a reason a restart helps with: a standing problem
+    /// (`Hold`) never comes here.
+    fn conclude_because(&mut self, verdict: &HealthVerdict, reason: Option<HealthReason>) {
+        debug_assert!(reason.is_none_or(HealthReason::restart_helps));
         self.concluded = Some(verdict.clone());
+        self.concluded_reason = reason;
+    }
+
+    /// What the agent says when it is asked about its health: its status, the phase, why, the connections, the counts
+    /// and how long it has run.
+    pub(crate) fn report(&self, now: u64) -> HealthReport {
+        let (status, reason, message) = if let Some(verdict) = &self.concluded {
+            (
+                ReportStatus::Draining,
+                self.concluded_reason,
+                crate::report::sanitize(&verdict.reason(), &[]),
+            )
+        } else if self.draining {
+            (ReportStatus::Draining, None, None)
+        } else if let Some((hold, message)) = &self.held {
+            (
+                ReportStatus::Unhealthy,
+                Some(HealthReason::from(*hold)),
+                Some(message.clone()).filter(|m| !m.is_empty()),
+            )
+        } else if !self.connections_healthy() {
+            let why = if self.expects_cassini && !self.cassini_connected {
+                HealthReason::Broker
+            } else {
+                HealthReason::Graph
+            };
+            if self.ever_ready {
+                (ReportStatus::Unhealthy, Some(why), None)
+            } else {
+                (ReportStatus::Starting, Some(why), None)
+            }
+        } else if !self.expects_graph && self.graph_seen && !self.graph_connected {
+            // An agent that reads the graph without depending on it (the state agent's reader) answers without it.
+            (ReportStatus::Degraded, Some(HealthReason::Graph), None)
+        } else {
+            (ReportStatus::Healthy, None, None)
+        };
+        HealthReport {
+            status,
+            phase: self.file_phase(),
+            reason,
+            message,
+            cassini_connected: self.cassini_connected,
+            graph_connected: self.graph_connected,
+            expects_graph: self.expects_graph,
+            counters: HealthCounters {
+                cassini_disconnects: self.cassini_disconnects,
+                graph_op_failures: self.graph_op_failures,
+                refused_topics: self.refused.len() as u64,
+                health_file_write_failures: u64::from(self.write_failures),
+            },
+            uptime_secs: now.saturating_sub(self.start_secs),
+        }
+    }
+
+    /// Notes that the connections are all up, once they are: from then on it is no longer starting.
+    fn note_ready(&mut self) {
+        if self.connections_healthy() {
+            self.ever_ready = true;
+        }
     }
 
     /// The phase to put in the health file.
@@ -214,14 +307,16 @@ impl HealthMachine {
     }
 
     fn healthy(&self, now: u64) -> HealthState {
-        HealthState::at(
-            crate::HealthStatus::Healthy,
-            now,
-            self.cassini_connected,
-            self.graph_connected,
-        )
-        .with_phase(self.file_phase())
-        .with_refused(self.refused.clone())
+        // A standing problem is written as unhealthy, for whoever reads the file; the probe judges only its age, and
+        // nothing ends the agent for it.
+        let status = if self.held.is_some() {
+            crate::HealthStatus::Unhealthy
+        } else {
+            crate::HealthStatus::Healthy
+        };
+        HealthState::at(status, now, self.cassini_connected, self.graph_connected)
+            .with_phase(self.file_phase())
+            .with_refused(self.refused.clone())
     }
 
     /// The state to write on a tick that has no other news: healthy or unhealthy
@@ -243,11 +338,13 @@ impl HealthMachine {
             HealthCheckMessage::CassiniConnected => {
                 self.cassini_connected = true;
                 self.cassini_down_since = None;
+                self.note_ready();
                 tracing::debug!("healthcheck: cassini connected");
                 None
             }
             HealthCheckMessage::CassiniDisconnected => {
                 self.cassini_connected = false;
+                self.cassini_disconnects += 1;
                 // A repeated disconnect does not restart the outage.
                 self.cassini_down_since.get_or_insert(now);
                 tracing::warn!("healthcheck: cassini disconnected");
@@ -259,11 +356,14 @@ impl HealthMachine {
             }
             HealthCheckMessage::GraphConnected => {
                 self.graph_connected = true;
+                self.graph_seen = true;
+                self.note_ready();
                 tracing::debug!("healthcheck: graph connected (actor spawned; not yet verified)");
                 None
             }
             HealthCheckMessage::GraphDisconnected => {
                 self.graph_connected = false;
+                self.graph_seen = true;
                 tracing::warn!("healthcheck: graph disconnected");
                 // Don't fail: allow reconnection to recover.
                 self.expects_graph
@@ -271,12 +371,15 @@ impl HealthMachine {
             }
             HealthCheckMessage::GraphAvailable => {
                 self.graph_connected = true;
+                self.graph_seen = true;
+                self.note_ready();
                 self.last_graph_success_secs = Some(now);
                 tracing::debug!("healthcheck: graph available (real op succeeded)");
                 None
             }
             HealthCheckMessage::GraphOpFailed(reason) => {
                 tracing::warn!("healthcheck: graph op failed: {reason}");
+                self.graph_op_failures += 1;
                 // Not immediately fatal: a single failed op could be transient.
                 // The graph deadline, checked every tick, decides when it has
                 // gone on too long.
@@ -287,7 +390,34 @@ impl HealthMachine {
                 self.refused = topics.clone();
                 None
             }
-            HealthCheckMessage::Tick | HealthCheckMessage::DepsChecked(_) => None,
+            HealthCheckMessage::Hold { reason, message } => {
+                let message = crate::report::sanitize(message, &[]).unwrap_or_default();
+                tracing::warn!(
+                    "healthcheck: the agent holds a standing problem ({}), stays up and does not retry: {message}",
+                    HealthReason::from(*reason).as_str()
+                );
+                self.held = Some((*reason, message));
+                Some(self.current_state(now))
+            }
+            HealthCheckMessage::Release(reason) => {
+                if self.held.as_ref().is_some_and(|(held, _)| held == reason) {
+                    tracing::info!(
+                        "healthcheck: the standing problem ({}) is resolved",
+                        HealthReason::from(*reason).as_str()
+                    );
+                    self.held = None;
+                    Some(self.current_state(now))
+                } else {
+                    None
+                }
+            }
+            HealthCheckMessage::Draining => {
+                self.draining = true;
+                None
+            }
+            HealthCheckMessage::Tick
+            | HealthCheckMessage::DepsChecked(_)
+            | HealthCheckMessage::Report(_) => None,
         }
     }
 
@@ -335,9 +465,15 @@ impl HealthMachine {
 
     /// Gives an unhealthy verdict. The file is written as shutting down, with the
     /// graph reported as `graph` (a graph deadline reports it down).
-    fn unhealthy_verdict(&mut self, now: u64, reason: String, graph: bool) -> TickStep {
+    fn unhealthy_verdict(
+        &mut self,
+        now: u64,
+        reason: String,
+        graph: bool,
+        why: HealthReason,
+    ) -> TickStep {
         let verdict = HealthVerdict::Unhealthy(reason);
-        self.conclude(&verdict);
+        self.conclude_because(&verdict, Some(why));
         TickStep::Done(TickOutcome {
             write: Some(self.unhealthy(now, self.cassini_connected, graph)),
             next: Next::Verdict(verdict),
@@ -384,17 +520,22 @@ impl HealthMachine {
         // Hard deadlines come first, in every phase.
         if let Err(reason) = &certs.hard {
             tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
-            return self.unhealthy_verdict(now, reason.clone(), self.graph_connected);
+            return self.unhealthy_verdict(
+                now,
+                reason.clone(),
+                self.graph_connected,
+                HealthReason::Internal,
+            );
         }
 
         if let Err(reason) = self.check_graph_deadline(now) {
             tracing::error!("healthcheck: {reason}");
-            return self.unhealthy_verdict(now, reason, false);
+            return self.unhealthy_verdict(now, reason, false, HealthReason::Graph);
         }
 
         if let Err(reason) = self.check_cassini_deadline(now) {
             tracing::error!("healthcheck: {reason}");
-            return self.unhealthy_verdict(now, reason, self.graph_connected);
+            return self.unhealthy_verdict(now, reason, self.graph_connected, HealthReason::Broker);
         }
 
         match self.phase.clone() {
@@ -1528,6 +1669,236 @@ mod tests {
             let (independent_said, _) = run_machine(independent(expects_graph), &events, true);
             let (always_up_said, _) = run_machine(always_up, &up, true);
             proptest::prop_assert_eq!(independent_said, always_up_said);
+        }
+    }
+
+    // -- pulled health: the report and standing problems ------------------------
+
+    fn hold(reason: HoldReason, message: &str) -> HealthCheckMessage {
+        HealthCheckMessage::Hold {
+            reason,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_agent_is_starting_until_its_connections_are_first_up_and_unhealthy_when_they_drop() {
+        let mut m = machine(true);
+        let r = m.report(T0 + 3);
+        assert_eq!(r.status, ReportStatus::Starting);
+        assert_eq!(r.reason, Some(HealthReason::Broker));
+        assert_eq!(r.uptime_secs, 3);
+        m.on_message(&HealthCheckMessage::CassiniConnected, T0);
+        assert_eq!(m.report(T0).status, ReportStatus::Starting);
+        assert_eq!(m.report(T0).reason, Some(HealthReason::Graph));
+        m.on_message(&HealthCheckMessage::GraphAvailable, T0);
+        assert_eq!(m.report(T0).status, ReportStatus::Healthy);
+        assert_eq!(m.report(T0).reason, None);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 1);
+        let r = m.report(T0 + 1);
+        assert_eq!(r.status, ReportStatus::Unhealthy);
+        assert_eq!(r.reason, Some(HealthReason::Broker));
+        assert_eq!(r.counters.cassini_disconnects, 1);
+    }
+
+    #[test]
+    fn an_agent_that_reads_the_graph_without_depending_on_it_is_degraded_while_it_is_down() {
+        let mut m = connected(false);
+        assert_eq!(m.report(T0).status, ReportStatus::Healthy);
+        m.on_message(&HealthCheckMessage::GraphDisconnected, T0);
+        let r = m.report(T0);
+        assert_eq!(r.status, ReportStatus::Degraded);
+        assert_eq!(r.reason, Some(HealthReason::Graph));
+        m.on_message(&HealthCheckMessage::GraphAvailable, T0);
+        assert_eq!(m.report(T0).status, ReportStatus::Healthy);
+    }
+
+    #[test]
+    fn a_standing_problem_is_reported_written_unhealthy_and_released() {
+        let mut m = connected(false);
+        let w = m
+            .on_message(
+                &hold(
+                    HoldReason::Configuration,
+                    "JIRA_URL is still the example placeholder\nset it",
+                ),
+                T0,
+            )
+            .unwrap();
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+        let r = m.report(T0);
+        assert_eq!(r.status, ReportStatus::Unhealthy);
+        assert_eq!(r.reason, Some(HealthReason::Configuration));
+        assert_eq!(
+            r.message.as_deref(),
+            Some("JIRA_URL is still the example placeholder set it")
+        );
+        // Every tick keeps it so, and gives no verdict.
+        let o = done(m.tick(T0 + 30, &certs(Some(36_000))));
+        assert_eq!(o.next, Next::Reschedule);
+        assert_eq!(o.write.unwrap().status, HealthStatus::Unhealthy);
+        // Releasing another kind changes nothing; releasing its own clears it.
+        assert!(
+            m.on_message(&HealthCheckMessage::Release(HoldReason::Credentials), T0)
+                .is_none()
+        );
+        assert_eq!(m.report(T0).reason, Some(HealthReason::Configuration));
+        let w = m
+            .on_message(&HealthCheckMessage::Release(HoldReason::Configuration), T0)
+            .unwrap();
+        assert_eq!(w.status, HealthStatus::Healthy);
+        assert_eq!(m.report(T0).status, ReportStatus::Healthy);
+    }
+
+    #[test]
+    fn a_held_agent_still_rejuvenates() {
+        let mut m = connected(false);
+        m.on_message(&hold(HoldReason::Credentials, "the token is refused"), T0);
+        done(m.tick(T0 + 30, &certs(Some(100))));
+        assert_eq!(m.phase(), &RejuvenationPhase::WaitingForDeps);
+        m.deps_checked(T0 + 31, true, 0);
+        let o = done(m.tick(T0 + 60, &certs(Some(100))));
+        assert_eq!(o.next, Next::Verdict(HealthVerdict::Rejuvenate));
+        let r = m.report(T0 + 60);
+        assert_eq!(r.status, ReportStatus::Draining);
+        assert_eq!(r.reason, None, "a rejuvenation is no fault");
+    }
+
+    #[test]
+    fn a_verdict_is_reported_draining_with_the_reason_it_was_given_for() {
+        let mut m = connected(false);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0);
+        let o = done(m.tick(T0 + 61, &certs(None)));
+        assert!(matches!(o.next, Next::Verdict(HealthVerdict::Unhealthy(_))));
+        let r = m.report(T0 + 61);
+        assert_eq!(r.status, ReportStatus::Draining);
+        assert_eq!(r.reason, Some(HealthReason::Broker));
+        assert!(r.message.unwrap().contains("cassini unreachable"));
+
+        let mut g = connected(true);
+        done(g.tick(T0 + 121, &certs(None)));
+        assert_eq!(g.report(T0 + 121).reason, Some(HealthReason::Graph));
+
+        let mut d = connected(false);
+        d.on_message(&HealthCheckMessage::Draining, T0);
+        assert_eq!(d.report(T0).status, ReportStatus::Draining);
+        assert_eq!(d.report(T0).reason, None);
+    }
+
+    #[derive(Debug, Clone)]
+    enum HoldEvent {
+        Plain(Event),
+        Hold(HoldReason),
+        Release(HoldReason),
+    }
+
+    fn hold_reason() -> impl proptest::strategy::Strategy<Value = HoldReason> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(HoldReason::Configuration),
+            proptest::strategy::Just(HoldReason::Credentials),
+        ]
+    }
+
+    fn events_with_holds() -> impl proptest::strategy::Strategy<Value = Vec<(u64, HoldEvent)>> {
+        use proptest::prelude::*;
+        let plain =
+            events().prop_map(|e| e.into_iter().next().map(|(_, e)| e).unwrap_or(Event::Tick));
+        let event = prop_oneof![
+            3 => plain.prop_map(HoldEvent::Plain),
+            1 => hold_reason().prop_map(HoldEvent::Hold),
+            1 => hold_reason().prop_map(HoldEvent::Release),
+        ];
+        proptest::collection::vec((1u64..40, event), 0..40)
+    }
+
+    /// Every decision a machine makes for `events` (ticks only), and its report after each event.
+    fn decisions(
+        expects_graph: bool,
+        events: &[(u64, HoldEvent)],
+        ttl: Option<i64>,
+    ) -> (Vec<Next>, Vec<HealthReport>) {
+        let mut m = machine(expects_graph);
+        let mut now = T0;
+        let mut nexts = Vec::new();
+        let mut reports = Vec::new();
+        for (gap, event) in events {
+            now += gap;
+            match event {
+                HoldEvent::Hold(reason) => {
+                    m.on_message(&hold(*reason, "cannot work"), now);
+                }
+                HoldEvent::Release(reason) => {
+                    m.on_message(&HealthCheckMessage::Release(*reason), now);
+                }
+                HoldEvent::Plain(Event::Message(message)) => {
+                    m.on_message(message, now);
+                }
+                HoldEvent::Plain(Event::Refused(topics)) => {
+                    m.on_message(&HealthCheckMessage::TopicsRefused(topics.clone()), now);
+                }
+                HoldEvent::Plain(Event::Tick) => {
+                    let outcome = match m.tick(now, &certs(ttl)) {
+                        TickStep::Done(outcome) => outcome,
+                        TickStep::NeedDeps => m.deps_checked(now, true, 0),
+                    };
+                    nexts.push(outcome.next);
+                }
+            }
+            reports.push(m.report(now));
+        }
+        (nexts, reports)
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// A standing problem (Configuration, Credentials) never ends the agent: the same events with every hold and
+        /// release taken out are decided alike, verdict for verdict. And whenever one is held and no verdict has been
+        /// given, the report says the agent is unhealthy for it; a verdict is only ever for a reason a restart helps.
+        #[test]
+        fn a_configuration_or_credentials_problem_never_ends_the_agent(
+            expects_graph in proptest::prelude::any::<bool>(),
+            ttl in proptest::option::of(0i64..1000),
+            events in events_with_holds(),
+        ) {
+            let without: Vec<(u64, HoldEvent)> = events
+                .iter()
+                .map(|(gap, e)| match e {
+                    HoldEvent::Hold(_) | HoldEvent::Release(_) => {
+                        (*gap, HoldEvent::Plain(Event::Message(HealthCheckMessage::Tick)))
+                    }
+                    other => (*gap, other.clone()),
+                })
+                .collect();
+            let (with_holds, reports) = decisions(expects_graph, &events, ttl);
+            let (without_holds, _) = decisions(expects_graph, &without, ttl);
+            proptest::prop_assert_eq!(&with_holds, &without_holds);
+
+            let mut held: Option<HoldReason> = None;
+            for ((_, event), report) in events.iter().zip(&reports) {
+                match event {
+                    HoldEvent::Hold(r) => held = Some(*r),
+                    HoldEvent::Release(r) if held == Some(*r) => held = None,
+                    _ => {}
+                }
+                if report.status == ReportStatus::Draining {
+                    proptest::prop_assert!(
+                        report.reason.is_none_or(HealthReason::restart_helps),
+                        "{report:?}"
+                    );
+                } else {
+                    match held {
+                        Some(r) => {
+                            proptest::prop_assert_eq!(report.status, ReportStatus::Unhealthy);
+                            proptest::prop_assert_eq!(report.reason, Some(HealthReason::from(r)));
+                        }
+                        None => proptest::prop_assert!(
+                            report.reason.is_none_or(HealthReason::restart_helps),
+                            "{report:?}"
+                        ),
+                    }
+                }
+            }
         }
     }
 }

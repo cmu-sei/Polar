@@ -287,6 +287,18 @@ impl Config {
             .collect()
     }
 
+    /// The values in force of every declared secret that has one: what nothing the agent says outside itself may
+    /// repeat (the health report's message is cleaned of them, `polar_health::report::sanitize`). Never logged.
+    pub fn secret_values(&self) -> Vec<String> {
+        self.declarations()
+            .filter(|(_, desc)| desc.secret)
+            .filter_map(|(_, desc)| {
+                effective(&self.overrides, &self.snapshot, self.snapshot_source, &desc).0
+            })
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
     /// Applies runtime overrides, all or none.
     ///
     /// A blank value removes that override, returning the variable to the environment or
@@ -564,6 +576,19 @@ mod tests {
         assert_eq!(t.value.as_deref(), Some("<hidden>"));
         assert!(t.secret);
         assert!(!format!("{:?}", c.report()).contains("s3cret"));
+    }
+
+    #[test]
+    fn the_secret_values_are_the_secrets_in_force_and_nothing_else() {
+        let mut c = config(&[("HOST", "h"), ("PORT", "80"), ("TOKEN", "s3cret")]);
+        assert_eq!(c.secret_values(), ["s3cret"]);
+        c.apply_overrides(&[("TOKEN", "fresh-secret")]).unwrap();
+        assert_eq!(c.secret_values(), ["fresh-secret"]);
+        assert!(
+            config(&[("HOST", "h"), ("PORT", "80")])
+                .secret_values()
+                .is_empty()
+        );
     }
 
     // -- overrides ---------------------------------------------------------------

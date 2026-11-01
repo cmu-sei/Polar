@@ -37,6 +37,8 @@ polar-custody = { workspace = true }
 polar-env = { workspace = true, features = ["document"] }
 rand = { workspace = true }
 ractor = { workspace = true }
+# The words of pulled health on the wire (report.rs).
+rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-webpki = { workspace = true }
 serde = { workspace = true }

@@ -65,6 +65,11 @@ pub use graph::{Drain, spawn_graph_controller, stop_graph_controller};
 pub use graph_schema::{GraphAccess, GraphDecl};
 pub mod health;
 pub use health::{HealthClient, HealthHandle};
+pub mod health_query;
+pub mod held;
+/// What a domain reports a standing problem with ([`HealthHandle::hold`]), and what an agent says when it is asked
+/// about its health.
+pub use polar_health::{HealthReason, HealthReport, HoldReason, ReportStatus};
 pub mod infrastructure;
 pub use infrastructure::{
     InfrastructureEvent, InfrastructureSupervisor, InfrastructureSupervisorMessage,
@@ -480,6 +485,8 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
         } else {
             None
         };
+        // Who the floor lets ask about its health: the state agent's writer of its own namespace and domain.
+        let health_writer = health_query::writer_identity(&own.identity);
         // Each publish and subscribe is checked before it leaves: the agent's policy, then its topics.
         let gate = this
             .topics
@@ -503,6 +510,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 subscriptions: this.subscriptions,
                 wants_crypto: this.wants_crypto,
                 state_agent,
+                health_writer,
                 with_client: true,
                 self_test: this.self_test,
                 shutdown_budget: startup.shutdown_budget,
@@ -648,6 +656,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 subscriptions: Vec::new(),
                 wants_crypto: false,
                 state_agent: None,
+                health_writer: None,
                 with_client: false,
                 self_test: false,
                 shutdown_budget: startup.shutdown_budget,

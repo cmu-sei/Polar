@@ -6036,6 +6036,7 @@ dependencies = [
  "ractor",
  "rand 0.10.3",
  "rcgen",
+ "rkyv",
  "rustls",
  "rustls-webpki",
  "serde",

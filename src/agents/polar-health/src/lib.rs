@@ -64,6 +64,7 @@ pub mod config;
 mod custody;
 mod machine;
 pub mod probe;
+pub mod report;
 #[cfg(test)]
 mod simulation;
 #[cfg(test)]
@@ -72,6 +73,9 @@ pub mod vars;
 
 pub use config::HealthConfig;
 use machine::{HealthMachine, Next, TickOutcome, TickStep};
+pub use report::{
+    HealthAnswer, HealthCounters, HealthQuery, HealthReason, HealthReport, HoldReason, ReportStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Environment variables
@@ -124,7 +128,19 @@ impl std::fmt::Display for HealthStatus {
 /// Which stage of its life the agent is in, written into the health file so an
 /// operator can tell "rejuvenating" from "unhealthy". The liveness probe ignores
 /// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthPhase {
     #[default]
@@ -593,6 +609,17 @@ pub enum HealthCheckMessage {
     /// The topics the agent wants and is refused now, replacing those told before (an empty list: none). Written
     /// into the health file from the next write on; it changes nothing else.
     TopicsRefused(Vec<RefusedTopic>),
+    /// The domain holds a standing problem, one a restart does not help (its configuration cannot work, its credentials
+    /// are refused): the agent stays up, says so in its report, and the domain stops retrying. Never a verdict. A later
+    /// hold replaces it; the message is made one bounded line ([`report::sanitize`]).
+    Hold { reason: HoldReason, message: String },
+    /// The domain's standing problem of this kind is resolved (a new configuration works).
+    Release(HoldReason),
+    /// The agent began to end for a reason of its own supervisor's (a signal, a child that died): the report says
+    /// it is draining. It changes no verdict.
+    Draining,
+    /// Answer with the report: what the agent says when it is asked about its health (`report.rs`).
+    Report(ReportReply),
     /// Internal periodic tick — do not send externally.
     Tick,
     /// Internal: the dependency check a tick started has finished — do not send
@@ -600,6 +627,30 @@ pub enum HealthCheckMessage {
     /// a task and carries on when this arrives, so the actor keeps handling
     /// messages in the meantime.
     DepsChecked(bool),
+}
+
+/// Where the health actor sends its report: a reply port that the message can still be cloned around with.
+#[derive(Clone)]
+pub struct ReportReply(Arc<std::sync::Mutex<Option<ractor::RpcReplyPort<HealthReport>>>>);
+
+impl ReportReply {
+    pub fn new(port: ractor::RpcReplyPort<HealthReport>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(port))))
+    }
+
+    /// Sends the report, once; a second send, or one nobody waits for any more, does nothing.
+    pub fn send(&self, report: HealthReport) {
+        let port = self.0.lock().ok().and_then(|mut port| port.take());
+        if let Some(port) = port {
+            let _ = port.send(report);
+        }
+    }
+}
+
+impl std::fmt::Debug for ReportReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReportReply")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +975,10 @@ impl Actor for HealthCheckActor {
                     .machine
                     .deps_checked(HealthState::now(), healthy, jitter);
                 finish_tick(&myself, state, outcome).await?;
+            }
+
+            HealthCheckMessage::Report(reply) => {
+                reply.send(state.machine.report(HealthState::now()));
             }
 
             message => {
@@ -1338,6 +1393,44 @@ mod tests {
         assert_eq!(seen.len(), 1, "exactly one verdict: {seen:?}");
         assert!(matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("hard threshold")));
 
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    // Pulled health (report.rs): the actor answers with its report, and a standing problem keeps the agent up.
+    #[tokio::test(start_paused = true)]
+    async fn the_actor_answers_with_its_report_and_a_held_problem_gives_no_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 36_000);
+        let config = health_config(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+        ]);
+        let (a, seen, _collector) = args_with_verdicts(config).await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        actor
+            .cast(HealthCheckMessage::Hold {
+                reason: HoldReason::Configuration,
+                message: "JIRA_URL is still the example placeholder".into(),
+            })
+            .unwrap();
+        // Ten minutes of ticks.
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let report = ractor::call!(actor, |reply| HealthCheckMessage::Report(ReportReply::new(
+            reply
+        )))
+        .unwrap();
+        assert_eq!(report.status, ReportStatus::Unhealthy);
+        assert_eq!(report.reason, Some(HealthReason::Configuration));
+        assert_eq!(
+            report.message.as_deref(),
+            Some("JIRA_URL is still the example placeholder")
+        );
+        assert!(seen.lock().unwrap().is_empty(), "no verdict for a hold");
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        assert_eq!(read_state(&file).unwrap().status, HealthStatus::Unhealthy);
         actor.stop(None);
         handle.await.unwrap();
     }

@@ -28,7 +28,7 @@
 //! cast, never a call) -- see that enum's own definition -- so, unlike
 //! CryptoHandle, none of these methods need to be async at all.
 
-use polar_health::HealthCheckMessage;
+use polar_health::{HealthCheckMessage, HealthReport, HoldReason, ReportReply};
 use ractor::ActorRef;
 
 pub trait HealthClient: Send + Sync {
@@ -60,6 +60,43 @@ impl HealthHandle {
     /// comment for the full, shared reasoning.
     pub fn as_actor_ref(&self) -> ActorRef<HealthCheckMessage> {
         self.actor.clone()
+    }
+
+    /// The domain holds a standing problem, one a restart does not help: its configuration cannot work
+    /// ([`HoldReason::Configuration`]) or its credentials are refused ([`HoldReason::Credentials`]). The agent stays
+    /// up, answers health queries with the status `Unhealthy`, this reason and `message`, and is never ended for it;
+    /// the domain stops retrying what cannot work until it calls [`release`](Self::release) (a new configuration, a new
+    /// token). `message` is one line for a person (what to set); it is cut to a bound and cleaned of credentials and of
+    /// the agent's secret values before it leaves the agent, and should never carry one. A later hold replaces it.
+    /// This is the one way a domain makes a standing problem known (docs/architecture/soft-state.md, "Self-state and
+    /// introspection"): nothing outside ever looks into the domain.
+    pub fn hold(&self, reason: HoldReason, message: impl Into<String>) {
+        if let Err(e) = self.actor.cast(HealthCheckMessage::Hold {
+            reason,
+            message: message.into(),
+        }) {
+            tracing::warn!("the health actor was not told of a standing problem: {e}");
+        }
+    }
+
+    /// The standing problem of this kind is resolved: the agent reports as its connections say again.
+    pub fn release(&self, reason: HoldReason) {
+        if let Err(e) = self.actor.cast(HealthCheckMessage::Release(reason)) {
+            tracing::warn!("the health actor was not told a standing problem is resolved: {e}");
+        }
+    }
+
+    /// The agent began to end for a reason of the supervisor's own: its report says it is draining.
+    pub(crate) fn draining(&self) {
+        let _ = self.actor.cast(HealthCheckMessage::Draining);
+    }
+
+    /// The health actor's report, as the agent answers a health query with it.
+    pub async fn report(&self) -> Result<HealthReport, String> {
+        ractor::call!(self.actor, |reply| HealthCheckMessage::Report(
+            ReportReply::new(reply)
+        ))
+        .map_err(|e| format!("the health actor did not answer: {e}"))
     }
 
     /// The topics the agent wants and is refused now, for its health file. They never make it unhealthy.
@@ -182,5 +219,34 @@ mod tests {
             }
             other => panic!("expected GraphOpFailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_hold_and_a_release_are_told_to_the_health_actor_as_they_were_given() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (actor, _) = Actor::spawn(
+            None,
+            FakeHealthCheckActor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let handle = HealthHandle::new(actor);
+        handle.hold(HoldReason::Configuration, "JIRA_URL is a placeholder");
+        handle.release(HoldReason::Credentials);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let messages = received.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &messages[0],
+            HealthCheckMessage::Hold { reason: HoldReason::Configuration, message }
+                if message == "JIRA_URL is a placeholder"
+        ));
+        assert!(matches!(
+            messages[1],
+            HealthCheckMessage::Release(HoldReason::Credentials)
+        ));
     }
 }
