@@ -931,6 +931,56 @@ the catalog (cassini-backpressure.md, "The broker's memory limit, 1 GiB"). Neith
   again in the same pod goes on from what the daemon holds, and a daemon whose custodian failed ends to start again
   empty.
 
+## The sixth set: pressure, several publishers held back (2026-11-01, u7c)
+
+*What it asks.* Whether the broker's budget does its job under a load it could not hold without one: several
+publishers at once into one consumer slow before it acknowledges, more payload offered than the broker's container can
+hold. The fifth set never pressed the controller (one publisher holds about three eighths of the budget, and it grows
+only past three quarters); this set is the first where it was. *Without the budget* (the fourth set, before backpressure):
+at 64 KiB saturated, a sink about 11% slower than the broker left 46 to 176 MB of payload in the broker's heap within a
+second, with nothing to stop it growing. (V1's 167,751 lost in the allocator runs are not a "without": they were at
+4 KiB, with nothing held, and their likely mechanism is the policy actor's undeadlined answer, above.)
+
+*The procedure.* Main at `b979c183` (multi-instance and the retry fix; protocol 2), every image rebuilt and redeployed
+together by `up.nu sandbox-local --dev` (stopped at the browser step, as expected), then pared down as the fifth set
+was: every Polar kustomization suspended, everything but the broker, cert-issuer, the two credentials agents and Neo4j
+scaled to 0, Jaeger among them; all put back at the end. The plan `infra/load-plans/pressure.nuon`, 8 runs, the broker
+restarted before each (so each begins at its 256 MiB floor), its container limit 1 GiB (so its ceiling is 512 MiB, half
+the limit). Producers at 1,000 a second each, the harness-producer workload multi-instance (each pod its own session).
+Record: `~/.cache/polar/harness/pressure-20261101T105858.nuon`; scratch driver
+`pressure-driver.nu` beside the scratchpad's records. 16:00 to 16:27 UTC.
+
+| run | size | producers | sink a delivery | received | each producer held to | sink took | budget reached | held, at most | broker peak |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 64 KiB | 3 | 1.1 ms | 30,000 / 30,000 | 346 /s | 883 /s | 512 MiB, ceiling | 408 MB | 497 MB |
+| 1 | 64 KiB | 6 | 1.1 ms | 60,000 / 60,000 | 180 /s | 888 /s | 512 MiB, ceiling | 537 MB | (not sampled) |
+| 2 | 64 KiB | 3 | 10 ms | 30,000 / 30,000 | 41 /s | 100 /s | 272 MiB | 268 MB | 381 MB |
+| 3 | 64 KiB | 6 | 10 ms | 60,000 / 60,000 | 19 /s | 100 /s | 352 MiB | 369 MB | 690 MB |
+| 4 | 1 MiB | 3 | 1.1 ms | 3,072 / 3,072 | 229 /s | 632 /s | 336 MiB | 218 MB | (not sampled) |
+| 5 | 1 MiB | 6 | 1.1 ms | 6,144 / 6,144 | 136 /s | 610 /s | 384 MiB | 267 MB | 431 MB |
+| 6 | 1 MiB | 3 | 10 ms | 3,072 / 3,072 | 38 /s | 99 /s | 512 MiB, ceiling | 407 MB | 439 MB |
+| 7 | 1 MiB | 6 | 10 ms | 6,144 / 6,144 | 18 /s | 98 /s | 512 MiB, ceiling | 536 MB | (not sampled) |
+
+*Read plainly.*
+- **Nothing lost, in any run:** every message received, no duplicate, no producer failed or refused, the broker never
+  restarted. Every producer pod was its own session (none superseded another): multi-instance, seen.
+- **The pressure went back to the publishers:** each was held to its share of what the consumer took (six at 10 ms, 18
+  to 19 a second each, against the 1,000 they asked for), instead of the broker holding the difference.
+- **The controller grew the budget past its floor in every run**, to its ceiling in four, and gave it back after: in run
+  0, 256 MiB to 400 to 512 MiB (`Ceiling(Limit)`) within 24 s of load, held there while it lasted, and back at the floor
+  20 s after. What it held never passed the budget; the container's peak, where cAdvisor reported one, was at most 690
+  MB of its 1 GiB.
+- **Found: run 3 delivered 18,366 of its 60,000 messages out of order** (a producer's message after a later one of the
+  same producer; the sink's tally, `cassini/test/common/src/stats.rs`). It is the one run where the broker spared
+  stalled connections (21 times, each producer's own `selftest.harness-producer` subscription, 30 s without progress):
+  a spared connection's publishes are refused for now (`PublishRefusal::Unavailable`, `listener.rs:372`), and its client
+  keeps the message and sends it again, while what it sends after goes on. That fits all three facts (reordered, none
+  lost, none repeated); a mechanism read, not reproduced. To reproduce, test first (`remaining-work.md`).
+- Run 0 also ended one session early, as designed: soft-state-observer's custodian, scaled to 0 for the set and so away,
+  held one message when the budget was exhausted, which let it go and ended the session.
+- Three runs have no peak: cAdvisor's `container_memory_max_usage_bytes` for the broker was not in the summary when
+  sampled. The harness records it as null; the held figure, the broker's own, is there for every run.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.

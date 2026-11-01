@@ -833,6 +833,17 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
       (`authority-model.md`, "Multi-instance workloads", the decisions marked for review): legibility first, a UUID alone
       is never what a person reads; and a misconfigured issuer then fails at its first pod. Small; built with the retry
       fix, which works in the same issuance code (`instance_sans_for`, `credentials-agent/consume/src/issuance.rs:136`).
+- [ ] FOUND 2026-11-01 (the sixth set, `broker-baseline.md`, "The sixth set: pressure"): a publisher's messages are
+  delivered out of order after the broker spares its connection. Run 3 (six producers at 64 KiB into a sink 10 ms a
+  delivery) delivered 18,366 of 60,000 after a later one of the same producer, none lost, none repeated; it alone had
+  spared connections (each producer's `selftest.harness-producer` subscription, 30 s without progress, 21 times). A
+  spared connection's publishes are refused for now (`PublishRefusal::Unavailable`, `cassini/broker/src/listener.rs:372`)
+  and its client sends the message again while later ones go on: a mechanism read, not reproduced. Test first: a
+  publisher refused for now mid-stream, then its order at the subscriber. Also to settle: why a producer's own selftest
+  subscription stalls at all while it publishes.
+- [ ] u7c has no Jira: jira-observer ends at once (`JIRA_URL is still the example placeholder`), the pod's rule restarts
+  every container, and each restart's new custodian key waits out the renewal rule, so it loops every five minutes.
+  Correct behaviour for a missing setting; set `workloads.jira-observer.env` for u7c or leave it scaled to 0.
 - [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
   clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
   publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
