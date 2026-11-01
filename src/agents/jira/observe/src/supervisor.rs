@@ -121,6 +121,7 @@ impl ObserverSupervisorState {
             clock: std::time::Instant::now,
             cursor: self.state.clone(),
             wall_clock: crate::issues::wall_clock_ms,
+            health: self.healthcheck.clone(),
         }
     }
 
@@ -360,8 +361,9 @@ impl Actor for ObserverSupervisor {
 
                 // An observer we still expect to be running stopped on its
                 // own. A failure in talking to Jira, a rejected token among
-                // them, never stops one (it is retried), so this is something
-                // else gone wrong, and a visible pod restart is the signal.
+                // them, never stops one (it is retried, or held through the
+                // agent's health), so this is something else gone wrong, and
+                // a visible pod restart is the signal.
                 if state.tracks(actor_cell.get_id()) {
                     error!(
                         "OBSERVER_SUPERVISOR: observer {actor_name:?} stopped unexpectedly: {reason:?}"
@@ -389,11 +391,147 @@ impl Actor for ObserverSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_health::{Told, health_recorder, told};
     use polar::egress::testing::{TestCa, given, https_server, rerun};
+    use polar_agent_builder::HoldReason;
+    use serde_json::json;
 
     use std::time::Instant;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Takes any message and drops it: the supervisor's own reference, its infrastructure and its broker client, in a
+    /// test of what it starts.
+    struct Sink<M>(std::marker::PhantomData<fn() -> M>);
+
+    #[async_trait]
+    impl<M: ractor::Message> Actor for Sink<M> {
+        type Msg = M;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<M>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    async fn sink<M: ractor::Message>() -> ActorRef<M> {
+        Actor::spawn(None, Sink::<M>(std::marker::PhantomData), ())
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// The supervisor's state as `pre_start` makes it, for a site at `url` read with `auth`, its health `health`.
+    async fn supervisor_state(
+        url: String,
+        auth: JiraAuth,
+        health: ActorRef<polar_health::HealthCheckMessage>,
+    ) -> ObserverSupervisorState {
+        ObserverSupervisorState {
+            jira_url: url,
+            auth,
+            deployment: JiraDeployment::ServerOrDataCenter,
+            base_interval: 3600,
+            query_date: None,
+            web_client: Client::new(),
+            tcp_client: TcpClient::from_actor_ref(sink().await),
+            state: None,
+            healthcheck: HealthHandle::new(health),
+            infrastructure: sink().await,
+            projects: None,
+            groups: None,
+            users: None,
+            issues: None,
+        }
+    }
+
+    /// A site that answers who the token is and what it is, and 404 to everything else.
+    async fn site_without_data() -> MockServer {
+        let server = MockServer::start().await;
+        for (endpoint, body) in [
+            (
+                "/rest/api/2/myself",
+                json!({ "name": "svc-polar", "key": "JIRAUSER10100" }),
+            ),
+            (
+                "/rest/api/2/serverInfo",
+                json!({ "deploymentType": "Server" }),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(wiremock::matchers::path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Waits up to five seconds for the health actor to have been told `count` things.
+    async fn told_at_least(
+        health: &ActorRef<polar_health::HealthCheckMessage>,
+        recorded: &std::sync::Arc<std::sync::Mutex<Vec<Told>>>,
+        count: usize,
+    ) -> Vec<Told> {
+        for _ in 0..250 {
+            let now = told(health, recorded).await;
+            if now.len() >= count {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        told(health, recorded).await
+    }
+
+    /// The observers it starts hold what a retry cannot fix through the agent's own health: the supervisor's
+    /// `resources.healthcheck`.
+    #[tokio::test]
+    async fn the_observers_hold_through_the_agent_s_health() {
+        let server = site_without_data().await;
+        let (health, recorded) = health_recorder().await;
+        let mut state = supervisor_state(
+            server.uri(),
+            JiraAuth::from_parts(None, "t0ken".into()),
+            health.clone(),
+        )
+        .await;
+        let myself = sink::<ObserverSupervisorMessage>().await;
+        ObserverSupervisor::spawn_observers(&myself, &mut state)
+            .await
+            .unwrap();
+
+        // Each of the four is told 404 on what it pulls.
+        let told = told_at_least(&health, &recorded, 4).await;
+        let mut held: Vec<&str> = told
+            .iter()
+            .map(|t| match t {
+                Told::Hold(HoldReason::Configuration, message) => {
+                    message.split(':').next().unwrap_or_default()
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        held.sort();
+        assert_eq!(
+            held,
+            [
+                JIRA_GROUP_OBSERVER,
+                JIRA_ISSUE_OBSERVER,
+                JIRA_PROJECT_OBSERVER,
+                JIRA_USER_OBSERVER
+            ]
+        );
+        state.stop_observers("the test is over").await;
+    }
 
     #[tokio::test]
     async fn a_request_that_takes_too_long_is_given_up() {

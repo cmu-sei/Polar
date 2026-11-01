@@ -3893,6 +3893,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "polar-health",
  "polar-scudo",
  "proptest",
  "ractor",

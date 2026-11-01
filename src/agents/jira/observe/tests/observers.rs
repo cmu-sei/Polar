@@ -38,7 +38,10 @@ use jira_observer::projects::JiraProjectObserver;
 use jira_observer::users::JiraUserObserver;
 use jira_observer::{JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage};
 use polar::cassini::TcpClient;
-use polar_agent_builder::{SoftValue, StateClient, StateError, StateQuery};
+use polar_agent_builder::{
+    HealthHandle, HoldReason, SoftValue, StateClient, StateError, StateQuery,
+};
+use polar_health::HealthCheckMessage;
 use ractor::{Actor, ActorProcessingErr, ActorRef, ActorStatus, async_trait};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -156,7 +159,7 @@ async fn asked(server: &MockServer, endpoint: &str) -> Vec<Request> {
         .collect()
 }
 
-fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserverArgs {
+async fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserverArgs {
     JiraObserverArgs {
         jira_url: server.uri(),
         auth: JiraAuth::from_parts(None, "t0ken".into()),
@@ -174,7 +177,65 @@ fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserver
         // A graph with no issue in it, as a fresh cluster's.
         cursor: Some(answers(vec![], Ok(SoftValue::of(None))).0),
         wall_clock: || NOW_MS,
+        // Heard by nobody; a test of holding gives its own.
+        health: HealthHandle::new(health_recorder().await.0),
     }
+}
+
+/// What the agent's health was told, in order.
+#[derive(Debug, Clone, PartialEq)]
+enum Told {
+    Hold(HoldReason, String),
+    Release(HoldReason),
+}
+
+/// Stands in for the agent's health actor and keeps every hold and release it is told.
+struct HealthRecorder(Arc<Mutex<Vec<Told>>>);
+
+#[async_trait]
+impl Actor for HealthRecorder {
+    type Msg = HealthCheckMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        _: &mut (),
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            HealthCheckMessage::Hold { reason, message } => {
+                self.0.lock().unwrap().push(Told::Hold(reason, message))
+            }
+            HealthCheckMessage::Release(reason) => {
+                self.0.lock().unwrap().push(Told::Release(reason))
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+async fn health_recorder() -> (ActorRef<HealthCheckMessage>, Arc<Mutex<Vec<Told>>>) {
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let (actor, _) = Actor::spawn(None, HealthRecorder(told.clone()), ())
+        .await
+        .unwrap();
+    (actor, told)
+}
+
+/// Everything the health actor has been told, once it has taken every message cast to it so far.
+async fn told(health: &ActorRef<HealthCheckMessage>, told: &Arc<Mutex<Vec<Told>>>) -> Vec<Told> {
+    // A call is answered (here, dropped) only after every message cast before it.
+    let _ = ractor::call!(health, |reply| HealthCheckMessage::Report(
+        polar_health::ReportReply::new(reply)
+    ));
+    told.lock().unwrap().clone()
 }
 
 /// The wall clock of these tests, in epoch milliseconds.
@@ -306,7 +367,7 @@ async fn a_pull_that_fails_is_tried_again_and_the_observer_stays_up() {
     mount_site(&server).await;
     let (client, topics) = recorder().await;
 
-    let (observer, _) = Actor::spawn(None, JiraProjectObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraProjectObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -327,25 +388,36 @@ async fn a_pull_that_fails_is_tried_again_and_the_observer_stays_up() {
     observer.stop(None);
 }
 
-/// Runs `observer` against a site that treats the token as anonymous the first time it is
-/// asked, and checks that it asked who the token is before pulling anything, asked again, and
-/// then pulled and published on `topic`, still running.
-async fn checks_the_token_first_and_again_until_accepted<A>(observer: A, topic: &str)
+/// A site that is down for a while is never held: the observer retries, and its health hears nothing.
+#[tokio::test]
+async fn a_pull_that_fails_for_a_while_is_never_held() {
+    let server = MockServer::start().await;
+    fail_first(&server, PROJECTS, ResponseTemplate::new(503), 2).await;
+    mount_site(&server).await;
+    let (client, topics) = recorder().await;
+    let (health, recorded) = health_recorder().await;
+    let mut args = args(&server, client).await;
+    args.health = HealthHandle::new(health.clone());
+    let (observer, _) = Actor::spawn(None, JiraProjectObserver, args).await.unwrap();
+
+    assert!(published(&topics, JIRA_PROJECTS_CONSUMER_TOPIC, 1).await);
+    assert_eq!(told(&health, &recorded).await, []);
+    observer.stop(None);
+}
+
+/// Runs `observer` against a site that cannot answer who the token is the first time it is asked (a 503, which may
+/// pass), and checks that it asked who the token is before pulling anything, asked again, and then pulled and
+/// published on `topic`, still running.
+async fn checks_the_token_first_and_again_after_a_failure<A>(observer: A, topic: &str)
 where
     A: Actor<Msg = JiraObserverMessage, Arguments = JiraObserverArgs>,
 {
     let server = MockServer::start().await;
-    fail_first(
-        &server,
-        MYSELF,
-        ResponseTemplate::new(401).insert_header("x-ausername", "anonymous"),
-        1,
-    )
-    .await;
+    fail_first(&server, MYSELF, ResponseTemplate::new(503), 1).await;
     mount_site(&server).await;
     let (client, topics) = recorder().await;
 
-    let (observer, _) = Actor::spawn(None, observer, args(&server, client))
+    let (observer, _) = Actor::spawn(None, observer, args(&server, client).await)
         .await
         .unwrap();
 
@@ -366,8 +438,8 @@ where
 }
 
 #[tokio::test]
-async fn the_project_observer_checks_the_token_first_and_again_until_accepted() {
-    checks_the_token_first_and_again_until_accepted(
+async fn the_project_observer_checks_the_token_first_and_again_after_a_failure() {
+    checks_the_token_first_and_again_after_a_failure(
         JiraProjectObserver,
         JIRA_PROJECTS_CONSUMER_TOPIC,
     )
@@ -375,21 +447,113 @@ async fn the_project_observer_checks_the_token_first_and_again_until_accepted() 
 }
 
 #[tokio::test]
-async fn the_group_observer_checks_the_token_first_and_again_until_accepted() {
-    checks_the_token_first_and_again_until_accepted(JiraGroupObserver, JIRA_GROUPS_CONSUMER_TOPIC)
+async fn the_group_observer_checks_the_token_first_and_again_after_a_failure() {
+    checks_the_token_first_and_again_after_a_failure(JiraGroupObserver, JIRA_GROUPS_CONSUMER_TOPIC)
         .await;
 }
 
 #[tokio::test]
-async fn the_user_observer_checks_the_token_first_and_again_until_accepted() {
-    checks_the_token_first_and_again_until_accepted(JiraUserObserver, JIRA_USERS_CONSUMER_TOPIC)
+async fn the_user_observer_checks_the_token_first_and_again_after_a_failure() {
+    checks_the_token_first_and_again_after_a_failure(JiraUserObserver, JIRA_USERS_CONSUMER_TOPIC)
         .await;
 }
 
 #[tokio::test]
-async fn the_issue_observer_checks_the_token_first_and_again_until_accepted() {
-    checks_the_token_first_and_again_until_accepted(JiraIssueObserver, JIRA_ISSUES_CONSUMER_TOPIC)
+async fn the_issue_observer_checks_the_token_first_and_again_after_a_failure() {
+    checks_the_token_first_and_again_after_a_failure(JiraIssueObserver, JIRA_ISSUES_CONSUMER_TOPIC)
         .await;
+}
+
+/// Runs `observer`, named `name`, against a site that treats the token as anonymous whenever it is asked: Jira does
+/// not accept it, which a retry cannot change. The observer holds it through the agent's health as `Credentials`,
+/// with its name and what to check, asks no more of the site, publishes nothing, and stays up.
+async fn holds_a_token_jira_refuses_and_does_not_try_again<A>(observer: A, name: &str)
+where
+    A: Actor<Msg = JiraObserverMessage, Arguments = JiraObserverArgs>,
+{
+    let server = MockServer::start().await;
+    fail_first(
+        &server,
+        MYSELF,
+        ResponseTemplate::new(401).insert_header("x-ausername", "anonymous"),
+        u64::MAX,
+    )
+    .await;
+    mount_site(&server).await;
+    let (client, topics) = recorder().await;
+    let (health, recorded) = health_recorder().await;
+    let mut args = args(&server, client).await;
+    args.health = HealthHandle::new(health.clone());
+    let (observer, _) = Actor::spawn(None, observer, args).await.unwrap();
+
+    // Long enough for many retries on the test's backoff (20 ms to 80 ms).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let told = told(&health, &recorded).await;
+    let [Told::Hold(HoldReason::Credentials, message)] = &told[..] else {
+        panic!("{name}: one Credentials hold: {told:?}");
+    };
+    assert!(message.starts_with(&format!("{name}: ")), "{message}");
+    assert!(message.contains("check JIRA_TOKEN"), "{message}");
+    assert!(!message.contains("t0ken"), "{message}");
+    assert_eq!(asked(&server, MYSELF).await.len(), 1, "{name} asked again");
+    assert!(topics.lock().unwrap().is_empty(), "{name} published");
+    assert_eq!(observer.get_status(), ActorStatus::Running);
+    observer.stop(None);
+}
+
+#[tokio::test]
+async fn the_project_observer_holds_a_token_jira_refuses() {
+    holds_a_token_jira_refuses_and_does_not_try_again(
+        JiraProjectObserver,
+        "jira.observer.projects",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_group_observer_holds_a_token_jira_refuses() {
+    holds_a_token_jira_refuses_and_does_not_try_again(JiraGroupObserver, "jira.observer.groups")
+        .await;
+}
+
+#[tokio::test]
+async fn the_user_observer_holds_a_token_jira_refuses() {
+    holds_a_token_jira_refuses_and_does_not_try_again(JiraUserObserver, "jira.observer.users")
+        .await;
+}
+
+#[tokio::test]
+async fn the_issue_observer_holds_a_token_jira_refuses() {
+    holds_a_token_jira_refuses_and_does_not_try_again(JiraIssueObserver, "jira.observer.issues")
+        .await;
+}
+
+/// An address that is not a Jira this observer reads (404 on what it pulls) is held as `Configuration`, and not
+/// asked again.
+#[tokio::test]
+async fn an_address_that_is_not_a_jira_is_held_as_configuration() {
+    let server = MockServer::start().await;
+    fail_first(&server, PROJECTS, ResponseTemplate::new(404), u64::MAX).await;
+    mount_site(&server).await;
+    let (client, _) = recorder().await;
+    let (health, recorded) = health_recorder().await;
+    let mut args = args(&server, client).await;
+    args.health = HealthHandle::new(health.clone());
+    let (observer, _) = Actor::spawn(None, JiraProjectObserver, args).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let told = told(&health, &recorded).await;
+    let [Told::Hold(HoldReason::Configuration, message)] = &told[..] else {
+        panic!("one Configuration hold: {told:?}");
+    };
+    assert!(
+        message.starts_with("jira.observer.projects: /rest/api/2/project returned 404"),
+        "{message}"
+    );
+    assert!(message.contains("check JIRA_URL"), "{message}");
+    assert_eq!(asked(&server, PROJECTS).await.len(), 1);
+    assert_eq!(observer.get_status(), ActorStatus::Running);
+    observer.stop(None);
 }
 
 #[tokio::test]
@@ -400,7 +564,7 @@ async fn an_error_that_is_not_jiras_still_ends_the_observer() {
     let (client, _) = recorder().await;
     client.stop_and_wait(None, None).await.unwrap();
 
-    let (observer, handle) = Actor::spawn(None, JiraProjectObserver, args(&server, client))
+    let (observer, handle) = Actor::spawn(None, JiraProjectObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -442,7 +606,7 @@ async fn after_an_outage_the_first_incremental_pull_reaches_back_to_the_last_one
         .await;
     mount_site(&server).await;
     let (client, topics) = recorder().await;
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.base_interval = 1;
     args.clock = clock;
 
@@ -506,7 +670,7 @@ async fn the_first_issue_pull_waits_for_the_state_agent_and_starts_at_the_graph_
         ],
         Ok(SoftValue::of(Some(newest))),
     );
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.cursor = Some(ask);
     args.query_date = Some("2020-01-01".into());
     let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
@@ -545,7 +709,7 @@ async fn without_an_answer_the_issue_observer_never_pulls_everything() {
             "the graph could not be read".into(),
         )),
     );
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.cursor = Some(ask);
     let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
 
@@ -580,7 +744,7 @@ async fn with_no_issue_in_the_graph_the_first_pull_is_from_query_date_or_full() 
         mount_site(&server).await;
         let (client, topics) = recorder().await;
         let (ask, asked) = answers(vec![], Ok(SoftValue::of(None)));
-        let mut args = args(&server, client);
+        let mut args = args(&server, client).await;
         args.cursor = Some(ask);
         args.query_date = query_date.map(str::to_string);
         let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
@@ -598,7 +762,7 @@ async fn the_other_observers_do_not_ask_the_state_agent() {
     mount_site(&server).await;
     let (client, topics) = recorder().await;
     let (ask, asked) = answers(vec![], Err(StateError::NoReply("never".into())));
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.cursor = Some(ask);
     let (projects, _) = Actor::spawn(None, JiraProjectObserver, args.clone())
         .await
@@ -625,7 +789,7 @@ async fn after_its_session_ended_the_issue_observer_pulls_from_the_graph_s_curso
     mount_site(&server).await;
     let (client, topics) = recorder().await;
     let (ask, asked) = answers(vec![], Ok(SoftValue::of(None)));
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.cursor = Some(ask);
     let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
     assert!(published(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 1).await);
@@ -686,7 +850,7 @@ async fn the_group_observer_walks_every_page_of_the_picker() {
         .await;
     mount_site(&server).await;
     let (client, topics, published) = recording().await;
-    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -732,7 +896,7 @@ async fn the_user_observer_walks_every_page_of_the_user_search() {
         .await;
     mount_site(&server).await;
     let (client, topics, published) = recording().await;
-    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -783,7 +947,7 @@ async fn the_issue_observer_walks_every_page_with_a_total_or_without_one() {
             .await;
         mount_site(&server).await;
         let (client, topics) = recorder().await;
-        let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client))
+        let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client).await)
             .await
             .unwrap();
 
@@ -825,7 +989,7 @@ async fn retry_after_is_honoured_on_429_and_503() {
         mount_site(&server).await;
         let (client, topics) = recorder().await;
         let started = Instant::now();
-        let (observer, _) = Actor::spawn(None, JiraProjectObserver, args(&server, client))
+        let (observer, _) = Actor::spawn(None, JiraProjectObserver, args(&server, client).await)
             .await
             .unwrap();
 
@@ -870,7 +1034,7 @@ async fn an_issue_pull_that_fails_on_a_page_resumes_at_that_page() {
         .await;
     mount_site(&server).await;
     let (client, topics) = recorder().await;
-    let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraIssueObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -906,7 +1070,7 @@ async fn a_user_pull_that_fails_on_a_page_resumes_at_that_page() {
         .await;
     mount_site(&server).await;
     let (client, topics, published) = recording().await;
-    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraUserObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -947,7 +1111,7 @@ async fn a_group_pull_that_fails_on_a_page_resumes_at_that_page() {
         .await;
     mount_site(&server).await;
     let (client, topics, published) = recording().await;
-    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client))
+    let (observer, _) = Actor::spawn(None, JiraGroupObserver, args(&server, client).await)
         .await
         .unwrap();
 
@@ -1009,7 +1173,7 @@ async fn the_deployment_is_what_the_site_says_it_is_and_otherwise_the_setting() 
             .await;
         mount_site(&server).await;
         let (client, topics) = recorder().await;
-        let mut args = args(&server, client);
+        let mut args = args(&server, client).await;
         args.deployment = configured;
         let (observer, _) = Actor::spawn(None, JiraUserObserver, args).await.unwrap();
 
@@ -1063,7 +1227,7 @@ async fn apache_s_answers_are_published_as_the_processor_expects() {
         .await;
     mount_site(&server).await;
     let (client, topics, published) = recording().await;
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.auth = JiraAuth::Anonymous;
     let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
 
@@ -1090,7 +1254,7 @@ async fn an_anonymous_observer_sends_no_credential_and_checks_no_token() {
     let server = MockServer::start().await;
     mount_site(&server).await;
     let (client, topics) = recorder().await;
-    let mut args = args(&server, client);
+    let mut args = args(&server, client).await;
     args.auth = JiraAuth::Anonymous;
     let (projects, _) = Actor::spawn(None, JiraProjectObserver, args.clone())
         .await

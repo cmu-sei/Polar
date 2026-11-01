@@ -34,6 +34,7 @@ use jira_observer::issues::{
     issue_jql, jql_filter,
 };
 use jira_observer::settings::{normalise_jira_url, parse_query_date, token_looks_base64};
+use jira_observer::{BRIEF_CHARS, JiraError};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -287,6 +288,33 @@ proptest! {
         for fixed in [Filter::Everything, Filter::After("2024-01-01".to_string())] {
             prop_assert_eq!(fixed.jql(Duration::from_millis(elapsed_ms)), fixed.jql(Duration::ZERO));
         }
+    }
+
+    /// What a held failure says it was is bounded, so what to set after it always fits the report, and never carries
+    /// a request's query (a search's JQL, the groups a walk leaves out): for a request to any endpoint with any query,
+    /// it is the path and what the site answered.
+    #[test]
+    fn a_failure_s_brief_is_its_path_and_answer_without_the_query_and_bounded(
+        endpoint in prop::sample::select(ENDPOINTS),
+        context in proptest::option::of(segment()),
+        query in "[a-zA-Z0-9=&%+._~-]{1,200}",
+        status in 100u16..600,
+        message in any::<String>(),
+    ) {
+        let path = match &context {
+            Some(context) => format!("/{context}{endpoint}"),
+            None => endpoint.to_string(),
+        };
+        let status = reqwest::StatusCode::from_u16(status).unwrap();
+        let brief = JiraError::status(&format!("{path}?{query}"), status, None).brief();
+        let whole = format!("{path} returned {status}");
+        if whole.chars().count() <= BRIEF_CHARS {
+            prop_assert_eq!(&brief, &whole);
+        } else {
+            prop_assert!(brief.ends_with('…'), "{}", brief);
+        }
+        prop_assert!(!brief.contains('?'), "{}", brief);
+        prop_assert!(JiraError::new(message).brief().chars().count() <= BRIEF_CHARS);
     }
 
     /// Any real date, with or without a time to the minute, written with either separator JQL takes, reads back as

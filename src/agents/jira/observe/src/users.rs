@@ -181,7 +181,8 @@ impl Actor for JiraUserObserver {
             args.tcp_client,
             Duration::from_secs(args.base_interval),
         )
-        .with_retry(args.retry, args.clock))
+        .with_retry(args.retry, args.clock)
+        .with_health(args.health))
     }
 
     async fn post_start(

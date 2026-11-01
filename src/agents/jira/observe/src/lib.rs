@@ -36,6 +36,7 @@ use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use jira_common::types::JiraData;
 use polar::cassini::TcpClient;
+use polar_agent_builder::{HealthHandle, HoldReason};
 use ractor::concurrency::Duration;
 use ractor::{ActorProcessingErr, ActorRef};
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
@@ -77,9 +78,10 @@ pub const SERVER_INFO_OP: &str = "/rest/api/2/serverInfo";
 /// The endpoint that lists the site's fields, with each one's schema.
 pub const FIELD_OP: &str = "/rest/api/2/field";
 
-/// What a failure means for trying again (docs/architecture/jira.md, "The review before 3.0.0", 5). Every kind is
-/// still retried on the backoff ([`RETRY`]); the kind is what the observer keeps ([`JiraObserverState::failure`]) and
-/// what health is told once it can be (the hook is [`JiraObserverState::settle`]).
+/// What a failure means for trying again (docs/architecture/jira.md, "The review before 3.0.0", 5). A `Transient`
+/// failure is retried on the backoff ([`RETRY`]); a `Credentials` or `Configuration` one is held as a standing problem
+/// through the agent's health ([`JiraObserverState::settle`]), and the observer does not try again until the agent
+/// restarts. The kind is what the observer keeps ([`JiraObserverState::failure`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     /// The site could not be reached, took too long, answered 5xx or 429, or the state agent did not say where to
@@ -132,7 +134,13 @@ pub struct JiraError {
     retry_after: Option<Duration>,
     token_rejected: bool,
     no_cursor: bool,
+    /// What failed, in a few words, where the message is longer than a health report carries (a refused token).
+    brief: Option<String>,
 }
+
+/// The longest "what failed" a held problem's message carries ([`JiraError::brief`]), in characters: what to set
+/// comes after it, and the whole must fit a health report's message (`polar_health::MAX_MESSAGE_CHARS`, 200).
+pub const BRIEF_CHARS: usize = 80;
 
 impl JiraError {
     /// A failure that may pass: [`FailureKind::Transient`].
@@ -147,6 +155,7 @@ impl JiraError {
             retry_after: None,
             token_rejected: false,
             no_cursor: false,
+            brief: None,
         }
     }
 
@@ -161,9 +170,10 @@ impl JiraError {
         }
     }
 
-    fn rejected_token(message: String) -> Self {
+    fn rejected_token(message: String, brief: String) -> Self {
         Self {
             token_rejected: true,
+            brief: Some(brief),
             ..Self::of_kind(message, FailureKind::Credentials)
         }
     }
@@ -191,6 +201,38 @@ impl JiraError {
     pub fn retry_after(&self) -> Option<Duration> {
         self.retry_after
     }
+
+    /// What failed, short enough for a health report: the request by its path without its query (a search's JQL, a
+    /// walk's excluded groups), what it answered, at most [`BRIEF_CHARS`] characters.
+    pub fn brief(&self) -> String {
+        let text = self
+            .brief
+            .clone()
+            .unwrap_or_else(|| without_queries(&self.message));
+        if text.chars().count() <= BRIEF_CHARS {
+            return text;
+        }
+        let mut cut: String = text.chars().take(BRIEF_CHARS - 1).collect();
+        cut.push('…');
+        cut
+    }
+}
+
+/// `text` with every URL query (from a `?` to the next space) taken out.
+fn without_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_query = false;
+    for c in text.chars() {
+        if c == '?' {
+            in_query = true;
+        } else if c.is_whitespace() {
+            in_query = false;
+        }
+        if !in_query {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The wait a `Retry-After` header asks for, given the time now: a number of seconds, or an HTTP date (a date
@@ -390,6 +432,12 @@ pub struct JiraObserverState {
     pub deployment_learned: bool,
     /// The last failure, by kind, until a pull succeeds.
     pub failure: Option<Failure>,
+    /// The agent's health, told of a standing problem this observer holds and of its end: none only in a test of
+    /// something else.
+    pub health: Option<HealthHandle>,
+    /// The standing problem this observer holds (a `Credentials` or `Configuration` failure), if any. While it holds
+    /// one it does not pull again; only this observer releases it.
+    pub held: Option<HoldReason>,
     /// The issue observer's pull under way, kept when a page fails so the next attempt goes on from it.
     pub issue_walk: Option<issues::IssueWalk>,
     /// The users observer's walk under way, kept likewise.
@@ -439,6 +487,8 @@ impl JiraObserverState {
             token_fresh: false,
             deployment_learned: false,
             failure: None,
+            health: None,
+            held: None,
             issue_walk: None,
             user_walk: None,
             group_walk: None,
@@ -462,6 +512,12 @@ impl JiraObserverState {
     /// The date the first full pull starts from.
     pub fn with_query_date(mut self, query_date: Option<String>) -> Self {
         self.query_date = query_date;
+        self
+    }
+
+    /// The agent's health, which a standing problem is held with.
+    pub fn with_health(mut self, health: HealthHandle) -> Self {
+        self.health = Some(health);
         self
     }
 
@@ -531,10 +587,13 @@ impl JiraObserverState {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("anonymous"));
         let rejected = |why: String| {
-            JiraError::rejected_token(format!(
-                "{TOKEN_REJECTED}. This observer sends it as {}; {MYSELF_OP} {why}",
-                self.auth.mode()
-            ))
+            JiraError::rejected_token(
+                format!(
+                    "{TOKEN_REJECTED}. This observer sends it as {}; {MYSELF_OP} {why}",
+                    self.auth.mode()
+                ),
+                format!("{MYSELF_OP} {why}: the token was not accepted"),
+            )
         };
 
         if status == StatusCode::UNAUTHORIZED
@@ -644,24 +703,34 @@ impl JiraObserverState {
         }
     }
 
-    /// Settles a pull and schedules the next, and returns the wait. After a success the next pull is a base interval
-    /// away and the last failure is cleared. A failure in talking to Jira ([`JiraError`]) is kept by kind
-    /// ([`JiraObserverState::failure`]) and logged (a kind a retry cannot fix at error, with what to check), the
-    /// token is checked again before the next pull, and that pull is the retry's next wait away, or what the site's
-    /// `Retry-After` asked if that is longer (never more than the base interval): Jira being unreachable is not the
-    /// agent being unhealthy, so the observer stays up. Any other error is returned and fails the observer, as before.
+    /// Settles a pull and schedules the next, and returns the wait, or none when the observer now holds a standing
+    /// problem and does not pull again.
     ///
-    /// HEALTH HOOK (pulled health, the soft-state agents' workstream): this is where an observer's failure is decided
-    /// and cleared. Once the builder's health API takes a domain failure, the observer is given the agent's
-    /// `HealthHandle` in [`JiraObserverArgs`] and reports `self.failure` here: set with its kind and its message on a
-    /// failure, cleared on a success.
+    /// After a success the next pull is a base interval away, the last failure is cleared, and a standing problem this
+    /// observer held is released. A failure in talking to Jira ([`JiraError`]) is kept by kind
+    /// ([`JiraObserverState::failure`]) and logged, and the token is checked again before the next pull:
+    ///
+    /// - [`FailureKind::Transient`] is retried: the next pull is the retry's next wait away, or what the site's
+    ///   `Retry-After` asked if that is longer (never more than the base interval). Jira being unreachable is not the
+    ///   agent being unhealthy, so the observer stays up.
+    /// - [`FailureKind::Credentials`] and [`FailureKind::Configuration`] cannot be fixed by trying again: the observer
+    ///   holds it through the agent's health ([`HealthHandle::hold`], one line: this observer, what failed, what to
+    ///   set), logs it at error, and schedules no pull. The agent stays up and reports it; its rejuvenation, a restart,
+    ///   is what tries again (docs/architecture/soft-state.md, "As built: pulled health").
+    ///
+    /// Several observers may hold at once (DECIDED, to review, docs/architecture/jira.md): each releases only the hold
+    /// it placed, so one observer's success never ends another's, and an observer that holds does not pull again in
+    /// this process, so a hold, once placed, stands until the agent restarts. The health actor keeps one standing
+    /// problem, the latest; each is logged at error by its observer.
+    ///
+    /// Any other error is returned and fails the observer, as before.
     pub fn settle(
         &mut self,
         myself: &ActorRef<JiraObserverMessage>,
         observer: &str,
         pulled: Result<(), ActorProcessingErr>,
         tick: fn() -> JiraObserverMessage,
-    ) -> Result<Duration, ActorProcessingErr> {
+    ) -> Result<Option<Duration>, ActorProcessingErr> {
         let wait = match pulled {
             Ok(()) => {
                 if self.retry.failures() > 0 {
@@ -671,6 +740,12 @@ impl JiraObserverState {
                     );
                 }
                 self.failure = None;
+                if let Some(reason) = self.held.take() {
+                    info!("{observer}: pulled from Jira; the standing problem it held is resolved");
+                    if let Some(health) = &self.health {
+                        health.release(reason);
+                    }
+                }
                 self.retry.next(true, self.base_interval)
             }
             Err(e) => {
@@ -695,37 +770,53 @@ impl JiraObserverState {
                     );
                     self.token_fresh = false;
                     myself.send_after(wait, tick);
-                    return Ok(wait);
+                    return Ok(Some(wait));
                 }
                 self.token_checked = false;
-                match kind {
-                    FailureKind::Transient => warn!(
-                        "{observer}: pull from Jira failed: {failure}. Trying again in {wait:?} \
-                         (attempt {attempt})"
-                    ),
-                    FailureKind::Credentials | FailureKind::Configuration => error!(
-                        "{observer}: {failure}. A retry cannot fix this ({}): {}. Trying again in {wait:?} \
-                         (attempt {attempt})",
-                        kind.as_str(),
-                        match kind {
-                            FailureKind::Credentials if self.auth.is_anonymous() =>
-                                "reading anonymously, and the site does not show this to the public; a token \
-                                 (JIRA_TOKEN, without JIRA_ANONYMOUS) is needed to read it",
-                            FailureKind::Credentials =>
-                                "the site refuses the credential, or does not let it read this; check the token, \
-                                 the auth mode and the account's permissions",
-                            _ =>
-                                "check JIRA_URL, and that the site is a Jira Server, Data Center or Cloud this \
-                                  observer can read",
-                        }
-                    ),
+                self.token_fresh = false;
+                let reason = match kind {
+                    FailureKind::Transient => {
+                        warn!(
+                            "{observer}: pull from Jira failed: {failure}. Trying again in {wait:?} \
+                             (attempt {attempt})"
+                        );
+                        None
+                    }
+                    FailureKind::Credentials => Some(HoldReason::Credentials),
+                    FailureKind::Configuration => Some(HoldReason::Configuration),
+                };
+                if let Some(reason) = reason {
+                    let to_set = self.what_to_set(kind);
+                    error!(
+                        "{observer}: {failure}. A retry cannot fix this ({}): {to_set}. Not trying again until \
+                         the agent restarts; its health reports it",
+                        kind.as_str()
+                    );
+                    if let Some(health) = &self.health {
+                        health.hold(reason, format!("{observer}: {}; {to_set}", failure.brief()));
+                    }
+                    self.held = Some(reason);
+                    return Ok(None);
                 }
                 wait
             }
         };
         self.token_fresh = false;
         myself.send_after(wait, tick);
-        Ok(wait)
+        Ok(Some(wait))
+    }
+
+    /// What an operator sets or checks for a failure of `kind` a retry cannot fix, short enough for a health report.
+    fn what_to_set(&self, kind: FailureKind) -> &'static str {
+        match kind {
+            FailureKind::Credentials if self.auth.is_anonymous() => {
+                "the site does not show this to anonymous users: set JIRA_TOKEN, and JIRA_ANONYMOUS false, to read it"
+            }
+            FailureKind::Credentials => {
+                "check JIRA_TOKEN (raw, not base64), JIRA_EMAIL (Cloud only) and the account's permissions"
+            }
+            _ => "check JIRA_URL, and that the site is a Jira Server, Data Center or Cloud",
+        }
     }
 }
 
@@ -793,6 +884,8 @@ pub struct JiraObserverArgs {
     pub cursor: Option<issues::AskCursor>,
     /// The time in epoch milliseconds: the system clock, or a test's.
     pub wall_clock: fn() -> i64,
+    /// The agent's health (the supervisor's `resources.healthcheck`), which a failure a retry cannot fix is held with.
+    pub health: HealthHandle,
 }
 
 /// Publishes one JiraData value on a topic through the agent's client.
@@ -837,12 +930,89 @@ pub enum JiraObserverMessage {
     Resync,
 }
 
+/// A stand-in for the agent's health actor, for the tests of this crate that see what the observers hold.
+#[cfg(test)]
+pub(crate) mod test_health {
+    use polar_agent_builder::HoldReason;
+    use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+    use std::sync::{Arc, Mutex};
+
+    /// What the agent's health was told, in order.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum Told {
+        Hold(HoldReason, String),
+        Release(HoldReason),
+    }
+
+    /// Stands in for the agent's health actor and keeps every hold and release it is told.
+    pub(crate) struct HealthRecorder(Arc<Mutex<Vec<Told>>>);
+
+    #[async_trait]
+    impl Actor for HealthRecorder {
+        type Msg = polar_health::HealthCheckMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                polar_health::HealthCheckMessage::Hold { reason, message } => {
+                    self.0.lock().unwrap().push(Told::Hold(reason, message))
+                }
+                polar_health::HealthCheckMessage::Release(reason) => {
+                    self.0.lock().unwrap().push(Told::Release(reason))
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn health_recorder() -> (
+        ActorRef<polar_health::HealthCheckMessage>,
+        Arc<Mutex<Vec<Told>>>,
+    ) {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let (actor, _) = Actor::spawn(None, HealthRecorder(told.clone()), ())
+            .await
+            .unwrap();
+        (actor, told)
+    }
+
+    /// Everything the health actor has been told, once it has taken every message cast to it so far.
+    pub(crate) async fn told(
+        health: &ActorRef<polar_health::HealthCheckMessage>,
+        told: &Arc<Mutex<Vec<Told>>>,
+    ) -> Vec<Told> {
+        // A call is answered only after every message cast before it.
+        let _ = ractor::call!(health, |reply| polar_health::HealthCheckMessage::Report(
+            polar_health::ReportReply::new(reply)
+        ));
+        told.lock().unwrap().clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_health::{Told, health_recorder, told};
     use cassini_client::TcpClientMessage;
     use ractor::{Actor, async_trait};
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1220,19 +1390,330 @@ mod tests {
         };
         assert_eq!(
             s.settle(&ticks, "test", Err(limited(120)), tick).unwrap(),
-            Duration::from_secs(120)
+            Some(Duration::from_secs(120))
         );
         // The backoff's second wait (60 s) is longer than one second.
         assert_eq!(
             s.settle(&ticks, "test", Err(limited(1)), tick).unwrap(),
-            Duration::from_secs(60)
+            Some(Duration::from_secs(60))
         );
         assert_eq!(
             s.settle(&ticks, "test", Err(limited(86_400)), tick)
                 .unwrap(),
-            Duration::from_secs(1800)
+            Some(Duration::from_secs(1800))
         );
         ticks.stop(None);
+    }
+
+    /// Counts the ticks a settled pull schedules.
+    struct CountTicks(Arc<AtomicU64>);
+
+    #[async_trait]
+    impl Actor for CountTicks {
+        type Msg = JiraObserverMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A short backoff, so a scheduled retry arrives within a test.
+    const SHORT: Backoff = Backoff {
+        first: Duration::from_millis(10),
+        last: Duration::from_millis(10),
+    };
+
+    /// A failure a retry cannot fix is held through the agent's health, with one line that names the observer, says
+    /// what failed and what to set, fits a report as it is (nothing cut, nothing withheld) and never carries the token
+    /// or the site's address; the observer schedules no next pull.
+    #[tokio::test]
+    async fn a_failure_a_retry_cannot_fix_is_held_with_what_to_set_and_not_tried_again() {
+        let refused_token =
+            myself_answers(ResponseTemplate::new(401).insert_header("x-ausername", "anonymous"))
+                .await;
+        let token_error = state(refused_token.uri(), bearer())
+            .await
+            .check_token()
+            .await
+            .unwrap_err();
+        let missing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&missing)
+            .await;
+        let search = format!(
+            "{}/rest/api/2/search?jql=updated+%3E%3D+-47m+ORDER+BY+updated+ASC&startAt=0",
+            missing.uri()
+        );
+        let not_found = state(missing.uri(), bearer())
+            .await
+            .get_json::<Value>(&search)
+            .await
+            .unwrap_err();
+        let not_found = not_found.downcast::<JiraError>().unwrap();
+        let anonymous_refusal =
+            JiraError::status("/rest/api/2/user/search", StatusCode::UNAUTHORIZED, None);
+
+        for (auth, failure, host, reason, to_set) in [
+            (
+                bearer(),
+                token_error,
+                host_of(&refused_token),
+                HoldReason::Credentials,
+                "check JIRA_TOKEN",
+            ),
+            (
+                bearer(),
+                *not_found,
+                host_of(&missing),
+                HoldReason::Configuration,
+                "check JIRA_URL",
+            ),
+            (
+                JiraAuth::Anonymous,
+                anonymous_refusal,
+                "jira.invalid".to_string(),
+                HoldReason::Credentials,
+                "set JIRA_TOKEN, and JIRA_ANONYMOUS false",
+            ),
+        ] {
+            let ticked = Arc::new(AtomicU64::new(0));
+            let (ticks, _) = Actor::spawn(None, CountTicks(ticked.clone()), ())
+                .await
+                .unwrap();
+            let (health, recorded) = health_recorder().await;
+            let mut s = state("http://jira.invalid".into(), auth)
+                .await
+                .with_retry(SHORT, Instant::now)
+                .with_health(HealthHandle::new(health.clone()));
+
+            let wait = s
+                .settle(&ticks, JIRA_ISSUE_OBSERVER, Err(failure.into()), tick)
+                .unwrap();
+            assert_eq!(wait, None, "no next pull");
+            assert_eq!(s.held, Some(reason));
+
+            let told = told(&health, &recorded).await;
+            let [Told::Hold(held, message)] = &told[..] else {
+                panic!("one hold: {told:?}");
+            };
+            assert_eq!(*held, reason);
+            assert!(message.starts_with("jira.observer.issues: "), "{message}");
+            assert!(message.contains(to_set), "{message}");
+            assert!(!message.contains('?'), "no query: {message}");
+            assert!(!message.contains("t0ken"), "{message}");
+            assert!(!message.contains(&host), "{message}");
+            assert_eq!(
+                polar_health::report::sanitize(message, &["t0ken"]).as_deref(),
+                Some(message.as_str()),
+                "the message fits a report as it is"
+            );
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                ticked.load(AtomicOrdering::SeqCst),
+                0,
+                "a pull was scheduled"
+            );
+            ticks.stop(None);
+            health.stop(None);
+        }
+    }
+
+    /// A failure that may pass is retried on the backoff and never held: the site down, asking for time, and a
+    /// refusal before the token was checked again in the pull.
+    #[tokio::test]
+    async fn a_failure_that_may_pass_is_tried_again_and_never_held() {
+        let ticked = Arc::new(AtomicU64::new(0));
+        let (ticks, _) = Actor::spawn(None, CountTicks(ticked.clone()), ())
+            .await
+            .unwrap();
+        let (health, recorded) = health_recorder().await;
+        let mut s = state("http://jira.invalid".into(), bearer())
+            .await
+            .with_retry(SHORT, Instant::now)
+            .with_health(HealthHandle::new(health.clone()));
+        for status in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::FORBIDDEN,
+        ] {
+            s.token_checked = true;
+            s.token_fresh = false;
+            let wait = s
+                .settle(
+                    &ticks,
+                    JIRA_ISSUE_OBSERVER,
+                    Err(JiraError::status("/rest/api/2/search", status, None).into()),
+                    tick,
+                )
+                .unwrap();
+            assert!(wait.is_some(), "{status}");
+            assert_eq!(s.held, None, "{status}");
+        }
+        assert_eq!(told(&health, &recorded).await, []);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(ticked.load(AtomicOrdering::SeqCst), 3, "each retried");
+        ticks.stop(None);
+        health.stop(None);
+    }
+
+    /// Two observers of one agent share its health. A success releases the hold of the observer that placed it and no
+    /// other: one observer's success leaves another's hold in force.
+    #[tokio::test]
+    async fn a_success_releases_only_the_hold_its_own_observer_placed() {
+        let (ticks, _) = Actor::spawn(None, Ticks, ()).await.unwrap();
+        let (health, recorded) = health_recorder().await;
+        let mut users = state("http://jira.invalid".into(), JiraAuth::Anonymous)
+            .await
+            .with_health(HealthHandle::new(health.clone()));
+        let mut issues = state("http://jira.invalid".into(), JiraAuth::Anonymous)
+            .await
+            .with_health(HealthHandle::new(health.clone()));
+
+        users
+            .settle(
+                &ticks,
+                JIRA_USER_OBSERVER,
+                Err(
+                    JiraError::status("/rest/api/2/user/search", StatusCode::UNAUTHORIZED, None)
+                        .into(),
+                ),
+                tick,
+            )
+            .unwrap();
+        issues
+            .settle(&ticks, JIRA_ISSUE_OBSERVER, Ok(()), tick)
+            .unwrap();
+        let so_far = told(&health, &recorded).await;
+        assert!(
+            matches!(&so_far[..], [Told::Hold(HoldReason::Credentials, _)]),
+            "{so_far:?}"
+        );
+        assert_eq!(users.held, Some(HoldReason::Credentials));
+
+        // The holder's own success (asked directly: a held observer schedules no pull) releases it.
+        users
+            .settle(&ticks, JIRA_USER_OBSERVER, Ok(()), tick)
+            .unwrap();
+        assert_eq!(users.held, None);
+        let all = told(&health, &recorded).await;
+        assert_eq!(all.last(), Some(&Told::Release(HoldReason::Credentials)));
+        assert_eq!(all.len(), 2);
+        ticks.stop(None);
+        health.stop(None);
+    }
+
+    /// The pulls the property below makes of one observer.
+    #[derive(Debug, Clone, Copy)]
+    enum Pull {
+        Succeeds,
+        MayPass,
+        Refused,
+        Misconfigured,
+    }
+
+    fn pull() -> impl proptest::strategy::Strategy<Value = Pull> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(Pull::Succeeds),
+            Just(Pull::MayPass),
+            Just(Pull::Refused),
+            Just(Pull::Misconfigured),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Whatever the pulls of the four observers, in any order: the agent's health holds a standing problem exactly
+        /// when some observer holds one, the latest placed, and an observer holds one exactly when its last pull was a
+        /// failure a retry cannot fix. An observer that holds is not pulled again, as it schedules no pull.
+        #[test]
+        fn the_agent_holds_exactly_while_some_observer_holds(
+            pulls in proptest::collection::vec((0usize..4, pull()), 0..24)
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (ticks, _) = Actor::spawn(None, Ticks, ()).await.unwrap();
+                let (health, recorded) = health_recorder().await;
+                let mut observers = Vec::new();
+                for _ in 0..4 {
+                    observers.push(
+                        state("http://jira.invalid".into(), JiraAuth::Anonymous)
+                            .await
+                            .with_health(HealthHandle::new(health.clone())),
+                    );
+                }
+                let mut latest: Option<HoldReason> = None;
+                for (which, outcome) in &pulls {
+                    let observer = &mut observers[*which];
+                    if observer.held.is_some() {
+                        continue;
+                    }
+                    let pulled: Result<(), ActorProcessingErr> = match outcome {
+                        Pull::Succeeds => Ok(()),
+                        Pull::MayPass => Err(JiraError::status(
+                            "/rest/api/2/search",
+                            StatusCode::BAD_GATEWAY,
+                            None,
+                        )
+                        .into()),
+                        Pull::Refused => Err(JiraError::status(
+                            "/rest/api/2/search",
+                            StatusCode::UNAUTHORIZED,
+                            None,
+                        )
+                        .into()),
+                        Pull::Misconfigured => Err(JiraError::status(
+                            "/rest/api/2/search",
+                            StatusCode::NOT_FOUND,
+                            None,
+                        )
+                        .into()),
+                    };
+                    observer.settle(&ticks, "test", pulled, tick).unwrap();
+                    match outcome {
+                        Pull::Refused => latest = Some(HoldReason::Credentials),
+                        Pull::Misconfigured => latest = Some(HoldReason::Configuration),
+                        _ => {}
+                    }
+                }
+                // The health actor as it keeps a standing problem: one, the latest; a release of its reason ends it.
+                let mut slot: Option<HoldReason> = None;
+                for event in told(&health, &recorded).await {
+                    match event {
+                        Told::Hold(reason, _) => slot = Some(reason),
+                        Told::Release(reason) if slot == Some(reason) => slot = None,
+                        Told::Release(_) => {}
+                    }
+                }
+                let holding: Vec<HoldReason> = observers.iter().filter_map(|o| o.held).collect();
+                assert_eq!(slot.is_some(), !holding.is_empty(), "{pulls:?}");
+                if !holding.is_empty() {
+                    assert_eq!(slot, latest, "{pulls:?}");
+                }
+                ticks.stop(None);
+                health.stop(None);
+            });
+        }
     }
 
     #[test]

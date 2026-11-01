@@ -359,7 +359,8 @@ impl Actor for JiraIssueObserver {
         )
         .with_query_date(args.query_date)
         .with_retry(args.retry, args.clock)
-        .with_cursor(args.cursor, args.wall_clock))
+        .with_cursor(args.cursor, args.wall_clock)
+        .with_health(args.health))
     }
 
     async fn post_start(
