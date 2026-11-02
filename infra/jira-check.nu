@@ -121,7 +121,8 @@ export def settings_of_document [doc: record] {
     {
         url: (do $literal "JIRA_URL")
         deployment: (do $literal "JIRA_DEPLOYMENT")
-        anonymous: (($anonymous | describe) == "string" and ($anonymous | str trim | str lowercase) == "true")
+        # As the agent reads a flag (polar-env `parse_flag`): true, 1 or yes, in any case.
+        anonymous: (($anonymous | describe) == "string" and ($anonymous | str trim | str lowercase) in ["true" "1" "yes"])
     }
 }
 

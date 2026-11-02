@@ -212,6 +212,17 @@ def main [] {
             assert equal (settings_of_document {}) { url: "", deployment: "", anonymous: false }
         }
 
+        "JIRA_ANONYMOUS is read as the agent reads a flag: true, 1 or yes in any case, and nothing else": {
+            let doc = {|v| { sections: [{ name: "jira", variables: [{ name: "JIRA_ANONYMOUS", value: $v }] }] } }
+            for yes in ["true" "TRUE" "1" "yes" "Yes" " true "] {
+                assert (settings_of_document (do $doc $yes)).anonymous $yes
+            }
+            for no in ["false" "0" "no" "" "maybe" "y"] {
+                assert (not (settings_of_document (do $doc $no)).anonymous) $no
+            }
+            assert (not (settings_of_document (do $doc null)).anonymous)
+        }
+
         "an endpoint's answer: its status, whether the caller was anonymous, how many projects": {
             let header = {|name, value| { request: [], response: [{ name: $name, value: $value }] } }
             let me = (endpoint_facts "/rest/api/2/myself" { status: 200, headers: (do $header "X-AUSERNAME" "anonymous"), body: {} })
