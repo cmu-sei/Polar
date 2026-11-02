@@ -137,3 +137,176 @@ async fn a_state_transition_writes_no_unlabeled_node_and_reuses_the_one_state_no
         3
     );
 }
+
+fn pods(n: usize) -> GraphOp {
+    GraphOp::UpsertNodes {
+        items: (0..n)
+            .map(|i| {
+                (
+                    KubeNodeKey::Pod {
+                        uid: format!("pod-{i}"),
+                    }
+                    .into_key(),
+                    vec![
+                        Property("name".into(), GraphValue::String(format!("p{i}"))),
+                        Property("position".into(), GraphValue::I64(i as i64)),
+                    ],
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Apache's 674 projects, one UpsertNodes of one MERGE each in one statement, timed out after 30 s on u7c (and in
+/// write_bench on main). A thousand nodes are one UNWIND statement, written well within that, even in a debug build.
+#[tokio::test]
+async fn a_thousand_node_batch_is_written_well_within_the_timeout() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+
+    let started = std::time::Instant::now();
+    let statements = handle_op(graph, &pods(1000)).await.unwrap();
+    let took = started.elapsed();
+
+    assert_eq!(statements, 1);
+    assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (n:Pod) WHERE n.name STARTS WITH 'p' RETURN count(n) AS c"
+        )
+        .await,
+        1000
+    );
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (n:Pod {uid: 'pod-999'}) RETURN n.position AS c"
+        )
+        .await,
+        999
+    );
+    // Again: the same thousand nodes, merged, not made again.
+    handle_op(graph, &pods(1000)).await.unwrap();
+    assert_eq!(
+        count(graph, "MATCH (n:Pod) RETURN count(n) AS c").await,
+        1000
+    );
+}
+
+/// An empty batch (the groups a site read anonymously lists: none) was the empty statement "", which Neo4j refuses.
+/// It sends nothing: not even to a graph that is not there.
+#[tokio::test]
+async fn an_empty_batch_sends_nothing() {
+    let nowhere = Graph::connect(
+        neo4rs::ConfigBuilder::default()
+            .uri("bolt://127.0.0.1:1")
+            .user("neo4j")
+            .password("none")
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        handle_op(&nowhere, &GraphOp::UpsertNodes { items: vec![] })
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        handle_op(&nowhere, &GraphOp::Transaction { ops: vec![] })
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// A mixed batch: several labels and key shapes, a node given twice (its second properties win), a node with no
+/// key, a key known only at run time, and a property set to null. The graph after it is the graph the per-item
+/// statements the controller used to write leave (`MERGE (n:L {k: $k}) SET n.p = $p`, written here by hand).
+#[tokio::test]
+async fn a_mixed_batch_writes_the_same_nodes_as_one_statement_an_item() {
+    use polar::graph::controller::{DynamicNodeKey, GraphNodeKey};
+
+    let items: Vec<(Box<dyn GraphNodeKey>, Vec<Property>)> = vec![
+        (
+            KubeNodeKey::Pod { uid: "a".into() }.into_key(),
+            vec![Property("phase".into(), GraphValue::String("x".into()))],
+        ),
+        (
+            KubeNodeKey::PodContainer {
+                pod_uid: "a".into(),
+                name: "c".into(),
+            }
+            .into_key(),
+            vec![Property("image".into(), GraphValue::String("i".into()))],
+        ),
+        (
+            KubeNodeKey::Pod { uid: "a".into() }.into_key(),
+            vec![
+                Property("phase".into(), GraphValue::String("y".into())),
+                Property("ready".into(), GraphValue::Bool(true)),
+            ],
+        ),
+        (KubeNodeKey::State.into_key(), vec![]),
+        (
+            DynamicNodeKey::new("JiraIssue_labels", "key", "ops")
+                .unwrap()
+                .into_key(),
+            vec![Property(
+                "seen".into(),
+                GraphValue::List(vec![GraphValue::I64(1), GraphValue::I64(2)]),
+            )],
+        ),
+        (
+            KubeNodeKey::Namespace {
+                name: "polar".into(),
+                cluster_uid: "k".into(),
+            }
+            .into_key(),
+            vec![
+                Property("gone".into(), GraphValue::Null),
+                Property("n".into(), GraphValue::F64(1.5)),
+            ],
+        ),
+        (KubeNodeKey::Pod { uid: "b".into() }.into_key(), vec![]),
+    ];
+
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+
+    // The old shape: one MERGE and one SET an item, run one after another.
+    for (key, props) in &items {
+        let (pattern, mut params) = key.cypher_match("n");
+        let mut cypher = format!("MERGE {pattern}");
+        if !props.is_empty() {
+            let sets: Vec<String> = props
+                .iter()
+                .map(|Property(k, _)| format!("n.{k} = $v_{k}"))
+                .collect();
+            cypher.push_str(&format!(" SET {}", sets.join(", ")));
+        }
+        for Property(k, v) in props {
+            params.push((format!("v_{k}"), v.clone().into()));
+        }
+        let mut q = neo4rs::Query::new(cypher);
+        for (k, v) in params {
+            q = q.param(&k, v);
+        }
+        graph.run(q).await.unwrap();
+    }
+    let one_by_one = polar_test_graph::dump(graph).await;
+    clear_graph(graph).await;
+
+    let statements = handle_op(graph, &GraphOp::UpsertNodes { items })
+        .await
+        .unwrap();
+    let batched = polar_test_graph::dump(graph).await;
+
+    assert_eq!(batched, one_by_one);
+    assert_eq!(
+        statements, 5,
+        "one a shape: Pod, PodContainer, State, the field, Namespace"
+    );
+    assert_eq!(batched.len(), 6, "{batched:#?}");
+}

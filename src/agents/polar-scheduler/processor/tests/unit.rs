@@ -74,7 +74,9 @@ fn test_compile_upsert_node() {
             GraphValue::String("{}".to_string()),
         )],
     };
-    let q = compile_graph_op(&op).unwrap();
+    let [q] = &compile_graph_op(&op).unwrap()[..] else {
+        panic!("one statement")
+    };
     assert!(!q.query().is_empty());
     assert!(q.query().contains("MERGE"));
 }
@@ -93,7 +95,9 @@ fn test_compile_ensure_edge() {
         rel_type: "DESCRIBES".to_string(),
         props: vec![],
     };
-    let q = compile_graph_op(&op).unwrap();
+    let [q] = &compile_graph_op(&op).unwrap()[..] else {
+        panic!("one statement")
+    };
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("DESCRIBES"));
 }
@@ -111,7 +115,9 @@ fn test_compile_replace_edge() {
         }
         .into_key(),
     };
-    let q = compile_graph_op(&op).unwrap();
+    let [q] = &compile_graph_op(&op).unwrap()[..] else {
+        panic!("one statement")
+    };
     assert!(q.query().contains("HAS_STATE"));
 }
 
@@ -124,7 +130,9 @@ fn test_compile_remove_edges() {
         .into_key(),
         rel_type: "HAS_STATE".to_string(),
     };
-    let q = compile_graph_op(&op).unwrap();
+    let [q] = &compile_graph_op(&op).unwrap()[..] else {
+        panic!("one statement")
+    };
     assert!(q.query().contains("MATCH"));
     assert!(q.query().contains("DELETE"));
 }
@@ -149,7 +157,9 @@ fn test_compile_update_state() {
             GraphValue::String("active".to_string()),
         )],
     };
-    let q = compile_graph_op(&op).unwrap();
+    let [q] = &compile_graph_op(&op).unwrap()[..] else {
+        panic!("one statement")
+    };
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("TRANSITIONED_TO"));
 }

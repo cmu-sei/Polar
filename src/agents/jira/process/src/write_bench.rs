@@ -76,6 +76,49 @@ async fn clear(graph: &neo4rs::Graph) {
     polar_test_graph::clear_graph(graph).await;
 }
 
+/// An issue's transaction is grouped into a few UNWIND statements (graph-write-path.md, "Round trips"). Apache's
+/// issues, each written so, leave the graph their ops leave when each is written alone, one after another, in order.
+#[tokio::test]
+async fn an_issue_written_grouped_leaves_the_graph_its_ops_leave_one_by_one() {
+    let graph = polar_test_graph::neo4j();
+    let _guard = polar_test_graph::enter();
+    // Not shared with the measurements, which are not run with it.
+    clear(graph).await;
+    let issues: Vec<JiraIssue> = apache::PUBLISHED
+        .iter()
+        .map(|p| serde_json::from_str(p).unwrap())
+        .collect();
+
+    let mut statements = 0;
+    for issue in &issues {
+        let ops = build_ops_for_issue(issue);
+        let alone = ops.len();
+        let ran = handle_op(graph, &GraphOp::Transaction { ops })
+            .await
+            .unwrap();
+        println!("{}: {ran} statements for {alone} ops", issue.key);
+        assert!(
+            ran < alone,
+            "{}: {ran} statements for {alone} ops",
+            issue.key
+        );
+        statements += ran;
+    }
+    let grouped = polar_test_graph::dump(graph).await;
+    clear(graph).await;
+    for issue in &issues {
+        for op in build_ops_for_issue(issue) {
+            handle_op(graph, &op).await.unwrap();
+        }
+    }
+    let one_by_one = polar_test_graph::dump(graph).await;
+    clear(graph).await;
+
+    assert_eq!(grouped, one_by_one);
+    assert!(grouped.len() > 50, "{}", grouped.len());
+    assert!(statements > 0);
+}
+
 #[tokio::test]
 #[ignore = "a measurement: run in a release build with --ignored --nocapture"]
 async fn write_bench_issues() {
@@ -87,14 +130,15 @@ async fn write_bench_issues() {
     let ops: Vec<Vec<GraphOp>> = issues.iter().map(build_ops_for_issue).collect();
     let per_issue: Vec<usize> = ops.iter().map(Vec::len).collect();
     let started = Instant::now();
+    let mut statements = 0;
     for issue_ops in ops {
-        handle_op(graph, &GraphOp::Transaction { ops: issue_ops })
+        statements += handle_op(graph, &GraphOp::Transaction { ops: issue_ops })
             .await
             .unwrap();
     }
     let took = started.elapsed();
     println!(
-        "write_bench_issues: {} issues ({} ops each, {} in all) in {:.3} s: {:.2} ms an issue",
+        "write_bench_issues: {statements} statements for {} issues ({} ops each, {} in all) in {:.3} s: {:.2} ms an issue",
         issues.len(),
         per_issue[..apache::PUBLISHED.len()]
             .iter()
@@ -119,7 +163,7 @@ async fn write_bench_projects() {
         let outcome = tokio::time::timeout(Duration::from_secs(120), handle_op(graph, &op)).await;
         let took = started.elapsed();
         let what = match outcome {
-            Ok(Ok(())) => "written".to_string(),
+            Ok(Ok(statements)) => format!("written in {statements} statement(s)"),
             Ok(Err(e)) => format!("failed: {e}"),
             Err(_) => "not done after 120 s".to_string(),
         };

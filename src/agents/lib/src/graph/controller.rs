@@ -518,10 +518,10 @@ pub enum GraphOp {
     },
 
     /// Upsert many nodes of the same or different kinds in a single
-    /// transaction — one round-trip, same MERGE semantics as UpsertNode,
-    /// for callers that would otherwise need to hand-write a batched
-    /// Cypher query (e.g. UNWIND over a list) to avoid doing one round-trip
-    /// per item.
+    /// transaction, same MERGE semantics as UpsertNode: one
+    /// `UNWIND $rows` statement for each label and key shape among the
+    /// items, whatever their number; an empty batch sends nothing
+    /// (docs/architecture/graph-write-path.md, "Batches").
     UpsertNodes {
         items: Vec<(Box<dyn GraphNodeKey>, Vec<Property>)>,
     },
@@ -591,14 +591,12 @@ pub enum GraphOp {
     /// single logical write spans several different node/edge shapes at
     /// once (e.g. one Jira issue producing an issue node, several related
     /// nodes of different types, and several relationship types, all from
-    /// one incoming message). UpsertNodes exists for the narrower "many
-    /// items, same shape" case and compiles to one query; this exists for
-    /// the general case and runs each inner op as its own query against
-    /// the same open transaction.
-    ///
-    /// Not itself compilable via compile_graph_op -- see handle_op, which
-    /// checks for this variant before falling through to the ordinary
-    /// compile-one-query-and-run path every other variant uses.
+    /// one incoming message). All or nothing: the ops' statements run in
+    /// one transaction. Its node upserts and edges between two barriers
+    /// (ReplaceEdge, RemoveEdges, UpdateState, RawMergeWrite) are
+    /// grouped by shape into UNWIND statements, nodes before edges, and
+    /// every barrier keeps its place (compile_graph_op;
+    /// docs/architecture/graph-write-path.md, "Round trips").
     Transaction { ops: Vec<GraphOp> },
 }
 
@@ -628,136 +626,240 @@ pub enum GraphControllerMsg {
 
 // ── Compiler ───────────────────────────────────────────────────────────────────
 
-/// Compile a `GraphOp` into a parameterized Neo4j `Query`.
-///
-/// Pure and deterministic given the same input. Fallible, unlike
-/// earlier versions of this function -- Cypher can never parameterize
-/// labels, relationship types, or property *names* (only property
-/// *values* can be parameterized), so every op variant that accepts a
-/// caller-supplied String in one of those positions (EnsureEdge/
-/// ReplaceEdge/RemoveEdges's rel_type, every Property's name) is
-/// validated here via validate_cypher_identifier before it can reach
-/// query text. This is a backstop, not a replacement for validating
-/// early when a value is known to come from untrusted/dynamic input
-/// (see DynamicNodeKey) -- it exists specifically to protect every
-/// *other* caller too, including ones written before this existed and
-/// ones written after, without requiring each one to remember to
-/// validate itself.
-///
-/// GraphNodeKey's own cypher_match output (labels baked into fixed enum
-/// variants, or validated at construction via DynamicNodeKey) is not
-/// re-validated here -- that's already either a compile-time-safe
-/// literal or already validated at the one place it could be unsafe.
-///
-/// RawQuery is the sole, explicit exception -- see its own doc comment;
-/// it bypasses this function's compilation (and therefore this
-/// validation) entirely, by design, as the documented escape hatch for
-/// callers who need it.
-pub fn compile_graph_op(op: &GraphOp) -> Result<Query, GraphOpError> {
-    let (cypher, params) = match op {
-        GraphOp::UpsertNode { key, props } => {
-            trace!("Received UpsertNode directive. {key:?}, {props:?}");
+/// What a batch statement's rows are grouped by: a node's shape, or an edge's two shapes and its type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GroupKey {
+    Nodes(NodeShape),
+    Edges(NodeShape, String, NodeShape),
+}
 
-            for Property(k, _) in props {
-                validate_cypher_identifier(k)?;
+/// The rows of one batch statement, and which of the plan's items they came from.
+#[derive(Debug)]
+struct Group {
+    key: GroupKey,
+    rows: Vec<BoltType>,
+    items: Vec<usize>,
+}
+
+/// An op compiled: its statements in the order they run, one transaction, and for each item it was made of (each node
+/// of a batch, each op of a transaction, in order) the statement that writes it.
+#[derive(Debug, Default)]
+struct Plan {
+    statements: Vec<(String, Vec<(String, BoltType)>)>,
+    placed: Vec<usize>,
+}
+
+/// Builds a [`Plan`]: node upserts and edges are gathered into groups until a barrier (an op whose meaning depends on
+/// what was written before it: ReplaceEdge, RemoveEdges, UpdateState, RawMergeWrite), then written, nodes before
+/// edges, each group in the order it first appeared and its rows in their order; the barrier follows.
+#[derive(Debug, Default)]
+struct Planner {
+    plan: Plan,
+    nodes: Vec<Group>,
+    edges: Vec<Group>,
+    index: std::collections::HashMap<GroupKey, usize>,
+}
+
+/// A map parameter from name-value pairs.
+fn bolt_map(pairs: impl IntoIterator<Item = (String, BoltType)>) -> BoltType {
+    pairs
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>()
+        .into()
+}
+
+/// The properties to set, as one map, each name validated first: a name is never a parameter.
+fn props_map(props: &[Property]) -> Result<BoltType, GraphOpError> {
+    for Property(k, _) in props {
+        validate_cypher_identifier(k)?;
+    }
+    Ok(bolt_map(
+        props
+            .iter()
+            .map(|Property(k, v)| (k.clone(), v.clone().into())),
+    ))
+}
+
+/// A node's pattern in a batch statement: the variable `var`, its labels, and each key property read from the row's
+/// map `field`: `(n:Pod { uid: row.k.uid })`.
+fn row_pattern(var: &str, shape: &NodeShape, field: &str) -> String {
+    let labels: String = shape.labels.iter().map(|l| format!(":{l}")).collect();
+    if shape.keys.is_empty() {
+        return format!("({var}{labels})");
+    }
+    let keys = shape
+        .keys
+        .iter()
+        .map(|k| format!("{k}: row.{field}.{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({var}{labels} {{ {keys} }})")
+}
+
+/// A node's key values as the row's map.
+fn key_map(identity: NodeIdentity) -> BoltType {
+    bolt_map(identity.keys)
+}
+
+impl Planner {
+    fn item(&mut self) -> usize {
+        self.plan.placed.push(usize::MAX);
+        self.plan.placed.len() - 1
+    }
+
+    fn add(&mut self, key: GroupKey, row: BoltType) {
+        let item = self.item();
+        let groups = match key {
+            GroupKey::Nodes(_) => &mut self.nodes,
+            GroupKey::Edges(..) => &mut self.edges,
+        };
+        let at = *self.index.entry(key.clone()).or_insert_with(|| {
+            groups.push(Group {
+                key,
+                rows: Vec::new(),
+                items: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        groups[at].rows.push(row);
+        groups[at].items.push(item);
+    }
+
+    fn node(&mut self, key: &dyn GraphNodeKey, props: &[Property]) -> Result<(), GraphOpError> {
+        let identity = key.identity();
+        let shape = identity.grouping();
+        let row = bolt_map([
+            ("k".to_string(), key_map(identity)),
+            ("p".to_string(), props_map(props)?),
+        ]);
+        self.add(GroupKey::Nodes(shape), row);
+        Ok(())
+    }
+
+    fn edge(
+        &mut self,
+        from: &dyn GraphNodeKey,
+        rel_type: &str,
+        to: &dyn GraphNodeKey,
+        props: &[Property],
+    ) -> Result<(), GraphOpError> {
+        validate_cypher_identifier(rel_type)?;
+        let (from, to) = (from.identity(), to.identity());
+        let key = GroupKey::Edges(from.grouping(), rel_type.to_string(), to.grouping());
+        let row = bolt_map([
+            ("f".to_string(), key_map(from)),
+            ("t".to_string(), key_map(to)),
+            ("p".to_string(), props_map(props)?),
+        ]);
+        self.add(key, row);
+        Ok(())
+    }
+
+    /// Writes the gathered groups, nodes first.
+    fn flush(&mut self) {
+        self.index.clear();
+        let groups: Vec<Group> = self.nodes.drain(..).chain(self.edges.drain(..)).collect();
+        for group in groups {
+            let cypher = match &group.key {
+                GroupKey::Nodes(shape) => format!(
+                    "UNWIND $rows AS row\nMERGE {}\nSET n += row.p",
+                    row_pattern("n", shape, "k")
+                ),
+                GroupKey::Edges(from, rel_type, to) => format!(
+                    "UNWIND $rows AS row\nMERGE {}\nMERGE {}\nMERGE (a)-[r:{rel_type}]->(b)\nSET r += row.p",
+                    row_pattern("a", from, "f"),
+                    row_pattern("b", to, "t"),
+                ),
+            };
+            let at = self.plan.statements.len();
+            for item in group.items {
+                self.plan.placed[item] = at;
             }
-
-            // set a default prefix for the node's variable
-            let prefix = "n";
-
-            let (node_pattern, mut params) = key.cypher_match(prefix);
-            let mut cypher = format!("MERGE {}", node_pattern);
-
-            if !props.is_empty() {
-                let sets = props
-                    .iter()
-                    .map(|Property(k, _)| format!("{prefix}.{k} = ${k}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                cypher.push_str(&format!("\nSET {sets}"));
-            }
-
-            for Property(k, v) in props {
-                params.push((k.clone(), v.clone().into()));
-            }
-
-            (cypher, params)
+            self.plan
+                .statements
+                .push((cypher, vec![("rows".to_string(), group.rows.into())]));
         }
+    }
 
-        GraphOp::UpsertNodes { items } => {
-            trace!("Received UpsertNodes directive, {} items", items.len());
+    fn barrier(&mut self, statement: (String, Vec<(String, BoltType)>)) {
+        self.flush();
+        let item = self.item();
+        self.plan.placed[item] = self.plan.statements.len();
+        self.plan.statements.push(statement);
+    }
 
-            for (_, props) in items {
-                for Property(k, _) in props {
-                    validate_cypher_identifier(k)?;
+    fn op(&mut self, op: &GraphOp) -> Result<(), GraphOpError> {
+        match op {
+            GraphOp::UpsertNode { key, props } => self.node(key.as_ref(), props),
+            GraphOp::UpsertNodes { items } => {
+                for (key, props) in items {
+                    self.node(key.as_ref(), props)?;
                 }
+                Ok(())
             }
-
-            let mut cypher = String::new();
-            let mut params = Vec::new();
-            for (i, (key, props)) in items.iter().enumerate() {
-                let prefix = format!("n{i}");
-                let (node_pattern, node_params) = key.cypher_match(&prefix);
-                cypher.push_str(&format!("MERGE {node_pattern}\n"));
-                if !props.is_empty() {
-                    let sets = props
-                        .iter()
-                        .map(|Property(k, _)| format!("{prefix}.{k} = ${prefix}_{k}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    cypher.push_str(&format!("SET {sets}\n"));
+            GraphOp::EnsureEdge {
+                from,
+                to,
+                rel_type,
+                props,
+            } => self.edge(from.as_ref(), rel_type, to.as_ref(), props),
+            GraphOp::Transaction { ops } => {
+                for op in ops {
+                    self.op(op)?;
                 }
-                params.extend(node_params);
-                for Property(k, v) in props {
-                    params.push((format!("{prefix}_{k}"), v.clone().into()));
-                }
+                Ok(())
             }
-            (cypher, params)
+            barrier => {
+                let statement = compile_barrier(barrier)?;
+                self.barrier(statement);
+                Ok(())
+            }
         }
+    }
+}
 
-        GraphOp::EnsureEdge {
-            from,
-            to,
-            rel_type,
-            props,
-        } => {
-            trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
+/// The plan for `op`: its statements and where each of its items is written.
+fn plan(op: &GraphOp) -> Result<Plan, GraphOpError> {
+    let mut planner = Planner::default();
+    planner.op(op)?;
+    planner.flush();
+    Ok(planner.plan)
+}
 
-            validate_cypher_identifier(rel_type)?;
-            for Property(k, _) in props {
-                validate_cypher_identifier(k)?;
+/// Compile a `GraphOp` into the parameterized Neo4j statements that write it, in the order they run, all in one
+/// transaction (docs/architecture/graph-write-path.md).
+///
+/// - A node upsert, each node of an `UpsertNodes` and an edge become a row of an `UNWIND $rows AS row` statement, one
+///   statement for each label and key shape (an edge: its two ends' shapes and its type), whatever the number of
+///   rows: one plan, which Neo4j caches. An empty batch compiles to no statement, and nothing is sent.
+/// - In a `Transaction`, the nodes and edges between two barriers (ReplaceEdge, RemoveEdges, UpdateState,
+///   RawMergeWrite, whose meaning depends on what was written before them) are grouped so: nodes before edges, each
+///   group where its first item was, its rows in their order. An edge MERGEs its ends itself and sets nothing on
+///   them, so writing a node's properties before an edge that came first changes nothing; a barrier is written after
+///   everything before it and before everything after it.
+///
+/// Pure and deterministic given the same input. Fallible: Cypher can never parameterize labels, relationship types,
+/// or property *names*, so every caller-supplied String in one of those positions (a rel_type, every Property's
+/// name) is validated here via validate_cypher_identifier before it can reach query text, and the whole op is refused
+/// before anything is sent. A key's labels and key names are fixed in the code or validated where the key was made
+/// (DynamicNodeKey, BackendJobIdentity).
+pub fn compile_graph_op(op: &GraphOp) -> Result<Vec<Query>, GraphOpError> {
+    Ok(plan(op)?
+        .statements
+        .into_iter()
+        .map(|(cypher, params)| {
+            let mut q = Query::new(cypher);
+            for (k, v) in params {
+                q = q.param(&k, v);
             }
+            q
+        })
+        .collect())
+}
 
-            let from_node = "n";
-            let to_node = "m";
-            let (from_pat, mut params) = from.cypher_match(from_node);
-            let (to_pat, mut to_params) = to.cypher_match(to_node);
-            params.append(&mut to_params);
-
-            let mut cypher = format!(
-                "MERGE ({})\nMERGE ({})\nMERGE ({from_node})-[r:{}]->({to_node})",
-                from_pat.trim_start_matches('(').trim_end_matches(')'),
-                to_pat.trim_start_matches('(').trim_end_matches(')'),
-                rel_type
-            );
-
-            if !props.is_empty() {
-                let sets = props
-                    .iter()
-                    .map(|Property(k, _)| format!("r.{k} = ${k}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                cypher.push_str(&format!("\nSET {sets}"));
-            }
-
-            for Property(k, v) in props {
-                params.push((k.clone(), v.clone().into()));
-            }
-
-            (cypher, params)
-        }
+/// The one statement of an op whose meaning depends on what was written before it.
+fn compile_barrier(op: &GraphOp) -> Result<(String, Vec<(String, BoltType)>), GraphOpError> {
+    let compiled = match op {
         GraphOp::ReplaceEdge { from, rel_type, to } => {
             trace!("Received ReplaceEdge directive {from:?} -[{rel_type}]-> {to:?}");
 
@@ -816,7 +918,8 @@ pub fn compile_graph_op(op: &GraphOp) -> Result<Query, GraphOpError> {
                 validate_cypher_identifier(k)?;
             }
 
-            // Generate node match patterns
+            // Generate node match patterns. Each binds the variable it is given (`stype:State`), so the state type
+            // is the one node `MERGE ({stype})` names (graph-write-path.md, "Every key binds its variable").
             let (res_pat, mut params) = resource_key.cypher_match("res");
             let (stype_pat, mut stype_params) = state_type_key.cypher_match("stype");
             let (sinst_pat, mut sinst_params) = state_instance_key.cypher_match("sinst");
@@ -873,52 +976,37 @@ pub fn compile_graph_op(op: &GraphOp) -> Result<Query, GraphOpError> {
             validate_raw_op_text(cypher, &["MATCH", "MERGE", "SET", "UNWIND"])?;
             (cypher.clone(), params.clone())
         }
-        GraphOp::Transaction { .. } => {
-            unreachable!(
-                "GraphOp::Transaction is not compilable via compile_graph_op -- \
-                 handle_op must intercept it before reaching this function"
-            );
+        GraphOp::UpsertNode { .. }
+        | GraphOp::UpsertNodes { .. }
+        | GraphOp::EnsureEdge { .. }
+        | GraphOp::Transaction { .. } => {
+            unreachable!("the planner batches nodes, edges and transactions itself")
         }
     };
-
-    let mut q = Query::new(cypher);
-    for (k, v) in params {
-        q = q.param(&k, v);
-    }
-
-    Ok(q)
+    Ok(compiled)
 }
 
-/// helper fn intedned for handling generic graph operations.
-/// Should be typed with some sort of Nodekey.
+/// Writes `op`: its statements ([`compile_graph_op`]) in one transaction, all or nothing. Returns how many statements
+/// ran; an op with nothing to write (an empty batch) runs none and opens no transaction.
 #[instrument(level = "trace", skip(graph))]
-pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessingErr> {
-    if let GraphOp::Transaction { ops } = op {
-        let mut txn = graph.start_txn().await?;
-        for inner_op in ops {
-            let q = compile_graph_op(inner_op)?;
-            debug!("{}", q.query());
-            debug!("{:?}", q.get_params());
-            txn.run(q).await.map_err(|e| {
-                ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e))
-            })?;
-        }
-        txn.commit().await?;
-        trace!("transaction committed ({} ops)", ops.len());
-        return Ok(());
+pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<usize, ActorProcessingErr> {
+    let queries = compile_graph_op(op)?;
+    if queries.is_empty() {
+        trace!("nothing to write");
+        return Ok(0);
     }
-
-    let q = compile_graph_op(op)?;
-
+    let statements = queries.len();
     let mut txn = graph.start_txn().await?;
-    debug!("{}", q.query());
-    debug!("{:?}", q.get_params());
-    txn.run(q)
-        .await
-        .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
+    for q in queries {
+        debug!("{}", q.query());
+        trace!("{:?}", q.get_params());
+        txn.run(q)
+            .await
+            .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
+    }
     txn.commit().await?;
-    trace!("transaction committed");
-    Ok(())
+    trace!("transaction committed ({statements} statements)");
+    Ok(statements)
 }
 
 /// Runs a read-only query against `graph` directly, collecting its
@@ -1179,7 +1267,9 @@ impl Actor for GraphControllerActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             GraphControllerMsg::Op(op) => match handle_op(&state.graph, &op).await {
-                Ok(()) => {
+                // Nothing was sent, so nothing was learned about the graph.
+                Ok(0) => {}
+                Ok(_) => {
                     state.signal_port.send(GraphSignal::Available);
                 }
                 Err(e) => {
@@ -1233,6 +1323,299 @@ fn custody_tls(ca: &str, cert: &str, key: &ClientKey) -> Result<rustls::ClientCo
         .and_then(|certificates| certificates.collect::<Result<Vec<_>, _>>())
         .map_err(|e| format!("reading the client certificate from {cert}: {e}"))?;
     polar_custody::client::client_config(verifier, chain, key)
+}
+
+/// The planner, without a graph: a batch's rows carry back exactly what was written, and the grouping never moves a
+/// write past one it depends on.
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    /// A value as the graph keeps it, with maps ordered, for comparing what went into a row with what came out.
+    fn value(v: &BoltType) -> GraphValue {
+        match v {
+            BoltType::String(s) => GraphValue::String(s.value.clone()),
+            BoltType::Integer(i) => GraphValue::I64(i.value),
+            BoltType::Boolean(b) => GraphValue::Bool(b.value),
+            BoltType::Float(f) => GraphValue::F64(f.value),
+            BoltType::Null(_) => GraphValue::Null,
+            BoltType::Bytes(b) => GraphValue::Bytes(b.value.to_vec()),
+            BoltType::List(l) => GraphValue::List(l.value.iter().map(value).collect()),
+            BoltType::Map(m) => {
+                let mut pairs: Vec<(String, GraphValue)> = m
+                    .value
+                    .iter()
+                    .map(|(k, v)| (k.value.clone(), value(v)))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                GraphValue::Map(pairs)
+            }
+            other => panic!("not a value a row holds: {other:?}"),
+        }
+    }
+
+    /// A row's key values or properties, by name.
+    type Fields = BTreeMap<String, GraphValue>;
+
+    fn field(row: &BoltType, name: &str) -> Fields {
+        let BoltType::Map(map) = row else {
+            panic!("a row is a map: {row:?}")
+        };
+        let BoltType::Map(inner) = &map.value[&neo4rs::BoltString::from(name)] else {
+            panic!("{name} is a map")
+        };
+        inner
+            .value
+            .iter()
+            .map(|(k, v)| (k.value.clone(), value(v)))
+            .collect()
+    }
+
+    /// The labels and key names a batch statement merges on, read from its text: `MERGE (n:A:B { k: row.k.k })`.
+    fn merged_shape(cypher: &str) -> NodeShape {
+        let line = cypher
+            .lines()
+            .find(|l| l.starts_with("MERGE (n"))
+            .expect("a node batch");
+        let inner = line.trim_start_matches("MERGE (n").trim_end_matches(')');
+        let (labels, keys) = inner.split_once(" {").unwrap_or((inner, ""));
+        NodeShape {
+            labels: labels
+                .split(':')
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect(),
+            keys: keys
+                .trim_end_matches('}')
+                .split(',')
+                .filter_map(|p| p.split_once(':').map(|(k, _)| k.trim().to_string()))
+                .collect(),
+        }
+    }
+
+    /// One node of a generated batch: a label from a few (two key shapes among them), its key values, its properties.
+    type Item = (usize, Vec<String>, BTreeMap<String, GraphValue>);
+
+    const LABELS: [(&str, &[&str]); 3] = [("Alpha", &["k"]), ("Beta", &["k", "j"]), ("Gamma", &[])];
+
+    fn key_of((label, values, _): &Item) -> Box<dyn GraphNodeKey> {
+        let (name, keys) = LABELS[*label];
+        Box::new(TestKey(NodeIdentity::fixed(
+            &[name],
+            keys.iter()
+                .zip(values)
+                .map(|(k, v)| (*k, BoltType::String(v.clone().into())))
+                .collect(),
+        )))
+    }
+
+    #[derive(Debug)]
+    struct TestKey(NodeIdentity);
+
+    impl GraphNodeKey for TestKey {
+        fn identity(&self) -> NodeIdentity {
+            self.0.clone()
+        }
+    }
+
+    fn any_value() -> impl Strategy<Value = GraphValue> {
+        let leaf = prop_oneof![
+            ".{0,8}".prop_map(GraphValue::String),
+            any::<i64>().prop_map(GraphValue::I64),
+            any::<bool>().prop_map(GraphValue::Bool),
+            Just(GraphValue::Null),
+            (-1.0e9f64..1.0e9).prop_map(GraphValue::F64),
+        ];
+        prop_oneof![
+            4 => leaf,
+            1 => prop::collection::vec(".{0,4}".prop_map(GraphValue::String), 0..3)
+                .prop_map(GraphValue::List),
+        ]
+    }
+
+    fn any_item() -> impl Strategy<Value = Item> {
+        (
+            0..LABELS.len(),
+            prop::collection::vec("[a-z0-9]{0,4}", 2),
+            prop::collection::btree_map("p[a-z]{0,3}", any_value(), 0..4),
+        )
+    }
+
+    fn batch(items: &[Item]) -> GraphOp {
+        GraphOp::UpsertNodes {
+            items: items
+                .iter()
+                .map(|item| {
+                    (
+                        key_of(item),
+                        item.2
+                            .iter()
+                            .map(|(k, v)| Property(k.clone(), v.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_empty_batch_compiles_to_nothing() {
+        assert!(
+            compile_graph_op(&GraphOp::UpsertNodes { items: vec![] })
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            compile_graph_op(&GraphOp::Transaction { ops: vec![] })
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            compile_graph_op(&GraphOp::Transaction {
+                ops: vec![GraphOp::UpsertNodes { items: vec![] }]
+            })
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_thousand_nodes_of_one_shape_are_one_statement() {
+        let items: Vec<Item> = (0..1000)
+            .map(|i| (0, vec![i.to_string(), String::new()], BTreeMap::new()))
+            .collect();
+        let queries = compile_graph_op(&batch(&items)).unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(
+            queries[0].query(),
+            "UNWIND $rows AS row\nMERGE (n:Alpha { k: row.k.k })\nSET n += row.p"
+        );
+    }
+
+    /// The state anchor of a batch binds its variable too, with no key.
+    #[test]
+    fn a_node_with_no_key_merges_on_its_labels() {
+        let items = vec![(2, vec![], BTreeMap::new())];
+        let queries = compile_graph_op(&batch(&items)).unwrap();
+        assert_eq!(
+            queries[0].query(),
+            "UNWIND $rows AS row\nMERGE (n:Gamma)\nSET n += row.p"
+        );
+    }
+
+    #[test]
+    fn a_property_name_the_graph_refuses_refuses_the_batch() {
+        let mut props = BTreeMap::new();
+        props.insert("x}) DETACH DELETE (m".to_string(), GraphValue::Null);
+        assert!(compile_graph_op(&batch(&[(0, vec!["a".into(), "".into()], props)])).is_err());
+    }
+
+    proptest! {
+        /// Every item of a batch comes back from the plan's rows: under its own labels and key names, with its key
+        /// values and its properties, in the order it was given among the items of its shape; one statement a shape.
+        #[test]
+        fn a_batch_s_rows_carry_back_every_item(items in prop::collection::vec(any_item(), 0..40)) {
+            let plan = plan(&batch(&items)).unwrap();
+            let mut expected: BTreeMap<NodeShape, Vec<(Fields, Fields)>> = BTreeMap::new();
+            for item in &items {
+                let identity = key_of(item).identity();
+                let keys = identity.keys.iter().map(|(k, v)| (k.clone(), value(v))).collect();
+                expected.entry(identity.grouping()).or_default().push((keys, item.2.clone()));
+            }
+            let mut found = BTreeMap::new();
+            for (cypher, params) in &plan.statements {
+                let BoltType::List(rows) = &params[0].1 else { panic!("rows are a list") };
+                let rows: Vec<_> = rows.value.iter().map(|r| (field(r, "k"), field(r, "p"))).collect();
+                prop_assert!(found.insert(merged_shape(cypher), rows).is_none(), "one statement a shape");
+            }
+            prop_assert_eq!(found, expected);
+            prop_assert_eq!(plan.placed.len(), items.len());
+        }
+
+        /// The plan is a function of the op: the same statements each time.
+        #[test]
+        fn a_plan_is_deterministic(items in prop::collection::vec(any_item(), 0..20)) {
+            let a: Vec<String> = compile_graph_op(&batch(&items)).unwrap().iter().map(|q| q.query().to_string()).collect();
+            let b: Vec<String> = compile_graph_op(&batch(&items)).unwrap().iter().map(|q| q.query().to_string()).collect();
+            prop_assert_eq!(a, b);
+        }
+    }
+
+    /// One op of a generated transaction.
+    #[derive(Debug, Clone)]
+    enum Step {
+        Node(usize),
+        Edge(usize, usize, bool),
+        Barrier,
+    }
+
+    fn any_step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            3 => (0..6usize).prop_map(Step::Node),
+            3 => (0..6usize, 0..6usize, any::<bool>()).prop_map(|(a, b, r)| Step::Edge(a, b, r)),
+            1 => Just(Step::Barrier),
+        ]
+    }
+
+    /// Node `i`: two shapes among the six.
+    fn node(i: usize) -> Box<dyn GraphNodeKey> {
+        key_of(&(i % 2, vec![i.to_string(), "j".into()], BTreeMap::new()))
+    }
+
+    fn op_of(step: &Step) -> GraphOp {
+        match step {
+            Step::Node(i) => GraphOp::UpsertNode {
+                key: node(*i),
+                props: vec![Property("seen".into(), GraphValue::I64(*i as i64))],
+            },
+            Step::Edge(a, b, r) => GraphOp::EnsureEdge {
+                from: node(*a),
+                to: node(*b),
+                rel_type: if *r { "R" } else { "S" }.to_string(),
+                props: vec![],
+            },
+            Step::Barrier => GraphOp::RawMergeWrite {
+                cypher: "MERGE (x:Barrier)".into(),
+                params: vec![],
+            },
+        }
+    }
+
+    proptest! {
+        /// However a transaction's ops are mixed and nested: every op is written once; a node is written before an
+        /// edge that follows it and touches it; a barrier is written after every op before it and before every op
+        /// after it; and there are never more statements than ops.
+        #[test]
+        fn grouping_keeps_what_depends_on_order_in_order(
+            steps in prop::collection::vec(any_step(), 0..40),
+            nest in (0..40usize, 0..40usize),
+        ) {
+            let mut ops: Vec<GraphOp> = steps.iter().map(op_of).collect();
+            // A contiguous run of them nested in an inner transaction, which flattens in place.
+            let (lo, hi) = (nest.0.min(nest.1).min(ops.len()), nest.0.max(nest.1).min(ops.len()));
+            let inner: Vec<GraphOp> = ops.drain(lo..hi).collect();
+            ops.insert(lo, GraphOp::Transaction { ops: inner });
+            let plan = plan(&GraphOp::Transaction { ops }).unwrap();
+
+            prop_assert_eq!(plan.placed.len(), steps.len());
+            prop_assert!(plan.statements.len() <= steps.len());
+            prop_assert!(plan.placed.iter().all(|s| *s < plan.statements.len()));
+            for (i, earlier) in steps.iter().enumerate() {
+                for (j, later) in steps.iter().enumerate().skip(i + 1) {
+                    let (si, sj) = (plan.placed[i], plan.placed[j]);
+                    match (earlier, later) {
+                        (Step::Barrier, _) | (_, Step::Barrier) => prop_assert!(si < sj, "{i} {j}"),
+                        (Step::Node(x), Step::Edge(a, b, _)) if x == a || x == b => {
+                            prop_assert!(si < sj, "node {x} at {i} before its edge at {j}")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

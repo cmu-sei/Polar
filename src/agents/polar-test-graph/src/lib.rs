@@ -273,6 +273,63 @@ pub async fn clear_graph(graph: &Graph) {
         .expect("failed to clear graph between tests");
 }
 
+/// Every node and every relationship in the graph, one line each (labels or type, and properties in name order),
+/// sorted: what two writes of the same data are compared by, whatever ids Neo4j gave the nodes.
+pub async fn dump(graph: &Graph) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (cypher, columns) in [
+        (
+            "MATCH (n) RETURN labels(n) AS l, properties(n) AS p",
+            &["l", "p"][..],
+        ),
+        (
+            "MATCH (a)-[r]->(b) RETURN labels(a) AS al, properties(a) AS ap, type(r) AS t, \
+             properties(r) AS rp, labels(b) AS bl, properties(b) AS bp",
+            &["al", "ap", "t", "rp", "bl", "bp"][..],
+        ),
+    ] {
+        let mut rows = graph
+            .execute(neo4rs::Query::new(cypher.to_string()))
+            .await
+            .expect("the graph is read");
+        while let Some(row) = rows.next().await.expect("a row") {
+            let parts: Vec<String> = columns
+                .iter()
+                .map(|c| canonical(&row.get::<neo4rs::BoltType>(c).expect("a column")))
+                .collect();
+            lines.push(parts.join(" "));
+        }
+    }
+    lines.sort();
+    lines
+}
+
+/// A value as text, maps in key order, lists as Neo4j returns them.
+fn canonical(value: &neo4rs::BoltType) -> String {
+    use neo4rs::BoltType;
+    match value {
+        BoltType::Map(m) => {
+            let mut pairs: Vec<String> = m
+                .value
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k.value, canonical(v)))
+                .collect();
+            pairs.sort();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        BoltType::List(l) => format!(
+            "[{}]",
+            l.value.iter().map(canonical).collect::<Vec<_>>().join(", ")
+        ),
+        BoltType::String(s) => format!("{:?}", s.value),
+        BoltType::Integer(i) => i.value.to_string(),
+        BoltType::Float(f) => format!("{:?}", f.value),
+        BoltType::Boolean(b) => b.value.to_string(),
+        BoltType::Null(_) => "null".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -879,7 +879,7 @@ async fn raw_merge_write_allows_its_real_documented_scope() {
         },
     )
     .await
-    .unwrap_or(()); // MATCH on a nonexistent "a" is a legitimate no-op, not an error
+    .unwrap_or(0); // MATCH on a nonexistent "a" is a legitimate no-op, not an error
 
     // Create "a" first, then confirm the real MATCH+MERGE+edge shape works.
     handle_op(
