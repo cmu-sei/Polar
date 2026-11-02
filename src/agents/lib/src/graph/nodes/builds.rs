@@ -21,8 +21,8 @@
    DM26-0670
 */
 
-use crate::graph::controller::GraphNodeKey;
 use crate::graph::controller::{CypherIdentifierError, validate_cypher_identifier};
+use crate::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 use neo4rs::BoltType;
 use serde::Deserialize;
 use serde::Serialize;
@@ -84,80 +84,79 @@ pub enum BuildNodeKey {
 }
 
 impl GraphNodeKey for BuildNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &String| BoltType::String(v.clone().into());
         match self {
-            BuildNodeKey::State => ("(:State)".to_string(), vec![]),
-            BuildNodeKey::BuildStage { build_id, stage_id } => {
-                let bid_k = format!("{prefix}_build_id");
-                let sid_k = format!("{prefix}_stage_id");
-                (
-                    format!("({prefix}:BuildStage {{ build_id: ${bid_k}, stage_id: ${sid_k} }})"),
-                    vec![
-                        (bid_k, BoltType::String(build_id.clone().into())),
-                        (sid_k, BoltType::String(stage_id.clone().into())),
-                    ],
-                )
-            }
-
+            // The taxonomy anchor, bound like any other node (docs/architecture/graph-write-path.md).
+            BuildNodeKey::State => NodeIdentity::fixed(&["State"], vec![]),
+            BuildNodeKey::BuildStage { build_id, stage_id } => NodeIdentity::fixed(
+                &["BuildStage"],
+                vec![("build_id", s(build_id)), ("stage_id", s(stage_id))],
+            ),
             BuildNodeKey::BuildArtifact { content_hash } => {
-                let ck = format!("{prefix}_content_hash");
-                (
-                    format!("({prefix}:BuildArtifact {{ content_hash: ${ck} }})"),
-                    vec![(ck, BoltType::String(content_hash.clone().into()))],
-                )
+                NodeIdentity::fixed(&["BuildArtifact"], vec![("content_hash", s(content_hash))])
             }
-
-            BuildNodeKey::BackendJob(identity) => {
-                let mut params = vec![];
-                let prop_str = identity
+            // Validated by BackendJobIdentity::new; known only at run time.
+            BuildNodeKey::BackendJob(identity) => NodeIdentity::runtime(
+                vec![identity.node_label.clone()],
+                identity
                     .identity_props
                     .iter()
-                    .map(|(k, v)| {
-                        let param_key = format!("{prefix}_{k}");
-                        params.push((param_key.clone(), BoltType::String(v.clone().into())));
-                        format!("{k}: ${param_key}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                (
-                    format!("({prefix}:{} {{ {prop_str} }})", identity.node_label),
-                    params,
-                )
-            }
-
-            BuildNodeKey::BuildExecution => (
-                format!("({prefix}:BuildExecution {{type: \"BuildExecution\"}})"),
-                vec![(
-                    format!("{prefix}_type"),
-                    BoltType::String("BuildExecution".into()),
-                )],
+                    .map(|(k, v)| (k.clone(), s(v)))
+                    .collect(),
+            ),
+            BuildNodeKey::BuildExecution => NodeIdentity::fixed(
+                &["BuildExecution"],
+                vec![("type", BoltType::String("BuildExecution".into()))],
             ),
             BuildNodeKey::BuildJob { build_id } => {
-                let id_k = format!("{prefix}_build_id");
-                (
-                    format!("({prefix}:BuildJob {{ build_id: ${id_k} }})"),
-                    vec![(id_k, BoltType::String(build_id.clone().into()))],
-                )
+                NodeIdentity::fixed(&["BuildJob"], vec![("build_id", s(build_id))])
             }
-
             BuildNodeKey::BuildJobState {
                 build_id,
                 valid_from,
-            } => {
-                let id_k = format!("{prefix}_build_id");
-                let vf_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:BuildJobState {{ build_id: ${id_k}, valid_from: ${vf_k} }})"
-                    ),
-                    vec![
-                        (id_k, BoltType::String(build_id.clone().into())),
-                        (vf_k, BoltType::String(valid_from.clone().into())),
-                    ],
-                )
+            } => NodeIdentity::fixed(
+                &["BuildJobState"],
+                vec![("build_id", s(build_id)), ("valid_from", s(valid_from))],
+            ),
+        }
+    }
+}
+
+impl NodeKeyVocabulary for BuildNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            BuildNodeKey::BuildExecution,
+            BuildNodeKey::State,
+            BuildNodeKey::BuildJob { build_id: s() },
+            BuildNodeKey::BuildJobState {
+                build_id: s(),
+                valid_from: s(),
+            },
+            BuildNodeKey::BackendJob(
+                BackendJobIdentity::new("GitlabRunnerJob", vec![("job_id".into(), s())])
+                    .expect("a valid label and property"),
+            ),
+            BuildNodeKey::BuildStage {
+                build_id: s(),
+                stage_id: s(),
+            },
+            BuildNodeKey::BuildArtifact { content_hash: s() },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                BuildNodeKey::BuildExecution
+                | BuildNodeKey::State
+                | BuildNodeKey::BuildJob { .. }
+                | BuildNodeKey::BuildJobState { .. }
+                | BuildNodeKey::BackendJob(_)
+                | BuildNodeKey::BuildStage { .. }
+                | BuildNodeKey::BuildArtifact { .. } => {}
             }
         }
+        all
     }
 }
 
@@ -277,93 +276,106 @@ pub enum ArtifactNodeKey {
 }
 
 impl GraphNodeKey for ArtifactNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &String| BoltType::String(v.clone().into());
         match self {
-            Self::Artifact => (
-                format!("({prefix}:Artifact {{type: \"Artifact\"}})"),
-                vec![(
-                    format!("{prefix}_type"),
-                    BoltType::String("Artifact".into()),
-                )],
+            Self::Artifact => NodeIdentity::fixed(
+                &["Artifact"],
+                vec![("type", BoltType::String("Artifact".into()))],
             ),
-            Self::Finding => (
-                format!("({prefix}:Finding {{type: \"Finding\"}})"),
-                vec![(format!("{prefix}_type"), BoltType::String("Finding".into()))],
+            Self::Finding => NodeIdentity::fixed(
+                &["Finding"],
+                vec![("type", BoltType::String("Finding".into()))],
             ),
-            Self::OCIRegistry { hostname } => (
-                format!("({prefix}:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
-                vec![(format!("{prefix}_hostname"), hostname.clone().into())],
-            ),
-            Self::ContainerImageRef { normalized } => (
-                format!("({prefix}:ContainerImage {{ normalized: ${prefix}_normalized }})"),
-                vec![(format!("{prefix}_normalized"), normalized.clone().into())],
-            ),
-
-            Self::OCIArtifact { digest, .. } => (
-                format!("({prefix}:OCIArtifact {{ digest: ${prefix}_digest }})"),
-                vec![(format!("{prefix}_digest"), digest.clone().into())],
-            ),
-
-            Self::OCILayer { digest } => (
-                format!("({prefix}:OCILayer {{ digest: ${prefix}_digest }})"),
-                vec![(format!("{prefix}_digest"), digest.clone().into())],
-            ),
-            Self::OCIConfig { digest, .. } => (
-                format!("({prefix}:OCIConfig {{ digest: ${prefix}_digest }})"),
-                vec![(format!("{prefix}_digest"), digest.clone().into())],
-            ),
-            Self::Binary { content_hash } => (
-                format!("({prefix}:Binary {{ content_hash: ${prefix}_hash }})"),
-                vec![(
-                    format!("{prefix}_hash"),
-                    BoltType::String(content_hash.clone().into()),
-                )],
-            ),
+            Self::OCIRegistry { hostname } => {
+                NodeIdentity::fixed(&["OCIRegistry"], vec![("hostname", s(hostname))])
+            }
+            Self::ContainerImageRef { normalized } => {
+                NodeIdentity::fixed(&["ContainerImage"], vec![("normalized", s(normalized))])
+            }
+            Self::OCIArtifact { digest, .. } => {
+                NodeIdentity::fixed(&["OCIArtifact"], vec![("digest", s(digest))])
+            }
+            Self::OCILayer { digest } => {
+                NodeIdentity::fixed(&["OCILayer"], vec![("digest", s(digest))])
+            }
+            Self::OCIConfig { digest, .. } => {
+                NodeIdentity::fixed(&["OCIConfig"], vec![("digest", s(digest))])
+            }
+            Self::Binary { content_hash } => {
+                NodeIdentity::fixed(&["Binary"], vec![("content_hash", s(content_hash))])
+            }
             Self::Sbom {
                 artifact_content_hash,
-            } => (
-                format!("({prefix}:Sbom {{ artifact_content_hash: ${prefix}_hash }})"),
-                vec![(
-                    format!("{prefix}_hash"),
-                    BoltType::String(artifact_content_hash.clone().into()),
-                )],
+            } => NodeIdentity::fixed(
+                &["Sbom"],
+                vec![("artifact_content_hash", s(artifact_content_hash))],
             ),
-
-            Self::Package { purl } => (
-                format!("({prefix}:Package {{ purl: ${prefix}_purl }})"),
-                vec![(
-                    format!("{prefix}_purl"),
-                    BoltType::String(purl.clone().into()),
-                )],
-            ),
-            Self::BuildArtifact { content_hash } => (
-                format!("({prefix}:BuildArtifact {{ content_hash: ${prefix}_hash }})"),
-                vec![(
-                    format!("{prefix}_hash"),
-                    BoltType::String(content_hash.clone().into()),
-                )],
-            ),
-            Self::ContainerImage { config_digest } => (
-                format!("({prefix}:ContainerImage {{ config_digest: ${prefix}_config_digest }})"),
-                vec![(
-                    format!("{prefix}_config_digest"),
-                    BoltType::String(config_digest.clone().into()),
-                )],
+            Self::Package { purl } => NodeIdentity::fixed(&["Package"], vec![("purl", s(purl))]),
+            Self::BuildArtifact { content_hash } => {
+                NodeIdentity::fixed(&["BuildArtifact"], vec![("content_hash", s(content_hash))])
+            }
+            Self::ContainerImage { config_digest } => NodeIdentity::fixed(
+                &["ContainerImage"],
+                vec![("config_digest", s(config_digest))],
             ),
             Self::SecurityAdvisory { identifier } => {
-                let ik = format!("{prefix}_identifier");
-                (
-                    format!("({prefix}:SecurityAdvisory {{ identifier: ${ik} }})"),
-                    vec![(ik, BoltType::String(identifier.clone().into()))],
-                )
+                NodeIdentity::fixed(&["SecurityAdvisory"], vec![("identifier", s(identifier))])
             }
             Self::PackageStatus { identifier } => {
-                let ik = format!("{prefix}_identifier");
-                (
-                    format!("({prefix}:PackageStatus {{ identifier: ${ik} }})"),
-                    vec![(ik, BoltType::String(identifier.clone().into()))],
-                )
+                NodeIdentity::fixed(&["PackageStatus"], vec![("identifier", s(identifier))])
             }
         }
+    }
+}
+
+impl NodeKeyVocabulary for ArtifactNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            Self::Artifact,
+            Self::Finding,
+            Self::OCIRegistry { hostname: s() },
+            Self::ContainerImageRef { normalized: s() },
+            Self::OCIArtifact { digest: s() },
+            Self::OCILayer { digest: s() },
+            Self::OCIConfig {
+                digest: s(),
+                os: s(),
+                arch: s(),
+                created: s(),
+                entrypoint: s(),
+                cmd: s(),
+            },
+            Self::Binary { content_hash: s() },
+            Self::Sbom {
+                artifact_content_hash: s(),
+            },
+            Self::Package { purl: s() },
+            Self::BuildArtifact { content_hash: s() },
+            Self::ContainerImage { config_digest: s() },
+            Self::SecurityAdvisory { identifier: s() },
+            Self::PackageStatus { identifier: s() },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                Self::Artifact
+                | Self::Finding
+                | Self::OCIRegistry { .. }
+                | Self::ContainerImageRef { .. }
+                | Self::OCIArtifact { .. }
+                | Self::OCILayer { .. }
+                | Self::OCIConfig { .. }
+                | Self::Binary { .. }
+                | Self::Sbom { .. }
+                | Self::Package { .. }
+                | Self::BuildArtifact { .. }
+                | Self::ContainerImage { .. }
+                | Self::SecurityAdvisory { .. }
+                | Self::PackageStatus { .. } => {}
+            }
+        }
+        all
     }
 }

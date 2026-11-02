@@ -24,7 +24,7 @@
 use neo4rs::BoltType;
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::graph::controller::GraphNodeKey;
+use crate::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 
 /// Canonical identifier for a repository.
 ///
@@ -98,37 +98,56 @@ pub enum GitNodeKey {
 }
 
 impl GraphNodeKey for GitNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &str| BoltType::String(v.to_string().into());
         match self {
-            GitNodeKey::Repository { repo_id } => (
-                format!("({prefix}:GitRepository {{ id: ${prefix}_repo_id }})"),
-                vec![(format!("{prefix}_repo_id"), repo_id.to_string().into())],
+            GitNodeKey::Repository { repo_id } => {
+                NodeIdentity::fixed(&["GitRepository"], vec![("id", s(&repo_id.to_string()))])
+            }
+            GitNodeKey::Commit { oid } => {
+                NodeIdentity::fixed(&["GitCommit"], vec![("oid", s(oid))])
+            }
+            GitNodeKey::Ref { repo_id, name } => NodeIdentity::fixed(
+                &["GitRef"],
+                vec![("repo_id", s(&repo_id.to_string())), ("name", s(name))],
             ),
-
-            GitNodeKey::Commit { oid } => (
-                format!("({prefix}:GitCommit {{ oid: ${prefix}_oid }})"),
-                vec![(format!("{prefix}_oid"), oid.clone().into())],
-            ),
-
-            GitNodeKey::Ref { repo_id, name } => (
-                format!("({prefix}:GitRef {{ repo_id: ${prefix}_repo_id, name: ${prefix}_name }})"),
-                vec![
-                    (format!("{prefix}_repo_id"), repo_id.to_string().into()),
-                    (format!("{prefix}_name"), name.clone().into()),
-                ],
-            ),
-            GitNodeKey::Proposal { id } => (
-                format!("({prefix}:GitProposal {{ id: ${prefix}_id }})"),
-                vec![(format!("{prefix}_id"), id.clone().into())],
-            ),
-            GitNodeKey::Author { email } => (
-                format!("({prefix}:GitAuthor {{ email: ${prefix}_email }})"),
-                vec![
-                    (format!("{prefix}_email"), email.clone().into()),
-                    // name should be SET, not matched on
-                ],
-            ),
+            GitNodeKey::Proposal { id } => {
+                NodeIdentity::fixed(&["GitProposal"], vec![("id", s(id))])
+            }
+            // name should be SET, not matched on
+            GitNodeKey::Author { email } => {
+                NodeIdentity::fixed(&["GitAuthor"], vec![("email", s(email))])
+            }
         }
+    }
+}
+
+impl NodeKeyVocabulary for GitNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            GitNodeKey::Repository {
+                repo_id: RepoId::new(s()),
+            },
+            GitNodeKey::Commit { oid: s() },
+            GitNodeKey::Ref {
+                repo_id: RepoId::new(s()),
+                name: s(),
+            },
+            GitNodeKey::Author { email: s() },
+            GitNodeKey::Proposal { id: s() },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                GitNodeKey::Repository { .. }
+                | GitNodeKey::Commit { .. }
+                | GitNodeKey::Ref { .. }
+                | GitNodeKey::Author { .. }
+                | GitNodeKey::Proposal { .. } => {}
+            }
+        }
+        all
     }
 }
 

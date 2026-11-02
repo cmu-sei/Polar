@@ -21,7 +21,7 @@
    DM26-0670
 */
 
-use crate::graph::controller::GraphNodeKey;
+use crate::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use neo4rs::BoltType;
 
@@ -123,213 +123,90 @@ pub enum KubeNodeKey {
     },
 }
 impl GraphNodeKey for KubeNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &String| BoltType::String(v.clone().into());
         match self {
             KubeNodeKey::Cluster { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:KubernetesCluster {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
+                NodeIdentity::fixed(&["KubernetesCluster"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::State => ("(:State)".to_string(), vec![]),
-            KubeNodeKey::Namespace { name, cluster_uid } => {
-                let name_k = format!("{prefix}_name");
-                let cluster_uid_k = format!("{prefix}_cluster_uid");
-                (
-                    format!(
-                        "({prefix}:Namespace {{ name: ${name_k}, cluster_uid: ${cluster_uid_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (
-                            cluster_uid_k,
-                            BoltType::String(cluster_uid.to_string().into()),
-                        ),
-                    ],
-                )
-            }
+            // The one taxonomy anchor every state instance is OF_TYPE, bound like any other node: an unbound `(:State)`
+            // made a new empty node at every transition (docs/architecture/graph-write-path.md).
+            KubeNodeKey::State => NodeIdentity::fixed(&["State"], vec![]),
+            KubeNodeKey::Namespace { name, cluster_uid } => NodeIdentity::fixed(
+                &["Namespace"],
+                vec![("name", s(name)), ("cluster_uid", s(cluster_uid))],
+            ),
             KubeNodeKey::Deployment { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:KubernetesDeployment {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
+                NodeIdentity::fixed(&["KubernetesDeployment"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::DeploymentState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let valid_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.to_string().into())),
-                        (valid_k, BoltType::String(valid_from.to_string().into())),
-                    ],
-                )
-            }
+            KubeNodeKey::DeploymentState { uid, valid_from } => NodeIdentity::fixed(
+                &["DeploymentState"],
+                vec![("deployment_uid", s(uid)), ("valid_from", s(valid_from))],
+            ),
             KubeNodeKey::ReplicaSet { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:ReplicaSet {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
+                NodeIdentity::fixed(&["ReplicaSet"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::ReplicaSetState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let valid_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.to_string().into())),
-                        (valid_k, BoltType::String(valid_from.to_string().into())),
-                    ],
-                )
+            KubeNodeKey::ReplicaSetState { uid, valid_from } => NodeIdentity::fixed(
+                &["ReplicaSetState"],
+                vec![("deployment_uid", s(uid)), ("valid_from", s(valid_from))],
+            ),
+            KubeNodeKey::Pod { uid } => NodeIdentity::fixed(&["Pod"], vec![("uid", s(uid))]),
+            KubeNodeKey::StatefulSet { uid } => {
+                NodeIdentity::fixed(&["StatefulSet"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::Pod { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:Pod {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
+            KubeNodeKey::DaemonSet { uid } => {
+                NodeIdentity::fixed(&["DaemonSet"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::StatefulSet { uid }
-            | KubeNodeKey::DaemonSet { uid }
-            | KubeNodeKey::Node { uid } => {
-                let label = match self {
-                    KubeNodeKey::StatefulSet { .. } => "StatefulSet",
-                    KubeNodeKey::DaemonSet { .. } => "DaemonSet",
-                    _ => "Node",
-                };
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:{label} {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
-            }
+            KubeNodeKey::Node { uid } => NodeIdentity::fixed(&["Node"], vec![("uid", s(uid))]),
             KubeNodeKey::Job { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:KubernetesJob {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
+                NodeIdentity::fixed(&["KubernetesJob"], vec![("uid", s(uid))])
             }
-            KubeNodeKey::JobState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let vf_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:KubernetesJobState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.clone().into())),
-                        (vf_k, BoltType::String(valid_from.clone().into())),
-                    ],
-                )
-            }
+            KubeNodeKey::JobState { uid, valid_from } => NodeIdentity::fixed(
+                &["KubernetesJobState"],
+                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+            ),
+            // Keyed on `pod_uid` and `valid_from`, as PodContainerState is. Its pattern once named its properties
+            // after the variable it was given (`sinst_uid`, `sinst_valid_from`), so the same key matched different
+            // properties in different ops; the nodes already written that way keep those names.
             KubeNodeKey::PodState {
                 pod_uid,
                 valid_from,
-            } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let valid_from_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }})"
-                    ),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (
-                            valid_from_k,
-                            BoltType::String(valid_from.to_string().into()),
-                        ),
-                    ],
-                )
-            }
-            KubeNodeKey::PodContainer { pod_uid, name } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let name_k = format!("{prefix}_name");
-                (
-                    format!("({prefix}:PodContainer {{ pod_uid: ${pod_uid_k}, name: ${name_k} }})"),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (name_k, BoltType::String(name.clone().into())),
-                    ],
-                )
-            }
+            } => NodeIdentity::fixed(
+                &["PodState"],
+                vec![("pod_uid", s(pod_uid)), ("valid_from", s(valid_from))],
+            ),
+            KubeNodeKey::PodContainer { pod_uid, name } => NodeIdentity::fixed(
+                &["PodContainer"],
+                vec![("pod_uid", s(pod_uid)), ("name", s(name))],
+            ),
             KubeNodeKey::PodContainerState {
                 pod_uid,
                 name,
                 valid_from,
-            } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let name_k = format!("{prefix}_name");
-                let valid_from_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:PodContainerState {{ pod_uid: ${pod_uid_k}, name: ${name_k}, valid_from: ${valid_from_k} }})"
-                    ),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (name_k, BoltType::String(name.clone().into())),
-                        (
-                            valid_from_k,
-                            BoltType::String(valid_from.to_string().into()),
-                        ),
-                    ],
-                )
-            }
-            KubeNodeKey::Volume { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!("({prefix}:Volume {{ name: ${name_k}, namespace: ${namespace_k} }})"),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::PersistentVolumeClaim { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!(
-                        "({prefix}:PersistentVolumeClaim {{ name: ${name_k}, namespace: ${namespace_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::Secret { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!("({prefix}:Secret {{ name: ${name_k}, namespace: ${namespace_k} }})"),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::ConfigMap { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!(
-                        "({prefix}:ConfigMap {{ name: ${name_k}, namespace: ${namespace_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
+            } => NodeIdentity::fixed(
+                &["PodContainerState"],
+                vec![
+                    ("pod_uid", s(pod_uid)),
+                    ("name", s(name)),
+                    ("valid_from", s(valid_from)),
+                ],
+            ),
+            KubeNodeKey::Volume { name, namespace } => NodeIdentity::fixed(
+                &["Volume"],
+                vec![("name", s(name)), ("namespace", s(namespace))],
+            ),
+            KubeNodeKey::PersistentVolumeClaim { name, namespace } => NodeIdentity::fixed(
+                &["PersistentVolumeClaim"],
+                vec![("name", s(name)), ("namespace", s(namespace))],
+            ),
+            KubeNodeKey::Secret { name, namespace } => NodeIdentity::fixed(
+                &["Secret"],
+                vec![("name", s(name)), ("namespace", s(namespace))],
+            ),
+            KubeNodeKey::ConfigMap { name, namespace } => NodeIdentity::fixed(
+                &["ConfigMap"],
+                vec![("name", s(name)), ("namespace", s(namespace))],
+            ),
             // ----------------------------------------------------------------
             // Flux source-controller: OCIRepository
             //
@@ -338,44 +215,21 @@ impl GraphNodeKey for KubeNodeKey {
             // guaranteed unique within the cluster.
             // ----------------------------------------------------------------
             KubeNodeKey::FluxOciRepository { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:FluxOCIRepository {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
+                NodeIdentity::fixed(&["FluxOCIRepository"], vec![("uid", s(uid))])
             }
-
             // State node keyed by (uid, valid_from).
             // valid_from is sourced from status.artifact.last_update_time —
             // the moment Flux resolved a new digest from the registry — not
             // observer wall-clock time. This makes the state timeline reflect
             // actual source-controller reconciliation events.
-            KubeNodeKey::FluxOciRepositoryState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let vf_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:FluxOCIRepositoryState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.clone().into())),
-                        (vf_k, BoltType::String(valid_from.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::FluxOciRepositoryRef { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let ns_k = format!("{prefix}_namespace");
-                (
-                    format!(
-                        "({prefix}:FluxOCIRepository {{ name: ${name_k}, namespace: ${ns_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (ns_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
+            KubeNodeKey::FluxOciRepositoryState { uid, valid_from } => NodeIdentity::fixed(
+                &["FluxOCIRepositoryState"],
+                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+            ),
+            KubeNodeKey::FluxOciRepositoryRef { name, namespace } => NodeIdentity::fixed(
+                &["FluxOCIRepository"],
+                vec![("name", s(name)), ("namespace", s(namespace))],
+            ),
             // ----------------------------------------------------------------
             // Flux kustomize-controller: Kustomization
             //
@@ -393,27 +247,120 @@ impl GraphNodeKey for KubeNodeKey {
             // what makes the state timeline meaningful for lead time queries.
             // ----------------------------------------------------------------
             KubeNodeKey::FluxKustomization { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:FluxKustomization {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
+                NodeIdentity::fixed(&["FluxKustomization"], vec![("uid", s(uid))])
             }
+            KubeNodeKey::FluxKustomizationState { uid, valid_from } => NodeIdentity::fixed(
+                &["FluxKustomizationState"],
+                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+            ),
+        }
+    }
+}
 
-            KubeNodeKey::FluxKustomizationState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let vf_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:FluxKustomizationState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.clone().into())),
-                        (vf_k, BoltType::String(valid_from.clone().into())),
-                    ],
-                )
+impl NodeKeyVocabulary for KubeNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            KubeNodeKey::State,
+            KubeNodeKey::Cluster { uid: s() },
+            KubeNodeKey::Namespace {
+                name: s(),
+                cluster_uid: s(),
+            },
+            KubeNodeKey::Deployment { uid: s() },
+            KubeNodeKey::DeploymentState {
+                uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::ReplicaSet { uid: s() },
+            KubeNodeKey::ReplicaSetState {
+                uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::Pod { uid: s() },
+            KubeNodeKey::PodState {
+                pod_uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::PodContainer {
+                pod_uid: s(),
+                name: s(),
+            },
+            KubeNodeKey::PodContainerState {
+                pod_uid: s(),
+                name: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::Volume {
+                name: s(),
+                namespace: s(),
+            },
+            KubeNodeKey::PersistentVolumeClaim {
+                name: s(),
+                namespace: s(),
+            },
+            KubeNodeKey::Secret {
+                name: s(),
+                namespace: s(),
+            },
+            KubeNodeKey::ConfigMap {
+                name: s(),
+                namespace: s(),
+            },
+            KubeNodeKey::Job { uid: s() },
+            KubeNodeKey::StatefulSet { uid: s() },
+            KubeNodeKey::DaemonSet { uid: s() },
+            KubeNodeKey::Node { uid: s() },
+            KubeNodeKey::JobState {
+                uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::FluxOciRepository { uid: s() },
+            KubeNodeKey::FluxOciRepositoryState {
+                uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::FluxKustomization { uid: s() },
+            KubeNodeKey::FluxKustomizationState {
+                uid: s(),
+                valid_from: s(),
+            },
+            KubeNodeKey::FluxOciRepositoryRef {
+                name: s(),
+                namespace: s(),
+            },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                KubeNodeKey::State
+                | KubeNodeKey::Cluster { .. }
+                | KubeNodeKey::Namespace { .. }
+                | KubeNodeKey::Deployment { .. }
+                | KubeNodeKey::DeploymentState { .. }
+                | KubeNodeKey::ReplicaSet { .. }
+                | KubeNodeKey::ReplicaSetState { .. }
+                | KubeNodeKey::Pod { .. }
+                | KubeNodeKey::PodState { .. }
+                | KubeNodeKey::PodContainer { .. }
+                | KubeNodeKey::PodContainerState { .. }
+                | KubeNodeKey::Volume { .. }
+                | KubeNodeKey::PersistentVolumeClaim { .. }
+                | KubeNodeKey::Secret { .. }
+                | KubeNodeKey::ConfigMap { .. }
+                | KubeNodeKey::Job { .. }
+                | KubeNodeKey::StatefulSet { .. }
+                | KubeNodeKey::DaemonSet { .. }
+                | KubeNodeKey::Node { .. }
+                | KubeNodeKey::JobState { .. }
+                | KubeNodeKey::FluxOciRepository { .. }
+                | KubeNodeKey::FluxOciRepositoryState { .. }
+                | KubeNodeKey::FluxKustomization { .. }
+                | KubeNodeKey::FluxKustomizationState { .. }
+                | KubeNodeKey::FluxOciRepositoryRef { .. } => {}
             }
         }
+        all
     }
 }
 

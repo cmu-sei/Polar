@@ -23,7 +23,7 @@
 
 use crate::graph::controller::{
     CypherIdentifierError, DynamicNodeKey, GraphNodeKey, GraphOp, GraphValue, IntoGraphKey,
-    Property, handle_op, handle_query, validate_cypher_identifier,
+    NodeIdentity, Property, handle_op, handle_query, validate_cypher_identifier,
 };
 use crate::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
 
@@ -72,11 +72,10 @@ struct PodKey {
 }
 
 impl GraphNodeKey for PodKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_uid");
-        (
-            format!("({prefix}:Pod {{ uid: ${k} }})"),
-            vec![(k, BoltType::String(self.uid.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["Pod"],
+            vec![("uid", BoltType::String(self.uid.clone().into()))],
         )
     }
 }
@@ -87,11 +86,10 @@ struct BuildJobKey {
 }
 
 impl GraphNodeKey for BuildJobKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_build_id");
-        (
-            format!("({prefix}:BuildJob {{ build_id: ${k} }})"),
-            vec![(k, BoltType::String(self.build_id.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["BuildJob"],
+            vec![("build_id", BoltType::String(self.build_id.clone().into()))],
         )
     }
 }
@@ -103,14 +101,15 @@ struct BuildJobStateKey {
 }
 
 impl GraphNodeKey for BuildJobStateKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let id_k = format!("{prefix}_build_id");
-        let vf_k = format!("{prefix}_valid_from");
-        (
-            format!("({prefix}:BuildJobState {{ build_id: ${id_k}, valid_from: ${vf_k} }})"),
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["BuildJobState"],
             vec![
-                (id_k, BoltType::String(self.build_id.clone().into())),
-                (vf_k, BoltType::String(self.valid_from.clone().into())),
+                ("build_id", BoltType::String(self.build_id.clone().into())),
+                (
+                    "valid_from",
+                    BoltType::String(self.valid_from.clone().into()),
+                ),
             ],
         )
     }
@@ -122,11 +121,10 @@ struct StateTypeKey {
 }
 
 impl GraphNodeKey for StateTypeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_name");
-        (
-            format!("({prefix}:State {{ name: ${k} }})"),
-            vec![(k, BoltType::String(self.name.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["State"],
+            vec![("name", BoltType::String(self.name.clone().into()))],
         )
     }
 }

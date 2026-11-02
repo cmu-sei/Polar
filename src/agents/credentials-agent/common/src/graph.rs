@@ -22,7 +22,7 @@
 */
 
 use neo4rs::BoltType;
-use polar::graph::controller::GraphNodeKey;
+use polar::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 
 /// Node key vocabulary for the Credentials Agent's own graph
 /// projection -- disposable, rebuildable observability, per
@@ -65,42 +65,69 @@ pub enum CredentialsNodeKey {
 }
 
 impl GraphNodeKey for CredentialsNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &String| BoltType::String(v.clone().into());
         match self {
-            CredentialsNodeKey::Grant { target_identity } => {
-                let k = format!("{prefix}_target_identity");
-                (
-                    format!("({prefix}:CredentialsGrant {{ target_identity: ${k} }})"),
-                    vec![(k, BoltType::String(target_identity.clone().into()))],
-                )
-            }
+            CredentialsNodeKey::Grant { target_identity } => NodeIdentity::fixed(
+                &["CredentialsGrant"],
+                vec![("target_identity", s(target_identity))],
+            ),
             CredentialsNodeKey::Certificate { serial } => {
-                let k = format!("{prefix}_serial");
-                (
-                    format!("({prefix}:CredentialsCertificate {{ serial: ${k} }})"),
-                    vec![(k, BoltType::String(serial.clone().into()))],
-                )
+                NodeIdentity::fixed(&["CredentialsCertificate"], vec![("serial", s(serial))])
             }
-            CredentialsNodeKey::AgentEscrowCertificate { serial } => {
-                let k = format!("{prefix}_serial");
-                (
-                    format!("({prefix}:CredentialsAgentEscrowCertificate {{ serial: ${k} }})"),
-                    vec![(k, BoltType::String(serial.clone().into()))],
-                )
-            }
+            CredentialsNodeKey::AgentEscrowCertificate { serial } => NodeIdentity::fixed(
+                &["CredentialsAgentEscrowCertificate"],
+                vec![("serial", s(serial))],
+            ),
             CredentialsNodeKey::Account { account_id } => {
-                let k = format!("{prefix}_account_id");
-                (
-                    format!("({prefix}:CredentialsAccount {{ account_id: ${k} }})"),
-                    vec![(k, BoltType::String(account_id.clone().into()))],
-                )
+                NodeIdentity::fixed(&["CredentialsAccount"], vec![("account_id", s(account_id))])
             }
-            CredentialsNodeKey::ProjectionCheckpoint => {
-                let k = format!("{prefix}_id");
-                (
-                    format!("({prefix}:CredentialsProjectionCheckpoint {{ id: ${k} }})"),
-                    vec![(k, BoltType::String("singleton".into()))],
-                )
+            CredentialsNodeKey::ProjectionCheckpoint => NodeIdentity::fixed(
+                &["CredentialsProjectionCheckpoint"],
+                vec![("id", BoltType::String("singleton".into()))],
+            ),
+        }
+    }
+}
+
+impl NodeKeyVocabulary for CredentialsNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            CredentialsNodeKey::Grant {
+                target_identity: s(),
+            },
+            CredentialsNodeKey::Certificate { serial: s() },
+            CredentialsNodeKey::AgentEscrowCertificate { serial: s() },
+            CredentialsNodeKey::ProjectionCheckpoint,
+            CredentialsNodeKey::Account { account_id: s() },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                CredentialsNodeKey::Grant { .. }
+                | CredentialsNodeKey::Certificate { .. }
+                | CredentialsNodeKey::AgentEscrowCertificate { .. }
+                | CredentialsNodeKey::ProjectionCheckpoint
+                | CredentialsNodeKey::Account { .. } => {}
+            }
+        }
+        all
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polar::graph::controller::pattern_problem;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Every credentials key keeps the rules its patterns are composed by, whatever variable it is given.
+        #[test]
+        fn every_key_binds_the_variable_it_is_given(prefix in "[a-z][a-z0-9]{0,5}") {
+            for key in CredentialsNodeKey::every_variant() {
+                prop_assert_eq!(pattern_problem(&key, &prefix), None);
             }
         }
     }

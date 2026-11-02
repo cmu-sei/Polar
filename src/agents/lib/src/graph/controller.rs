@@ -231,18 +231,103 @@ impl DynamicNodeKey {
 }
 
 impl GraphNodeKey for DynamicNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let value_param = format!("{prefix}_{}", self.key_prop_name);
-        (
-            format!(
-                "({prefix}:{} {{ {}: ${value_param} }})",
-                self.label, self.key_prop_name
-            ),
+    fn identity(&self) -> NodeIdentity {
+        // Both names were validated by `new`; owned, since they are known only at run time.
+        NodeIdentity::runtime(
+            vec![self.label.clone()],
             vec![(
-                value_param,
+                self.key_prop_name.clone(),
                 BoltType::String(self.key_prop_value.clone().into()),
             )],
         )
+    }
+}
+
+// ── Node identity ──────────────────────────────────────────────────────────────
+
+/// What identifies a node: its labels, and the properties MERGE matches it on with their values, in order. Every node
+/// key says only this (`GraphNodeKey::identity`); the Cypher pattern, the batch rows and the constraints are all
+/// derived from it (docs/architecture/graph-write-path.md), so no key can write a pattern that ignores the variable
+/// it is given.
+///
+/// A label known when the code is built is `Cow::Borrowed`; one known only at run time (a Jira custom field's, a
+/// backend job's) is `Cow::Owned`, validated where it was made, and has no constraint
+/// ([`NodeIdentity::shape`] is `None`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeIdentity {
+    pub labels: Vec<std::borrow::Cow<'static, str>>,
+    pub keys: Vec<(String, BoltType)>,
+}
+
+/// The labels and the key property names of a node, without the values: what a batch is grouped by and what a
+/// constraint is made for.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeShape {
+    pub labels: Vec<String>,
+    pub keys: Vec<String>,
+}
+
+impl NodeIdentity {
+    /// A node with labels fixed in the code.
+    pub fn fixed(labels: &[&'static str], keys: Vec<(&str, BoltType)>) -> Self {
+        Self {
+            labels: labels
+                .iter()
+                .map(|l| std::borrow::Cow::Borrowed(*l))
+                .collect(),
+            keys: keys.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    /// A node whose labels and key names are known only at run time, already validated.
+    pub fn runtime(labels: Vec<String>, keys: Vec<(String, BoltType)>) -> Self {
+        Self {
+            labels: labels.into_iter().map(std::borrow::Cow::Owned).collect(),
+            keys,
+        }
+    }
+
+    /// The labels joined as Cypher writes them after a variable: `:A:B`.
+    fn label_text(&self) -> String {
+        self.labels.iter().map(|l| format!(":{l}")).collect()
+    }
+
+    /// The node's pattern with the variable `prefix`, and its parameters, each named `{prefix}_{key}`:
+    /// `(n:Pod { uid: $n_uid })`, or `(n:State)` for a node with no key.
+    pub fn pattern(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+        let labels = self.label_text();
+        if self.keys.is_empty() {
+            return (format!("({prefix}{labels})"), vec![]);
+        }
+        let props = self
+            .keys
+            .iter()
+            .map(|(k, _)| format!("{k}: ${prefix}_{k}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params = self
+            .keys
+            .iter()
+            .map(|(k, v)| (format!("{prefix}_{k}"), v.clone()))
+            .collect();
+        (format!("({prefix}{labels} {{ {props} }})"), params)
+    }
+
+    /// The labels and key names, for a node whose labels are all fixed in the code; `None` for one with a label
+    /// known only at run time, for which nothing can be declared ahead.
+    pub fn shape(&self) -> Option<NodeShape> {
+        self.labels
+            .iter()
+            .all(|l| matches!(l, std::borrow::Cow::Borrowed(_)))
+            .then(|| self.grouping())
+    }
+
+    /// The labels and key names, whatever kind the labels are: what a batch is grouped by.
+    fn grouping(&self) -> NodeShape {
+        NodeShape {
+            labels: self.labels.iter().map(|l| l.to_string()).collect(),
+            keys: self.keys.iter().map(|(k, _)| k.clone()).collect(),
+        }
     }
 }
 
@@ -253,10 +338,8 @@ impl GraphNodeKey for DynamicNodeKey {
 /// Implementors represent a specific node type in the knowledge graph — e.g.
 /// `KubeNodeKey::Pod`, `CyclopsNodeKey::BuildJob`, `GitLabNodeKey::MergeRequest`.
 ///
-/// The `prefix` parameter is critical for multi-node queries: when an operation
-/// references two nodes (e.g. `EnsureEdge`), each node's parameters must have
-/// distinct names to avoid collisions. Using `prefix` as a namespace for all
-/// parameter keys (`{prefix}_uid`, `{prefix}_name`, etc.) guarantees this.
+/// A key says what identifies its node ([`identity`](Self::identity)); the pattern is derived from that, with the
+/// variable it is given bound (`(n:State)`, never `(:State)`), so an op may compose any keys in one statement.
 ///
 /// Object-safety requirements met:
 /// - No generic methods.
@@ -265,15 +348,81 @@ impl GraphNodeKey for DynamicNodeKey {
 ///
 /// The `Debug + Send + Sync` bounds are required for use in actor messages.
 pub trait GraphNodeKey: Debug + Send + Sync {
-    /// Generate a parameterized Cypher node pattern and its parameter bindings.
-    ///
-    /// Returns:
-    /// - A Cypher node pattern string, e.g. `(n:Pod { uid: $n_uid })`
-    /// - A list of `(param_name, BoltType)` pairs for binding
-    ///
-    /// All parameter names must be prefixed with `prefix` to prevent collisions
-    /// when this pattern is composed with other nodes in the same query.
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>);
+    /// The node's labels and the properties it is merged on.
+    fn identity(&self) -> NodeIdentity;
+
+    /// The parameterized Cypher node pattern and its parameter bindings, derived from
+    /// [`identity`](Self::identity): e.g. `(n:Pod { uid: $n_uid })`, every parameter named `{prefix}_…` so patterns
+    /// with different prefixes compose in one query.
+    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+        self.identity().pattern(prefix)
+    }
+}
+
+/// A node key enum whose variants can be listed, one of each with placeholder values: what the shapes of its nodes
+/// are read from, for a test that holds every variant to the pattern rules and for the constraints an owner makes at
+/// start. `every_variant` matches exhaustively, so a variant added to the enum does not compile until it is listed.
+pub trait NodeKeyVocabulary: GraphNodeKey + Sized {
+    fn every_variant() -> Vec<Self>;
+}
+
+/// What is wrong with `key`'s pattern under the variable `prefix`, by the rules every op relies on to compose
+/// patterns in one statement; `None` when it keeps them all:
+/// - it binds its variable (`(n:Label ...)`, never `(:Label)`) and names at least one label;
+/// - it is one node pattern with at most one property map;
+/// - every parameter is named `{prefix}_…` and used in the pattern;
+/// - nothing else depends on the prefix: under another variable the pattern differs only in the variable and the
+///   parameter names, so the same key matches the same properties in every op.
+///
+/// For the tests of each vocabulary, in whatever crate it lives.
+pub fn pattern_problem(key: &dyn GraphNodeKey, prefix: &str) -> Option<String> {
+    let (pattern, params) = key.cypher_match(prefix);
+    if !pattern.starts_with(&format!("({prefix}:")) || !pattern.ends_with(')') {
+        return Some(format!(
+            "{key:?} with `{prefix}` does not bind it: {pattern}"
+        ));
+    }
+    if pattern.matches('(').count() != 1 || pattern.matches(')').count() != 1 {
+        return Some(format!("{key:?} is not one node pattern: {pattern}"));
+    }
+    let maps = pattern.matches('{').count();
+    if maps > 1 || maps != pattern.matches('}').count() || maps != usize::from(!params.is_empty()) {
+        return Some(format!(
+            "{key:?} has a property map that does not match its parameters: {pattern}"
+        ));
+    }
+    for (name, _) in &params {
+        if !name.starts_with(&format!("{prefix}_")) {
+            return Some(format!(
+                "{key:?} with `{prefix}` has a parameter named {name}"
+            ));
+        }
+        if !pattern.contains(&format!("${name}")) {
+            return Some(format!("{pattern} does not use ${name}"));
+        }
+    }
+    let other = if prefix == "q" { "r" } else { "q" };
+    let (renamed, _) = key.cypher_match(other);
+    let expected = pattern
+        .replacen(&format!("({prefix}:"), &format!("({other}:"), 1)
+        .replace(&format!("${prefix}_"), &format!("${other}_"));
+    if renamed != expected {
+        return Some(format!(
+            "{key:?} depends on its variable beyond its name: `{prefix}` gives {pattern}, `{other}` gives {renamed}"
+        ));
+    }
+    None
+}
+
+/// The shapes of a vocabulary's nodes with fixed labels, each once, ordered.
+pub fn shapes_of<V: NodeKeyVocabulary>() -> Vec<NodeShape> {
+    let mut shapes: Vec<NodeShape> = V::every_variant()
+        .iter()
+        .filter_map(|k| k.identity().shape())
+        .collect();
+    shapes.sort();
+    shapes.dedup();
+    shapes
 }
 
 /// Convenience trait for converting concrete key types into `Box<dyn GraphNodeKey>`

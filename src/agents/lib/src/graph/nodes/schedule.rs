@@ -21,6 +21,8 @@
    DM26-0670
 */
 
+use crate::graph::controller::{NodeIdentity, NodeKeyVocabulary};
+
 // Graph node keys (processor‑specific)
 #[derive(Debug, Clone)]
 pub enum ScheduleKey {
@@ -31,17 +33,33 @@ pub enum ScheduleKey {
 }
 
 impl crate::graph::controller::GraphNodeKey for ScheduleKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, neo4rs::BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
         match self {
-            ScheduleKey::Configuration { id } => (
-                format!("({prefix}:Schedule:Configuration {{ id: ${prefix}_id }})"),
-                vec![(format!("{prefix}_id"), id.clone().into())],
+            ScheduleKey::Configuration { id } => NodeIdentity::fixed(
+                &["Schedule", "Configuration"],
+                vec![("id", id.clone().into())],
             ),
-            ScheduleKey::ConfigurationOutcome { key } => (
-                format!("({prefix}:Schedule:ConfigurationOutcome {{ key: ${prefix}_key }})"),
-                vec![(format!("{prefix}_key"), key.clone().into())],
+            ScheduleKey::ConfigurationOutcome { key } => NodeIdentity::fixed(
+                &["Schedule", "ConfigurationOutcome"],
+                vec![("key", key.clone().into())],
             ),
         }
+    }
+}
+
+impl NodeKeyVocabulary for ScheduleKey {
+    fn every_variant() -> Vec<Self> {
+        let all = vec![
+            ScheduleKey::Configuration { id: "x".into() },
+            ScheduleKey::ConfigurationOutcome { key: "x".into() },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                ScheduleKey::Configuration { .. } | ScheduleKey::ConfigurationOutcome { .. } => {}
+            }
+        }
+        all
     }
 }
 

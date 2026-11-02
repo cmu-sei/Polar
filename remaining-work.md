@@ -736,7 +736,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   operations, pipeline scripts. `origin/polar-operator` (`3c3a4b78`, 2026-10-18): a PolarAgent CRD and operator that
   keep agents alive with their lifecycle in the graph; it overlaps decisions made since (the health actor's verdict and
   restart in place, the Reaper owning housekeeping, pulled health in the graph) and needs a design conversation, not
-  only a merge. A plan first: area by area, which side's design holds, tests first.
+  only a merge. A plan first: area by area, which side's design holds, tests first. Do not take Vaughn's state-type
+  line in the controller (`f604cc43`, `MERGE (stype {stype})` in `UpdateState`): it worked around `KubeNodeKey::State`
+  matching `(:State)` with no variable; since 2026-11-01 every key's pattern is derived from its identity and binds the
+  variable it is given (`(stype:State)`), so ours, `MERGE ({stype})`, is right for every key, and his would write
+  `MERGE (stype stype:State)`, which Neo4j refuses (docs/architecture/graph-write-path.md, "Every key binds its
+  variable").
 - [ ] TYPED RUNTIME DOCUMENTS FROM THE DECLARATIONS (decided by the maintainer 2026-10-31). `polar-sign` renders a
   runtime section from the agent's declared body type (its scaffold), so a missing optional field in a list entry
   becomes `None T` and a present one `Some x`, and the scheduler reads them back as absent. Today (since `50baf2f6`)

@@ -1521,7 +1521,7 @@ mod tests {
                 let (pattern, params) = key_pattern(key.as_ref());
                 assert!(pattern.contains("JiraIssueChangeLog"));
                 for (name, v) in &params {
-                    if name.ends_with("_index")
+                    if name.ends_with("_id")
                         && let neo4rs::BoltType::Integer(i) = v
                     {
                         indices_seen.push(i.value);

@@ -22,7 +22,7 @@
 */
 
 use neo4rs::BoltType;
-use polar::graph::controller::GraphNodeKey;
+use polar::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 
 /// Node key vocabulary for Jira-sourced data.
 ///
@@ -74,53 +74,74 @@ pub enum JiraNodeKey {
 }
 
 impl GraphNodeKey for JiraNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+    fn identity(&self) -> NodeIdentity {
+        let s = |v: &String| BoltType::String(v.clone().into());
         match self {
             JiraNodeKey::Group { name } => {
-                let k = format!("{prefix}_name");
-                (
-                    format!("({prefix}:JiraGroup {{ name: ${k} }})"),
-                    vec![(k, BoltType::String(name.clone().into()))],
-                )
+                NodeIdentity::fixed(&["JiraGroup"], vec![("name", s(name))])
             }
             JiraNodeKey::Project { project_id } => {
-                let k = format!("{prefix}_project_id");
-                (
-                    format!("({prefix}:JiraProject {{ project_id: ${k} }})"),
-                    vec![(k, BoltType::String(project_id.clone().into()))],
-                )
+                NodeIdentity::fixed(&["JiraProject"], vec![("project_id", s(project_id))])
             }
-            JiraNodeKey::User { key } => {
-                let k = format!("{prefix}_key");
-                (
-                    format!("({prefix}:JiraUser {{ key: ${k} }})"),
-                    vec![(k, BoltType::String(key.clone().into()))],
-                )
-            }
+            JiraNodeKey::User { key } => NodeIdentity::fixed(&["JiraUser"], vec![("key", s(key))]),
             JiraNodeKey::Issue { key } => {
-                let k = format!("{prefix}_key");
-                (
-                    format!("({prefix}:JiraIssue {{ key: ${k} }})"),
-                    vec![(k, BoltType::String(key.clone().into()))],
-                )
+                NodeIdentity::fixed(&["JiraIssue"], vec![("key", s(key))])
             }
             JiraNodeKey::IssueType { name } => {
-                let k = format!("{prefix}_name");
-                (
-                    format!("({prefix}:JiraIssueType {{ name: ${k} }})"),
-                    vec![(k, BoltType::String(name.clone().into()))],
-                )
+                NodeIdentity::fixed(&["JiraIssueType"], vec![("name", s(name))])
             }
-            JiraNodeKey::ChangeLog { base_id, index } => {
-                let bk = format!("{prefix}_base_id");
-                let ik = format!("{prefix}_index");
-                (
-                    format!("({prefix}:JiraIssueChangeLog {{ baseId: ${bk}, id: ${ik} }})"),
-                    vec![
-                        (bk, BoltType::String(base_id.clone().into())),
-                        (ik, BoltType::Integer((*index as i64).into())),
-                    ],
-                )
+            JiraNodeKey::ChangeLog { base_id, index } => NodeIdentity::fixed(
+                &["JiraIssueChangeLog"],
+                vec![
+                    ("baseId", s(base_id)),
+                    ("id", BoltType::Integer((*index as i64).into())),
+                ],
+            ),
+        }
+    }
+}
+
+impl NodeKeyVocabulary for JiraNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let s = || "x".to_string();
+        let all = vec![
+            JiraNodeKey::Group { name: s() },
+            JiraNodeKey::Project { project_id: s() },
+            JiraNodeKey::User { key: s() },
+            JiraNodeKey::Issue { key: s() },
+            JiraNodeKey::IssueType { name: s() },
+            JiraNodeKey::ChangeLog {
+                base_id: s(),
+                index: 0,
+            },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                JiraNodeKey::Group { .. }
+                | JiraNodeKey::Project { .. }
+                | JiraNodeKey::User { .. }
+                | JiraNodeKey::Issue { .. }
+                | JiraNodeKey::IssueType { .. }
+                | JiraNodeKey::ChangeLog { .. } => {}
+            }
+        }
+        all
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polar::graph::controller::pattern_problem;
+
+    /// Every Jira key keeps the rules its patterns are composed by, under every variable the graph controller gives
+    /// a node (a batch's row, an edge's two ends, a state's three).
+    #[test]
+    fn every_key_binds_the_variable_it_is_given() {
+        for key in JiraNodeKey::every_variant() {
+            for prefix in ["n", "m", "a", "b", "res", "stype", "sinst", "from", "to"] {
+                assert_eq!(pattern_problem(&key, prefix), None);
             }
         }
     }
