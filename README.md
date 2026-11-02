@@ -216,7 +216,9 @@ nu infra/up.nu local-minimal --dev --user <name> --email <email>
 (and the storage it needs, on a cluster that has no class yet), the images, the agents' own answers about themselves
 (asked of their images as pods in a scratch namespace that is deleted afterwards), the render, the namespaces, the cluster
 CA, the secrets, every manifest in the target's order, a wait for the core services, the port-forwards it needs, the admin
-flow (your first account), the seed of the schedules repository (its first signed policy) and your browser certificate. It
+flow (your first account), the seed of the schedules repository (its first signed policy, and on a fresh cluster
+jira-observer's credential, sealed once from the `jira_token` in the target's sops files; after that you change it with
+`polar-sign` and a signed push, see **Secrets setup**) and your browser certificate. It
 stops for a person only where one is needed. After a failure or a pause, **run the same command again**: every step checks
 whether it is already done, and picks up where it stopped.
 
@@ -301,8 +303,9 @@ Things that look wrong and are not:
   not a crash. After such a restart every container's last state reads exit 137, `RestartingAllContainers`: that is the
   kubelet's own record, not the agent's exit. On a bring-up, a scheduler observer can also restart once if Polar's git
   server is still starting.
-- **`jira-observer` restarting** when no Jira is set up for the target: its credentials come from the target's secrets (see
-  **Secrets setup**). Its pod restarts in place each time; nothing piles up.
+- **`jira-observer` restarting** when no Jira is set up for the target: its site is `workloads.jira-observer.env` in the
+  target's `config.nuon`, and its credential the signed `credentials` section that the seed seals from the target's sops
+  files on a fresh cluster (see **Secrets setup**). Its pod restarts in place each time; nothing piles up.
 - **`ErrImagePull: pull QPS exceeded` or `ImagePullBackOff`, briefly, when many pods start at once.** The kubelet's limit
   on registry requests (step 1). It retries by itself and the pods start.
 - **A port-forward that stops answering** after a pod was replaced: forwards follow one pod. Run `just port-forwards-down`
@@ -978,6 +981,12 @@ access to it.
    ```
 
    Fill in your own values (your GitLab token, your Jira token, etc.).
+   The Jira token (`jira_token`, with `jira_email` for a Jira Cloud API token) is not made a
+   Secret: on a fresh cluster `up.nu`'s seed seals it once into jira-observer's signed
+   `credentials` section. After that it is not read again; to change the token, run
+   `polar-sign template jira-observer credentials --out creds.json`, put `-` for the secret
+   and a higher version, and pipe the new token into
+   `polar-sign sign creds.json --user <you> --push` (`docs/architecture/jira.md`, "The credential").
 
 3. **Encrypt it**, pointing `sops` at your own config via
    `SOPS_CONFIG` — this is the one genuinely different mechanism

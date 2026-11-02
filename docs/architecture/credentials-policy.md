@@ -219,6 +219,9 @@ gets a step that **seeds `polar-schedules`** with the cluster defaults, signed:
 
 - the credentials agent's baseline `policy` document (the two rules above, no groups);
 - anything else a cluster needs from its first minute (later: the credentials agent's own configuration item).
+  Since 2026-10-30 the state agents' first `schema` and `agents`, and since 2026-11-01, on a fresh cluster, jira-observer's
+  `credentials` sealed from the `jira_token` in the target's sops files, once: only when polar-schedules holds no such
+  section, judged by what its documents say (`docs/architecture/jira.md`, "The credential").
 
 The step needs a signer, and signing is the same as for any author: a user certificate holding the capability
 for the document type. Two consequences:

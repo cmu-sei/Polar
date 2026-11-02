@@ -84,7 +84,7 @@ and is healthy before the next starts. What it waits for is each layer's `wait_f
 ### Phase 3 (`up.nu` again)
 
 wait for the core services → port-forwards (`just port-forwards-up`) → admin flow (`just admin-bootstrap`,
-`admin-provision`, `admin-claim`, all `polar-admin-grant`) → seed (records the first admin's identity in `cluster-inputs.nuon`, renders and publishes again, waits for Flux to restart the git server, then `git`, `polar-sign runtime`, `git push`) →
+`admin-provision`, `admin-claim`, all `polar-admin-grant`) → seed (records the first admin's identity in `cluster-inputs.nuon`, renders and publishes again, waits for Flux to restart the git server, then `git`, `polar-sign runtime`, on a fresh cluster with a `jira_token` in the sops files `polar-sign sign` sealing it into jira-observer's `credentials` section once (jira.md, "The credential"), `git push`) →
 browser (`just user-cert-install`, the Neo4j password check, both with a person) → report (`kubectl get pods`, the egress
 probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin_bootstrap_identity.mmd`.
 

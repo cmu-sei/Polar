@@ -78,6 +78,28 @@ observers again with it, which releases every hold. Without a credential, and no
 observer and holds `Credentials`, saying to sign the section; one arriving starts them. `credentials-agent-architecture.md`
 records the CryptoActor's `HttpCredential`, the sibling of git's `GitCredential`.
 
+**On a fresh cluster the token is sealed from sops, once** (built 2026-11-01, `infra/seed.nu` "jira-observer's
+credential", `seed_jira_credential` in `infra/up.nu`'s seed step; tests in `infra/tests/seed.nu`). When the target runs
+jira-observer, does not read anonymously, has a `jira_token` in its decrypted sops files (`user.sops.yaml` wins over
+`secrets.sops.yaml`, as in the secrets step), and polar-schedules has no jira-observer `credentials` section, the seed
+step writes the section as `polar-sign template` would and has `polar-sign sign` seal and sign it with the admin's
+certificate: version 1, one entry `jira`, `host_pattern` the host of the rendered `JIRA_URL` (the agent's document in
+`<output_dir>/jira-observer-resources.yaml`), `kind` `token`, or `user-password` with `jira_email` as `username` when the
+sops files give one (Jira Cloud). The file it signs holds `"secret": "-"`; the token goes to polar-sign on its standard
+input from the sops decryption in memory, never to a file, a command line or a printed line. The signed file is written
+to `permanent/jira-observer/credentials.dhall`, polar-sign's own place for it, and pushed in the seed's one commit with
+the other seeded sections. Whether a section is already there is judged by what the repository's documents say (every
+`.dhall` under `permanent`, `adhoc` or `ephemeral` that names both is evaluated with `dhall-to-json`; one that does not
+evaluate counts as there), not by path. After that the token is an author's: rotating it is `polar-sign template
+jira-observer credentials --out <file>`, the new token as `-` at a higher version, then `polar-sign sign <file> --push`
+with the token on standard input; the seed then says the section exists and how to rotate, and never compares or
+fingerprints tokens. With no token in sops it says that jira-observer will hold `Credentials` until a section is
+pushed, and how. An anonymous target, or one without jira-observer, is skipped in silence. A `JIRA_URL` the agent would
+send no credential to (not https, a login in it, an address, the `example.atlassian.net` placeholder) is said and not
+sealed for. The seal waits (24 tries, 5 s apart) while the gateway has no escrow certificate for jira-observer yet (its
+pod escrows one in init) or the observer's forward reconnects; a seal that still fails is said, the rest of the seed is
+pushed, and a run again tries again.
+
 ## Where an operator sets it
 
 - **URL, deployment, QUERY_DATE, anonymous reading:** `workloads.jira-observer.env` in
@@ -87,8 +109,9 @@ records the CryptoActor's `HttpCredential`, the sibling of git's `GitCredential`
   without one, as a signed update to the agent (they are Dynamic). The catalog's entry gives jira-observer nothing:
   no Secret, no env. sandbox-local (u7c) reads Apache's Jira anonymously (`https://issues.apache.org/jira`, `server`,
   `QUERY_DATE` 2026-10-31; `b1789556`).
-- **Token:** the `credentials` section, signed with `polar-sign` for jira-observer (above). There is no `jira-secret`;
-  a `jira_token` left in a target's sops files is read by nothing.
+- **Token:** the `credentials` section, signed with `polar-sign` for jira-observer (above). There is no `jira-secret`.
+  On a fresh cluster, `jira_token` (and `jira_email` for Cloud) in the target's sops files is sealed once into that
+  section by `up.nu`'s seed step (above); after that, `polar-sign` and a signed push.
 - **Checking a connection:** `nu infra/jira-check.nu <target>` (below) asks anonymously; whether the site accepts the
   credential is in jira-observer's health.
 
@@ -365,6 +388,27 @@ answers and the design principles were silent:
 12. **No `unset` entry for targets**: proposed for anonymous targets while the catalog injected the token; not needed
     once it injects nothing.
 13. **The old hashes in this page** were the review fixes' before the rebase; replaced by the rebased ones.
+
+### Decided for the seed of the credential (2026-11-01), to review
+
+Decided by the agent that built the seal from sops ("The credential", above), where the maintainer's brief and the
+design principles were silent:
+
+1. **The email is a new sops key, `jira_email`.** The old sops files had only `jira_token`; the email was `JIRA_EMAIL`
+   in `config.nuon`, a render-time env var, now gone. It is not secret, but it is half of Cloud's credential and the
+   seed's only other input, so it sits beside the token. Its presence makes the entry a `user-password`.
+2. **A section already there is found by content, not path.** The scheduler routes a document by what it says, so a
+   section pushed anywhere under `permanent`, `adhoc` or `ephemeral` counts; a file that names both and does not
+   evaluate counts too (sealing twice is the worse error).
+3. **A `JIRA_URL` the agent would refuse is not sealed for** (not https, a login in it, an address, the placeholder),
+   with a line saying so and no URL in it. Sealing to the placeholder would bind the credential to a host the target
+   will change, and it would have to be rotated.
+4. **A failed seal does not stop the bring-up.** It is said, the policy and the other sections are pushed, and a run
+   again tries again (polar-schedules still has no section).
+5. **The escrow identity comes from the resolver** (`resolve.nu identity jira-observer`), not polar-sign's default, so a
+   target with another cluster domain seals to the right certificate.
+6. **jira-check.nu reads `JIRA_ANONYMOUS` as the agent does** (`true`, `1`, `yes`, any case; polar-env `parse_flag`),
+   since the seed takes the setting from it; before, it took only `true`.
 
 
 ## Seen on a cluster (u7c, sandbox-local, 2026-11-01)

@@ -55,8 +55,16 @@ gitlab_endpoint: "https://gitlab.com"
 # Jira
 # =============================================================================
 
-# No Jira token here since 3.0.0: jira-observer's credential is its signed `credentials` runtime
-# section, which polar-sign seals from what you type (docs/architecture/jira.md, "The credential").
+# Your own Jira token (a value here wins over secrets.sops.yaml's). Not a Secret: on a fresh cluster
+# up.nu's seed step seals it once into jira-observer's signed `credentials` runtime section (version 1,
+# bound to the host of JIRA_URL). Once polar-schedules has that section this value is not read again:
+# change the token with `polar-sign template jira-observer credentials` and `polar-sign sign --push`
+# (docs/architecture/jira.md, "The credential").
+jira_token: ""
+
+# The Jira Cloud account's email, for a Cloud API token (a `user-password` credential, this its
+# username). Empty for a Data Center or Server personal access token.
+jira_email: ""
 
 # =============================================================================
 # OCI Registry

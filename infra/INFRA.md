@@ -181,8 +181,9 @@ nothing more.
 
 `up.nu` prints its plan first and skips what the target does not need. Its steps:
 preflight, images (`--dev` or `--import-from`: every image the target runs, before the render), render, namespaces, cluster CA, secrets and
-infrastructure, waiting for core services, port-forwards, admin flow, the seed of the schedules repository,
-browser certificate and Neo4j password. A gitops target (`gitops: true`) replaces "secrets and infrastructure" with
+infrastructure, waiting for core services, port-forwards, admin flow, the seed of the schedules repository (the credentials
+agent's policy, the state agents' first `schema` and `agents`, and on a fresh cluster jira-observer's `credentials` from the
+sops files' `jira_token`, below in "Secrets"), browser certificate and Neo4j password. A gitops target (`gitops: true`) replaces "secrets and infrastructure" with
 secrets, the deployment git server, publish, install Flux and wait for Flux, and then runs the same steps from "waiting for
 core services" on. It stops for a human only where a human is
 required, and looks first, read-only, so it stops only for what is missing: the browser step when the
@@ -816,6 +817,15 @@ Secrets are encrypted per target and are not rendered by the chart pipeline.
 - An agent's credential for an outside service (the git observer's, jira-observer's since 3.0.0) is not a Secret at all: it is a signed
   runtime section carrying an `EscrowedSecret` for that agent, which `polar-sign` seals from what is typed and only the agent's CryptoActor
   opens (`docs/architecture/signed-configuration.md`, "Secrets in a document"; `docs/architecture/jira.md`, "The credential").
+- **`jira_token` (and `jira_email`) is sealed once into jira-observer's `credentials` section on a fresh cluster**, not made a
+  Secret. `secrets.nu` does not read it; `up.nu`'s seed step does, when the target runs jira-observer, does not set
+  `JIRA_ANONYMOUS`, and polar-schedules has no jira-observer `credentials` section yet: it seals the token into version 1, one
+  entry `jira` bound to the host of the rendered `JIRA_URL`, a `token` (Data Center, Server) or with `jira_email` a
+  `user-password` (Cloud), signs it with the admin's certificate and pushes it with the rest of the seed (`infra/seed.nu`,
+  tests in `infra/tests/seed.nu`). The token reaches `polar-sign sign` only on its standard input, from the decryption in memory.
+  Once the section exists, the step says so and the sops value is not read again: change the token with
+  `polar-sign template jira-observer credentials --out <file>` and `polar-sign sign <file> --push` at a higher version. With
+  no token in the files the step says jira-observer will hold `Credentials` until a section is pushed.
 - Never `git add` certificates or keys.
 
 (The `infra/secrets/` directory tree that the first version of this pipeline

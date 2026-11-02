@@ -57,13 +57,15 @@
 #   forwards    just port-forwards-up <only what is needed>               credentials-agent (observer) or neo4j
 #   admin       admin-bootstrap / admin-provision / admin-claim           credentials-agent deployed
 #   seed        sign the first policy and push it to polar-schedules      credentials-agent, polar-git-server and polar-scheduler-observer deployed
+#               (and the first sections; on a fresh cluster, jira-observer's credential sealed from the sops files' jira_token)
 #   browser     user-cert-install, then check the Neo4j password          credentials-agent and neo4j deployed
 
 const POLAR = "polar"
 const GRAPH = "polar-graph"
 
 use images.nu
-use secrets-lib.nu [existing_required_secrets, secrets_check]
+use secrets-lib.nu [decrypt_sops, existing_required_secrets, secrets_check]
+use jira-check.nu [settings_of_document]
 use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters, move_aside]
 use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict, probe_until_answered]
@@ -669,6 +671,74 @@ def seed_git [username: string, args: list<string>] {
     ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$config ...$args
 }
 
+# jira-observer's credential, once, on a fresh cluster: the jira_token of the target's sops files sealed into its signed
+# `credentials` section, written to the seed's clone `repo` (whose files are `existing`) to be pushed with the rest
+# (seed.nu, "jira-observer's credential"). Returns what it added, `{ path, section }`, or nothing. The token is held in
+# memory from the sops decryption and given to polar-sign on its standard input: never written, printed or put on a
+# command line. A seal that fails is said and the rest of the seed goes on; a run again tries it again, since
+# polar-schedules still has no such section.
+def seed_jira_credential [target: string, config: record, username: string, repo: string, existing: list<string>, work: string, sign: list<string>] {
+    let deployed = ($seed.JIRA_AGENT in (deployed_charts $config))
+    let settings = (settings_of_document (seed jira_document $config.output_dir | default {}))
+    if not (seed jira_wanted $deployed $settings) { return [] }
+
+    let held = (seed sections_in $repo $existing $seed.JIRA_AGENT $seed.CREDENTIALS_SECTION)
+    # Decrypted to memory, as the secrets step does (secrets-lib.nu); a value in user.sops.yaml wins.
+    let shared = (decrypt_sops $config.target_dir "secrets.sops.yaml")
+    let user = (decrypt_sops $config.target_dir "user.sops.yaml")
+    let secrets = ($shared.data | merge $user.data)
+    let decided = (seed jira_credential {
+        deployed: $deployed
+        settings: $settings
+        token: ($secrets | get -o jira_token | default "")
+        email: ($secrets | get -o jira_email | default "")
+        existing: $held
+        unread: ([$shared.failure $user.failure] | compact)
+        user: $username
+    })
+    if $decided.action == "skip" { return [] }
+    note $decided.line
+    if $decided.action != "seal" { return [] }
+
+    # What polar-sign checks the file against, the agent's own scaffold (cached under its image's digest by the render),
+    # and the identity its escrow certificate must name, which the resolver computes for the target.
+    let resolver = ($env.PWD | path join "infra/resolve.nu")
+    let scaffolds = ($work | path join "scaffolds")
+    let collected = (do { ^$nu.current-exe $resolver scaffolds $scaffolds --target $target } | complete)
+    let scaffold = ($scaffolds | path join $"($seed.JIRA_AGENT).json")
+    if $collected.exit_code != 0 or not ($scaffold | path exists) {
+        note $"cannot collect ($seed.JIRA_AGENT)'s scaffold, so its credential is not sealed this run: ($collected.stderr | str trim | lines | last 1 | str join)"
+        return []
+    }
+    let escrow_identity = (^$nu.current-exe $resolver identity $seed.JIRA_AGENT --target $target | str trim)
+    let input = ($work | path join "jira-credentials.json")
+    $decided.input | save --force $input
+    let out = ($repo | path join $seed.JIRA_CREDENTIAL_PATH)
+    mkdir ($out | path dirname)
+    # The escrow certificate comes from the credentials agent's gateway, through the observer's forward.
+    let forward = (try { ensure_observer_forward; null } catch {|e| $e.msg })
+    if $forward != null {
+        note $"($seed.JIRA_AGENT)'s credential is not sealed this run, and a run again tries again: ($forward)"
+        return []
+    }
+    let token = ($secrets | get jira_token)
+    let args = (seed sign_args $input $username $scaffold $escrow_identity $out)
+    # jira-observer's escrow certificate exists once its pod has escrowed a key: on a fresh cluster it may still be starting.
+    let sealed = (with_retries 24 5sec {|n|
+        let r = (seed seal $sign $args $token)
+        let outcome = (seed seal_outcome $r.exit_code $r.stderr)
+        if (not $outcome.ok) and (not $outcome.final) { note $"($seed.JIRA_AGENT) has not escrowed its key yet, or the gateway's forward is reconnecting: trying again" }
+        $outcome
+    })
+    if not $sealed.ok {
+        rm -f $out
+        note $"($seed.JIRA_AGENT)'s credential was not sealed after ($sealed.tries) tries; it holds Credentials, and a run again tries again: ($sealed.detail | lines | str trim | str join ' ')"
+        return []
+    }
+    ok $"sealed ($seed.JIRA_AGENT)'s credential into ($seed.JIRA_CREDENTIAL_PATH)"
+    [{ path: $seed.JIRA_CREDENTIAL_PATH, section: $"($seed.JIRA_AGENT) ($seed.CREDENTIALS_SECTION)" }]
+}
+
 def step_seed [target: string, config: record, username: string, mail: string, allow_dirty: bool] {
     wait_pods (seed_waits) 10min
     let dir = (admin_dir)
@@ -728,6 +798,8 @@ def step_seed [target: string, config: record, username: string, mail: string, a
     let existing = (^git -C $repo ls-files | lines)
     let todo = (seed missing (seed documents) $existing)
     let sign = (tools command "polar-sign")
+    # Before the documents are written to the clone: the sections it finds are the ones already pushed.
+    let jira = (seed_jira_credential $target $config $username $repo $existing $work $sign)
     for d in $todo {
         note $"signing ($d.section) for ($d.agent), version ($d.version)"
         # A computed body is the resolver's: the state agent's first schema from the agents' scaffolds, which the render
@@ -743,15 +815,16 @@ def step_seed [target: string, config: record, username: string, mail: string, a
         mkdir ($target_file | path dirname)
         $signed | save --force $target_file
     }
-    if ($todo | is-empty) {
+    let added = (($todo | select path section) ++ $jira)
+    if ($added | is-empty) {
         ok "every seed document is already in polar-schedules"
     } else {
         ^git -C $repo add -A
-        ^git -C $repo -c $"user.name=($username)" -c $"user.email=($mail)" commit -q -m $"feat\(seed\): the cluster's first ($todo | get section | str join ', ')"
+        ^git -C $repo -c $"user.name=($username)" -c $"user.email=($mail)" commit -q -m $"feat\(seed\): the cluster's first ($added | get section | str join ', ')"
         if $env.LAST_EXIT_CODE != 0 { fail "git commit failed" }
         let pushed = (do { seed_git $username [-C $repo push -q origin HEAD] } | complete)
         if $pushed.exit_code != 0 { fail $"cannot push to polar-schedules: ($pushed.stderr | str trim)" }
-        ok $"pushed: ($todo | get path | str join ', ')"
+        ok $"pushed: ($added | get path | str join ', ')"
     }
     rm -rf $work
 

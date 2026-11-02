@@ -84,7 +84,8 @@ def main [target_dir: string, repo_root: string] {
     }
 
     # No jira-secret since 3.0.0: jira-observer's credential is its signed `credentials` runtime section
-    # (docs/architecture/jira.md, "The credential"). A `jira_token` left in the sops files is read by nothing.
+    # (docs/architecture/jira.md, "The credential"). The `jira_token` of the sops files is not read here: up.nu's
+    # seed seals it once into that section on a fresh cluster (infra/seed.nu), and polar-sign changes it after.
 
     let docker_auth_json = ($secrets | get -o docker_auth_json | default "")
     if ($docker_auth_json | is-not-empty) {
