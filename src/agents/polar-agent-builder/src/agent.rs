@@ -147,6 +147,11 @@ pub trait PolarAgent: Sized + 'static {
     /// (docs/architecture/soft-state.md). The scaffold prints them under `graph`, and the render writes them into the
     /// state agent's floor; applying the catalog is the sign-off.
     const GRAPH: &'static [GraphDecl] = &[];
+    /// The node key vocabularies the agent writes with (`polar::graph::controller::shapes_of::<JiraNodeKey>`), from
+    /// which the builder derives the constraints and indexes for the labels it owns in `GRAPH`, on the properties each
+    /// label is merged on, and its graph controller makes them at start (docs/architecture/graph-write-path.md,
+    /// "Constraints and indexes"). Read nowhere else: a label is never declared twice.
+    const GRAPH_KEYS: &'static [fn() -> Vec<polar::graph::controller::NodeShape>] = &[];
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -166,6 +171,8 @@ pub struct Configured {
     pub(crate) commands: &'static [CommandSpec],
     /// The runtime sections the agent declared.
     pub(crate) runtime: &'static [&'static RuntimeSection],
+    /// The constraints and indexes for the labels the agent owns ([`graph_key_indexes`]).
+    pub(crate) graph_key_indexes: Vec<polar::graph::schema::KeyIndex>,
     /// Every topic the agent uses, its families expanded for the workloads it serves.
     pub(crate) topics: Arc<TopicSet>,
     pub(crate) hooks: Hooks,
@@ -198,6 +205,12 @@ impl Configured {
 
     pub fn shutdown_budget(&self) -> Duration {
         self.startup.shutdown_budget
+    }
+
+    /// The constraints and indexes the agent's graph controller makes at start, for the labels it owns
+    /// ([`graph_key_indexes`]): hand them to `GraphControllerArgs::with_key_indexes`. Empty for a reader.
+    pub fn graph_key_indexes(&self) -> Vec<polar::graph::schema::KeyIndex> {
+        self.graph_key_indexes.clone()
     }
 
     /// Every topic the agent may use: declared, implied, and its families expanded for the workloads it
@@ -254,6 +267,7 @@ impl Configured {
             self_test: false,
             commands: &[],
             runtime: &[],
+            graph_key_indexes: Vec::new(),
             topics: Arc::new(TopicSet::default()),
             hooks: Hooks {
                 process_exit: Arc::new(move |code| exits.lock().unwrap().push(code)),
@@ -438,6 +452,20 @@ fn topic_facts<A: PolarAgent>() -> Facts<'static> {
 
 /// The whole set of topics `A` uses: what it declares and what is implied for it. Its families serve no
 /// workload here; see [`topic_set_serving`].
+/// The constraints and indexes for the labels `A` owns ([`PolarAgent::GRAPH`]), on the properties its node keys
+/// ([`PolarAgent::GRAPH_KEYS`]) merge each on (`polar::graph::schema::key_indexes`). A label it only reads gets none,
+/// and so does an owned label none of its keys names.
+pub fn graph_key_indexes<A: PolarAgent>() -> Vec<polar::graph::schema::KeyIndex> {
+    let owned: Vec<&str> = A::GRAPH
+        .iter()
+        .filter(|d| d.access == crate::graph_schema::GraphAccess::Owns)
+        .map(|d| d.label)
+        .collect();
+    let shapes: Vec<polar::graph::controller::NodeShape> =
+        A::GRAPH_KEYS.iter().flat_map(|shapes| shapes()).collect();
+    polar::graph::schema::key_indexes(&owned, &shapes)
+}
+
 pub fn topic_set<A: PolarAgent>() -> TopicSet {
     topic_set_serving::<A>(&[])
 }
@@ -1079,6 +1107,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
         required: used,
         commands: A::COMMANDS,
         runtime: A::RUNTIME,
+        graph_key_indexes: graph_key_indexes::<A>(),
         hooks: Hooks::real(),
     };
 
@@ -1244,6 +1273,50 @@ mod tests {
         async fn start(_: Configured) -> Result<(), StartError> {
             Ok(())
         }
+    }
+
+    fn thing_shapes() -> Vec<polar::graph::controller::NodeShape> {
+        vec![
+            polar::graph::controller::NodeShape {
+                labels: vec!["Thing".into()],
+                keys: vec!["id".into()],
+            },
+            polar::graph::controller::NodeShape {
+                labels: vec!["Other".into()],
+                keys: vec!["id".into()],
+            },
+        ]
+    }
+
+    /// One that writes Thing and reads Other, both of its vocabulary.
+    struct Keyed;
+
+    impl PolarAgent for Keyed {
+        const NAME: &'static str = "keyed";
+        const PURPOSE: &'static str = "Writes things";
+        const NEEDS: &'static [Capability] = &[Capability::GraphWrite];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        const GRAPH: &'static [GraphDecl] = &[
+            GraphDecl::owns("Thing", "the things it writes"),
+            GraphDecl::reads("Other", "what it reads"),
+        ];
+        const GRAPH_KEYS: &'static [fn() -> Vec<polar::graph::controller::NodeShape>] =
+            &[thing_shapes];
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    /// Only an owned label gets a constraint: one the agent only reads gets none, though its keys name it.
+    #[test]
+    fn only_the_labels_an_agent_owns_get_constraints() {
+        let names: Vec<String> = graph_key_indexes::<Keyed>()
+            .iter()
+            .map(|i| i.name())
+            .collect();
+        assert_eq!(names, ["polar_unique_Thing_id"]);
+        // An agent that declares no keys makes nothing.
+        assert!(graph_key_indexes::<Reading>().is_empty());
     }
 
     /// One that declares a topic it is given anyway.

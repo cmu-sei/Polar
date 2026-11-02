@@ -1053,6 +1053,7 @@ mod tests {
             self_test: false,
             commands: &BOTH,
             runtime: &[],
+            graph_key_indexes: Vec::new(),
             topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };
@@ -1093,6 +1094,7 @@ mod tests {
             self_test: false,
             commands: &[],
             runtime: &[],
+            graph_key_indexes: Vec::new(),
             topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };
@@ -1123,6 +1125,7 @@ mod tests {
             self_test: false,
             commands: &[],
             runtime: &[],
+            graph_key_indexes: Vec::new(),
             topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };

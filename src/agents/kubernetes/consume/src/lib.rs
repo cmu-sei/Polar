@@ -363,7 +363,7 @@ impl GraphOperable for Job {
             uid: uid.clone(),
             // State keys embed the same epoch-ms value as valid_from so the
             // key remains deterministic and collision-free per transition.
-            valid_from: valid_from_ms.to_string(),
+            valid_from: valid_from_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -395,7 +395,7 @@ impl GraphOperable for Job {
             KubeNodeKey::Job { uid: uid.clone() },
             KubeNodeKey::JobState {
                 uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )
@@ -589,7 +589,7 @@ impl GraphOperable for Pod {
         let pod_state_ms = now_ms();
         let new_state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
-            valid_from: pod_state_ms.to_string(),
+            valid_from: pod_state_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -929,7 +929,7 @@ impl GraphOperable for Pod {
                 let state_instance_key = KubeNodeKey::PodContainerState {
                     pod_uid: uid.clone(),
                     name: container.name.clone(),
-                    valid_from: valid_from_ms.to_string(),
+                    valid_from: valid_from_ms,
                 }
                 .into_key();
 
@@ -1045,7 +1045,7 @@ impl GraphOperable for Pod {
             KubeNodeKey::Pod { uid: uid.clone() },
             KubeNodeKey::PodState {
                 pod_uid: uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )
@@ -1143,7 +1143,7 @@ impl GraphOperable for Deployment {
 
         let state_key = KubeNodeKey::DeploymentState {
             uid: uid.clone(),
-            valid_from: valid_from_ms.to_string(),
+            valid_from: valid_from_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1192,7 +1192,7 @@ impl GraphOperable for Deployment {
             KubeNodeKey::Deployment { uid: uid.clone() },
             KubeNodeKey::DeploymentState {
                 uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )
@@ -1268,7 +1268,7 @@ impl GraphOperable for ReplicaSet {
 
         let state_key = KubeNodeKey::ReplicaSetState {
             uid: uid.clone(),
-            valid_from: valid_from_ms.to_string(),
+            valid_from: valid_from_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1304,7 +1304,7 @@ impl GraphOperable for ReplicaSet {
             KubeNodeKey::ReplicaSet { uid: uid.clone() },
             KubeNodeKey::ReplicaSetState {
                 uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )
@@ -1382,7 +1382,7 @@ impl GraphOperable for OciRepository {
 
         let state_key = KubeNodeKey::FluxOciRepositoryState {
             uid: uid.clone(),
-            valid_from: valid_from_ms.to_string(),
+            valid_from: valid_from_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1450,7 +1450,7 @@ impl GraphOperable for OciRepository {
             KubeNodeKey::FluxOciRepository { uid: uid.clone() },
             KubeNodeKey::FluxOciRepositoryState {
                 uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )
@@ -1551,7 +1551,7 @@ impl GraphOperable for Kustomization {
 
         let state_key = KubeNodeKey::FluxKustomizationState {
             uid: uid.clone(),
-            valid_from: valid_from_ms.to_string(),
+            valid_from: valid_from_ms,
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1624,7 +1624,7 @@ impl GraphOperable for Kustomization {
             KubeNodeKey::FluxKustomization { uid: uid.clone() },
             KubeNodeKey::FluxKustomizationState {
                 uid,
-                valid_from: now.to_string(),
+                valid_from: now,
             },
             now,
         )

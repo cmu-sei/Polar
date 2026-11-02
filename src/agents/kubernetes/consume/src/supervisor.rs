@@ -396,6 +396,9 @@ impl Actor for ClusterConsumerSupervisor {
         // ClientEvent::Registered -- see polar-agent-builder's own
         // Subscription for the complete, real reasoning), TcpClient,
         // and CryptoActor -- collapsed into one, real, composed call.
+        // What the graph controller makes at start for the labels this agent owns; read before the builder takes
+        // the configuration.
+        let key_indexes = configured.graph_key_indexes();
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
 
         for subscription in Self::kube_subscriptions(&myself) {
@@ -434,10 +437,12 @@ impl Actor for ClusterConsumerSupervisor {
             Some("kubernetes.cluster.graph.controller".to_string()),
             GraphControllerActor,
             // The settings come from the builder's snapshot, which already judged them.
-            GraphControllerArgs::new(graph_signal_port).with_settings(
-                polar::graph::environment::GraphSettings::from_env(&*resources.config)
-                    .map_err(ActorProcessingErr::from)?,
-            ),
+            GraphControllerArgs::new(graph_signal_port)
+                .with_settings(
+                    polar::graph::environment::GraphSettings::from_env(&*resources.config)
+                        .map_err(ActorProcessingErr::from)?,
+                )
+                .with_key_indexes(key_indexes),
             myself.get_cell(),
         )
         .await

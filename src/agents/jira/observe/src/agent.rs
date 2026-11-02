@@ -244,6 +244,12 @@ mod tests {
 
     polar_agent_builder::polar_agent_tests!(JiraObserver);
 
+    /// It only reads the graph, so it makes no constraint: only an owner does.
+    #[test]
+    fn a_reader_makes_no_constraint() {
+        assert!(polar_agent_builder::agent::graph_key_indexes::<JiraObserver>().is_empty());
+    }
+
     fn config(url: &str) -> polar_env::Config {
         config_of(&[("JIRA_URL", url)])
     }

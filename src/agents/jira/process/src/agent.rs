@@ -75,6 +75,9 @@ impl PolarAgent for JiraProcessor {
         GraphDecl::owns("JiraIssueType", "the issue types"),
         GraphDecl::owns("JiraIssueChangeLog", "each change in an issue's history"),
     ];
+    // The constraints for the labels above come from here, on what each is merged on.
+    const GRAPH_KEYS: &'static [fn() -> Vec<polar::graph::controller::NodeShape>] =
+        &[polar::graph::controller::shapes_of::<jira_common::graph::JiraNodeKey>];
     const HELP: Option<&'static str> = Some(
         "jira-processor subscribes to the Jira observer's four topics on Cassini (projects, \
          groups, users, issues) and writes what it receives into the graph. It reads no \
@@ -125,6 +128,26 @@ mod tests {
                 .iter()
                 .all(|e| e.access == polar_agent_builder::GraphAccess::Owns),
             "it reads nothing through the state agent"
+        );
+    }
+
+    /// Each label it owns is merged on one key, so each gets a uniqueness constraint at start, on that key.
+    #[test]
+    fn every_label_it_owns_gets_a_uniqueness_constraint_on_its_key() {
+        let names: Vec<String> = polar_agent_builder::agent::graph_key_indexes::<JiraProcessor>()
+            .iter()
+            .map(|i| i.name())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "polar_unique_JiraGroup_name",
+                "polar_unique_JiraIssue_key",
+                "polar_unique_JiraIssueChangeLog_baseId_id",
+                "polar_unique_JiraIssueType_name",
+                "polar_unique_JiraProject_project_id",
+                "polar_unique_JiraUser_key",
+            ]
         );
     }
 

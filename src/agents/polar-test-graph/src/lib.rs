@@ -123,6 +123,8 @@ fn removal_args(id: &str) -> [&str; 4] {
 
 struct Neo4jFixture {
     graph: Graph,
+    /// Where and as whom the graph is reached, for a test that connects for itself or asks over HTTP.
+    connection: Connection,
     /// Held only to keep the container alive and to run its own,
     /// real async Drop cleanup when this fixture itself drops (at
     /// process exit) -- never read directly by callers.
@@ -198,14 +200,23 @@ pub fn neo4j() -> &'static Graph {
                         libc::atexit(cleanup_neo4j_container);
                     }
 
+                    let host = container.get_host().await.expect("container host");
+                    let connection = Connection {
+                        bolt: format!(
+                            "bolt://{host}:{}",
+                            container.image().bolt_port_ipv4().expect("bolt port")
+                        ),
+                        http: format!(
+                            "http://{host}:{}",
+                            container.image().http_port_ipv4().expect("http port")
+                        ),
+                        user: container.image().user().expect("user").to_string(),
+                        password: container.image().password().expect("password").to_string(),
+                    };
                     let config = neo4rs::ConfigBuilder::new()
-                        .uri(format!(
-                            "bolt://{}:{}",
-                            container.get_host().await.expect("container host"),
-                            container.image().bolt_port_ipv4().expect("bolt port"),
-                        ))
-                        .user(container.image().user().expect("user"))
-                        .password(container.image().password().expect("password"))
+                        .uri(&connection.bolt)
+                        .user(&connection.user)
+                        .password(&connection.password)
                         .build()
                         .expect("neo4rs config");
 
@@ -218,22 +229,79 @@ pub fn neo4j() -> &'static Graph {
                     // -- genuinely alive by blocking on a future that
                     // never resolves, for the rest of this process's
                     // lifetime.
-                    let _ = tx.send((container, graph));
+                    let _ = tx.send((container, graph, connection));
                     std::future::pending::<()>().await;
                 });
             });
 
-            let (container, graph) = rx
+            let (container, graph, connection) = rx
                 .recv()
                 .expect("the background Neo4j setup thread panicked or dropped its sender");
 
             Neo4jFixture {
                 graph,
+                connection,
                 _container: container,
                 _background_thread: background_thread,
             }
         })
         .graph
+}
+
+/// Where and as whom the shared graph is reached.
+#[derive(Debug, Clone)]
+pub struct Connection {
+    /// `bolt://host:port`
+    pub bolt: String,
+    /// `http://host:port`, Neo4j's HTTP API.
+    pub http: String,
+    pub user: String,
+    pub password: String,
+}
+
+/// The shared graph's address and credentials, starting it if it is not yet.
+pub fn connection() -> Connection {
+    neo4j();
+    NEO4J_FIXTURE
+        .get()
+        .expect("started by neo4j()")
+        .connection
+        .clone()
+}
+
+/// The operators of the plan Neo4j makes for `cypher` with `params` (`EXPLAIN`, nothing run), every one in the tree,
+/// e.g. `NodeUniqueIndexSeek@neo4j`. Asked over the HTTP API, which returns the plan: the Bolt driver keeps it to itself.
+pub async fn explain(cypher: &str, params: serde_json::Value) -> Vec<String> {
+    let c = connection();
+    let body = serde_json::json!({
+        "statements": [{ "statement": format!("EXPLAIN {cypher}"), "parameters": params }]
+    });
+    let answer: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/db/neo4j/tx/commit", c.http))
+        .basic_auth(&c.user, Some(&c.password))
+        .json(&body)
+        .send()
+        .await
+        .expect("Neo4j's HTTP API answers")
+        .json()
+        .await
+        .expect("a JSON answer");
+    assert!(
+        answer["errors"].as_array().is_none_or(|e| e.is_empty()),
+        "EXPLAIN {cypher}: {answer}"
+    );
+    let mut operators = Vec::new();
+    let mut pending = vec![answer["results"][0]["plan"]["root"].clone()];
+    while let Some(node) = pending.pop() {
+        if let Some(op) = node["operatorType"].as_str() {
+            operators.push(op.to_string());
+        }
+        if let Some(children) = node["children"].as_array() {
+            pending.extend(children.iter().cloned());
+        }
+    }
+    assert!(!operators.is_empty(), "no plan in {answer}");
+    operators
 }
 
 /// Enters the shared, dedicated background runtime's own context for

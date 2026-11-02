@@ -1173,6 +1173,10 @@ pub struct GraphControllerArgs {
     /// from its snapshot. `None` is for agents not yet on the builder: the controller then
     /// reads the process, as it always did, until the last of them moves.
     pub settings: Option<GraphSettings>,
+    /// The constraints and indexes for the labels the agent owns, made at the first contact with the graph
+    /// (`graph::schema`; docs/architecture/graph-write-path.md, "Constraints and indexes"). The agent builder derives
+    /// them from `PolarAgent::GRAPH` and `PolarAgent::GRAPH_KEYS`; empty for a reader, which makes nothing.
+    pub key_indexes: Vec<crate::graph::schema::KeyIndex>,
 }
 
 impl GraphControllerArgs {
@@ -1180,7 +1184,14 @@ impl GraphControllerArgs {
         Self {
             signal_port,
             settings: None,
+            key_indexes: Vec::new(),
         }
+    }
+
+    /// Make these constraints and indexes at the first contact with the graph.
+    pub fn with_key_indexes(mut self, key_indexes: Vec<crate::graph::schema::KeyIndex>) -> Self {
+        self.key_indexes = key_indexes;
+        self
     }
 
     /// Connect with these settings instead of reading the process.
@@ -1193,6 +1204,25 @@ impl GraphControllerArgs {
 pub struct GraphControllerState {
     pub graph: Graph,
     pub signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>,
+    /// The constraints and indexes not yet made: until the graph first answers.
+    pub pending_key_indexes: Vec<crate::graph::schema::KeyIndex>,
+}
+
+impl GraphControllerState {
+    /// Makes the pending constraints and indexes, once the graph answers. What the graph refuses is logged and not
+    /// asked again; a graph that cannot be asked keeps them pending for the next tick.
+    async fn ensure_key_indexes(&mut self) {
+        if self.pending_key_indexes.is_empty() {
+            return;
+        }
+        match crate::graph::schema::ensure_key_indexes(&self.graph, &self.pending_key_indexes).await
+        {
+            Ok(_) => self.pending_key_indexes.clear(),
+            Err(e) => error!(
+                "GraphControllerActor: could not ask the graph for its constraints, asking again later: {e}"
+            ),
+        }
+    }
 }
 
 #[async_trait]
@@ -1212,6 +1242,7 @@ impl Actor for GraphControllerActor {
                 Ok(graph) => Ok(GraphControllerState {
                     graph,
                     signal_port: args.signal_port,
+                    pending_key_indexes: args.key_indexes,
                 }),
                 Err(e) => {
                     error!("Failed to set up graph connection. {e}");
@@ -1238,6 +1269,8 @@ impl Actor for GraphControllerActor {
             Ok(_) => {
                 info!("GraphControllerActor: canary query succeeded, graph available");
                 state.signal_port.send(GraphSignal::Available);
+                // Before the first op: the actor takes no message until post_start returns.
+                state.ensure_key_indexes().await;
             }
             Err(e) => {
                 let reason = format!("canary query failed: {e}");
@@ -1286,6 +1319,7 @@ impl Actor for GraphControllerActor {
                 {
                     Ok(_) => {
                         state.signal_port.send(GraphSignal::Available);
+                        state.ensure_key_indexes().await;
                     }
                     Err(e) => {
                         let reason = format!("canary tick failed: {e}");

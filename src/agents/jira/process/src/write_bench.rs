@@ -46,9 +46,9 @@ mod apache {
 /// suffixed), sharing its users, type and project with the others, as a project's issues do.
 const COPIES: usize = 100;
 
-fn copies() -> Vec<JiraIssue> {
+fn copies(n: usize) -> Vec<JiraIssue> {
     let mut out = Vec::new();
-    for i in 0..COPIES {
+    for i in 0..n {
         for published in apache::PUBLISHED {
             let mut issue: JiraIssue = serde_json::from_str(published).unwrap();
             issue.key = format!("{}-{i}", issue.key);
@@ -119,14 +119,50 @@ async fn an_issue_written_grouped_leaves_the_graph_its_ops_leave_one_by_one() {
     assert!(statements > 0);
 }
 
+/// Drops the constraints and indexes the measurements made, so each starts from none.
+async fn drop_key_indexes(graph: &neo4rs::Graph) {
+    for index in polar_agent_builder::agent::graph_key_indexes::<crate::agent::JiraProcessor>() {
+        for kind in ["CONSTRAINT", "INDEX"] {
+            graph
+                .run(neo4rs::Query::new(format!(
+                    "DROP {kind} {} IF EXISTS",
+                    index.name()
+                )))
+                .await
+                .unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "a measurement: run in a release build with --ignored --nocapture"]
 async fn write_bench_issues() {
     let graph = polar_test_graph::neo4j();
     let _guard = polar_test_graph::enter();
-    clear(graph).await;
+    for copies_of_each in [COPIES, 10 * COPIES] {
+        for constraints in [false, true] {
+            clear(graph).await;
+            drop_key_indexes(graph).await;
+            if constraints {
+                polar::graph::schema::ensure_key_indexes(
+                    graph,
+                    &polar_agent_builder::agent::graph_key_indexes::<crate::agent::JiraProcessor>(),
+                )
+                .await
+                .unwrap();
+                graph
+                    .run(neo4rs::Query::new("CALL db.awaitIndexes(60)".to_string()))
+                    .await
+                    .unwrap();
+            }
+            bench_issues(graph, copies_of_each, constraints).await;
+        }
+    }
+    drop_key_indexes(graph).await;
+}
 
-    let issues = copies();
+async fn bench_issues(graph: &neo4rs::Graph, copies_of_each: usize, constraints: bool) {
+    let issues = copies(copies_of_each);
     let ops: Vec<Vec<GraphOp>> = issues.iter().map(build_ops_for_issue).collect();
     let per_issue: Vec<usize> = ops.iter().map(Vec::len).collect();
     let started = Instant::now();
@@ -138,7 +174,9 @@ async fn write_bench_issues() {
     }
     let took = started.elapsed();
     println!(
-        "write_bench_issues: {statements} statements for {} issues ({} ops each, {} in all) in {:.3} s: {:.2} ms an issue",
+        "write_bench_issues: {} constraints: {statements} statements for {} issues ({} ops each, {} in all) in {:.3} s: \
+         {:.2} ms an issue",
+        if constraints { "with" } else { "without" },
         issues.len(),
         per_issue[..apache::PUBLISHED.len()]
             .iter()

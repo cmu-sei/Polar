@@ -43,21 +43,21 @@ pub enum KubeNodeKey {
     },
     DeploymentState {
         uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
     ReplicaSet {
         uid: String,
     },
     ReplicaSetState {
         uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
     Pod {
         uid: String,
     },
     PodState {
         pod_uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
 
     PodContainer {
@@ -67,7 +67,7 @@ pub enum KubeNodeKey {
     PodContainerState {
         pod_uid: String,
         name: String,
-        valid_from: String,
+        valid_from: i64,
     },
     Volume {
         name: String,
@@ -101,21 +101,21 @@ pub enum KubeNodeKey {
     },
     JobState {
         uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
     FluxOciRepository {
         uid: String,
     },
     FluxOciRepositoryState {
         uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
     FluxKustomization {
         uid: String,
     },
     FluxKustomizationState {
         uid: String,
-        valid_from: String,
+        valid_from: i64,
     },
     FluxOciRepositoryRef {
         name: String,
@@ -125,6 +125,9 @@ pub enum KubeNodeKey {
 impl GraphNodeKey for KubeNodeKey {
     fn identity(&self) -> NodeIdentity {
         let s = |v: &String| BoltType::String(v.clone().into());
+        // A state instance's time is the epoch milliseconds its UpdateState also SETs as `valid_from`, so the
+        // MERGE finds the node the SET left (a text key never matched the integer written over it).
+        let ms = |v: i64| BoltType::Integer(v.into());
         match self {
             KubeNodeKey::Cluster { uid } => {
                 NodeIdentity::fixed(&["KubernetesCluster"], vec![("uid", s(uid))])
@@ -141,14 +144,14 @@ impl GraphNodeKey for KubeNodeKey {
             }
             KubeNodeKey::DeploymentState { uid, valid_from } => NodeIdentity::fixed(
                 &["DeploymentState"],
-                vec![("deployment_uid", s(uid)), ("valid_from", s(valid_from))],
+                vec![("deployment_uid", s(uid)), ("valid_from", ms(*valid_from))],
             ),
             KubeNodeKey::ReplicaSet { uid } => {
                 NodeIdentity::fixed(&["ReplicaSet"], vec![("uid", s(uid))])
             }
             KubeNodeKey::ReplicaSetState { uid, valid_from } => NodeIdentity::fixed(
                 &["ReplicaSetState"],
-                vec![("deployment_uid", s(uid)), ("valid_from", s(valid_from))],
+                vec![("deployment_uid", s(uid)), ("valid_from", ms(*valid_from))],
             ),
             KubeNodeKey::Pod { uid } => NodeIdentity::fixed(&["Pod"], vec![("uid", s(uid))]),
             KubeNodeKey::StatefulSet { uid } => {
@@ -163,7 +166,7 @@ impl GraphNodeKey for KubeNodeKey {
             }
             KubeNodeKey::JobState { uid, valid_from } => NodeIdentity::fixed(
                 &["KubernetesJobState"],
-                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+                vec![("uid", s(uid)), ("valid_from", ms(*valid_from))],
             ),
             // Keyed on `pod_uid` and `valid_from`, as PodContainerState is. Its pattern once named its properties
             // after the variable it was given (`sinst_uid`, `sinst_valid_from`), so the same key matched different
@@ -173,7 +176,7 @@ impl GraphNodeKey for KubeNodeKey {
                 valid_from,
             } => NodeIdentity::fixed(
                 &["PodState"],
-                vec![("pod_uid", s(pod_uid)), ("valid_from", s(valid_from))],
+                vec![("pod_uid", s(pod_uid)), ("valid_from", ms(*valid_from))],
             ),
             KubeNodeKey::PodContainer { pod_uid, name } => NodeIdentity::fixed(
                 &["PodContainer"],
@@ -188,7 +191,7 @@ impl GraphNodeKey for KubeNodeKey {
                 vec![
                     ("pod_uid", s(pod_uid)),
                     ("name", s(name)),
-                    ("valid_from", s(valid_from)),
+                    ("valid_from", ms(*valid_from)),
                 ],
             ),
             KubeNodeKey::Volume { name, namespace } => NodeIdentity::fixed(
@@ -224,7 +227,7 @@ impl GraphNodeKey for KubeNodeKey {
             // actual source-controller reconciliation events.
             KubeNodeKey::FluxOciRepositoryState { uid, valid_from } => NodeIdentity::fixed(
                 &["FluxOCIRepositoryState"],
-                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+                vec![("uid", s(uid)), ("valid_from", ms(*valid_from))],
             ),
             KubeNodeKey::FluxOciRepositoryRef { name, namespace } => NodeIdentity::fixed(
                 &["FluxOCIRepository"],
@@ -251,7 +254,7 @@ impl GraphNodeKey for KubeNodeKey {
             }
             KubeNodeKey::FluxKustomizationState { uid, valid_from } => NodeIdentity::fixed(
                 &["FluxKustomizationState"],
-                vec![("uid", s(uid)), ("valid_from", s(valid_from))],
+                vec![("uid", s(uid)), ("valid_from", ms(*valid_from))],
             ),
         }
     }
@@ -270,17 +273,17 @@ impl NodeKeyVocabulary for KubeNodeKey {
             KubeNodeKey::Deployment { uid: s() },
             KubeNodeKey::DeploymentState {
                 uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::ReplicaSet { uid: s() },
             KubeNodeKey::ReplicaSetState {
                 uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::Pod { uid: s() },
             KubeNodeKey::PodState {
                 pod_uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::PodContainer {
                 pod_uid: s(),
@@ -289,7 +292,7 @@ impl NodeKeyVocabulary for KubeNodeKey {
             KubeNodeKey::PodContainerState {
                 pod_uid: s(),
                 name: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::Volume {
                 name: s(),
@@ -313,17 +316,17 @@ impl NodeKeyVocabulary for KubeNodeKey {
             KubeNodeKey::Node { uid: s() },
             KubeNodeKey::JobState {
                 uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::FluxOciRepository { uid: s() },
             KubeNodeKey::FluxOciRepositoryState {
                 uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::FluxKustomization { uid: s() },
             KubeNodeKey::FluxKustomizationState {
                 uid: s(),
-                valid_from: s(),
+                valid_from: 0,
             },
             KubeNodeKey::FluxOciRepositoryRef {
                 name: s(),

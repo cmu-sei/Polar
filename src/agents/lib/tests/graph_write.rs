@@ -32,12 +32,43 @@ use polar_test_graph::{clear_graph, neo4j};
 
 static EXCLUSIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The shared graph, emptied, held by this test alone until the guard drops.
+/// The shared graph, emptied of nodes and of every constraint and index but Neo4j's own, held by this test alone
+/// until the guard drops.
 async fn exclusive() -> (&'static Graph, tokio::sync::MutexGuard<'static, ()>) {
     let held = EXCLUSIVE.lock().await;
     let graph = neo4j();
     clear_graph(graph).await;
+    for name in names(graph, "SHOW CONSTRAINTS YIELD name RETURN name").await {
+        graph
+            .run(neo4rs::Query::new(format!("DROP CONSTRAINT {name}")))
+            .await
+            .unwrap();
+    }
+    for name in names(
+        graph,
+        "SHOW INDEXES YIELD name, type WHERE type <> 'LOOKUP' RETURN name",
+    )
+    .await
+    {
+        graph
+            .run(neo4rs::Query::new(format!("DROP INDEX {name}")))
+            .await
+            .unwrap();
+    }
     (graph, held)
+}
+
+async fn names(graph: &Graph, cypher: &str) -> Vec<String> {
+    let mut rows = graph
+        .execute(neo4rs::Query::new(cypher.to_string()))
+        .await
+        .unwrap();
+    let mut names = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        names.push(row.get::<String>("name").unwrap());
+    }
+    names.sort();
+    names
 }
 
 async fn count(graph: &Graph, cypher: &str) -> i64 {
@@ -60,7 +91,7 @@ fn pod_transition(pod: &str, at: i64, phase: &str) -> GraphOp {
         state_type_key: KubeNodeKey::State.into_key(),
         state_instance_key: KubeNodeKey::PodState {
             pod_uid: pod.into(),
-            valid_from: at.to_string(),
+            valid_from: at,
         }
         .into_key(),
         state_instance_props: vec![
@@ -309,4 +340,257 @@ async fn a_mixed_batch_writes_the_same_nodes_as_one_statement_an_item() {
         "one a shape: Pod, PodContainer, State, the field, Namespace"
     );
     assert_eq!(batched.len(), 6, "{batched:#?}");
+}
+
+// ── Constraints and indexes ────────────────────────────────────────────────
+
+use polar::graph::controller::{compile_graph_op, shapes_of};
+use polar::graph::schema::{Ensured, KeyIndex, KeyIndexKind, ensure_key_indexes, key_indexes};
+
+/// What kube-consumer owns, some of it: a single key, two composite keys, and a label merged on two keys.
+fn kube_indexes() -> Vec<KeyIndex> {
+    key_indexes(
+        &[
+            "Pod",
+            "PodState",
+            "PodContainer",
+            "FluxOCIRepository",
+            "State",
+        ],
+        &shapes_of::<KubeNodeKey>(),
+    )
+}
+
+async fn constraints_and_indexes(graph: &Graph) -> Vec<String> {
+    let mut all = names(graph, "SHOW CONSTRAINTS YIELD name RETURN name").await;
+    all.extend(names(graph, "SHOW INDEXES YIELD name RETURN name").await);
+    all.sort();
+    all
+}
+
+/// Each owned label's key gets its constraint or index, composite keys included on Neo4j 5 Community; a second start
+/// makes nothing and changes nothing.
+#[tokio::test]
+async fn owned_labels_get_their_constraints_and_a_second_start_is_a_no_op() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    let wanted = kube_indexes();
+    assert_eq!(
+        wanted.iter().map(KeyIndex::name).collect::<Vec<_>>(),
+        [
+            "polar_index_FluxOCIRepository_name_namespace",
+            "polar_index_FluxOCIRepository_uid",
+            "polar_unique_Pod_uid",
+            "polar_unique_PodContainer_pod_uid_name",
+            "polar_unique_PodState_pod_uid_valid_from",
+        ]
+    );
+
+    let first = ensure_key_indexes(graph, &wanted).await.unwrap();
+    assert!(
+        first.iter().all(|e| matches!(e, Ensured::Created(_))),
+        "{first:#?}"
+    );
+    let after_first = constraints_and_indexes(graph).await;
+    for index in &wanted {
+        assert!(after_first.contains(&index.name()), "{after_first:?}");
+    }
+    assert_eq!(
+        names(graph, "SHOW CONSTRAINTS YIELD name RETURN name").await,
+        [
+            "polar_unique_PodContainer_pod_uid_name",
+            "polar_unique_PodState_pod_uid_valid_from",
+            "polar_unique_Pod_uid",
+        ]
+    );
+
+    let second = ensure_key_indexes(graph, &wanted).await.unwrap();
+    assert!(
+        second.iter().all(|e| matches!(e, Ensured::Present(_))),
+        "{second:#?}"
+    );
+    assert_eq!(constraints_and_indexes(graph).await, after_first);
+}
+
+/// The operators Neo4j plans for the batch statement that writes `op`'s one node.
+async fn plan_of(op: GraphOp, key: serde_json::Value) -> Vec<String> {
+    let queries = compile_graph_op(&op).unwrap();
+    assert_eq!(queries.len(), 1);
+    polar_test_graph::explain(
+        queries[0].query(),
+        serde_json::json!({ "rows": [{ "k": key, "p": {} }] }),
+    )
+    .await
+}
+
+/// A state seen again (a container's status, unchanged, in the next pod event) is the same state instance: its key's
+/// time is the integer its UpdateState SETs, so the MERGE finds it. With a text key it made a second node each time,
+/// which the uniqueness constraint would now refuse, failing the write.
+#[tokio::test]
+async fn a_state_seen_again_is_the_same_instance_under_the_constraint() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    ensure_key_indexes(graph, &kube_indexes()).await.unwrap();
+
+    for _ in 0..3 {
+        handle_op(graph, &pod_transition("pod-a", 5, "Running"))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (s:PodState {pod_uid: 'pod-a'}) RETURN count(s) AS c"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (s:PodState {pod_uid: 'pod-a', valid_from: 5}) RETURN count(s) AS c"
+        )
+        .await,
+        1
+    );
+}
+
+/// With them, a batch's MERGE seeks its node by the constraint or the index; without them it scans the label.
+#[tokio::test]
+async fn merge_seeks_by_them_instead_of_scanning_the_label() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    let pod = || GraphOp::UpsertNode {
+        key: KubeNodeKey::Pod { uid: "x".into() }.into_key(),
+        props: vec![],
+    };
+    let pod_state = || GraphOp::UpsertNode {
+        key: KubeNodeKey::PodState {
+            pod_uid: "x".into(),
+            valid_from: 1,
+        }
+        .into_key(),
+        props: vec![],
+    };
+    let flux = || GraphOp::UpsertNode {
+        key: KubeNodeKey::FluxOciRepository { uid: "x".into() }.into_key(),
+        props: vec![],
+    };
+    let uid = serde_json::json!({ "uid": "x" });
+    let state_key = serde_json::json!({ "pod_uid": "x", "valid_from": 1 });
+
+    let before = plan_of(pod(), uid.clone()).await;
+    assert!(
+        before.iter().any(|o| o.starts_with("NodeByLabelScan")),
+        "{before:?}"
+    );
+
+    ensure_key_indexes(graph, &kube_indexes()).await.unwrap();
+    graph
+        .run(neo4rs::Query::new("CALL db.awaitIndexes(60)".to_string()))
+        .await
+        .unwrap();
+
+    for (what, plan) in [
+        ("Pod", plan_of(pod(), uid.clone()).await),
+        ("PodState", plan_of(pod_state(), state_key).await),
+        ("FluxOCIRepository", plan_of(flux(), uid).await),
+    ] {
+        assert!(
+            !plan.iter().any(|o| o.starts_with("NodeByLabelScan")),
+            "{what}: {plan:?}"
+        );
+        let seek = if what == "FluxOCIRepository" {
+            "NodeIndexSeek"
+        } else {
+            "NodeUniqueIndexSeek"
+        };
+        assert!(plan.iter().any(|o| o.starts_with(seek)), "{what}: {plan:?}");
+    }
+}
+
+/// Nodes that already share a key keep a uniqueness constraint from being made: they are counted and reported, never
+/// deleted, and the range index on the same key is made instead, so MERGE still seeks.
+#[tokio::test]
+async fn nodes_sharing_a_key_are_reported_and_left_and_an_index_is_made_instead() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    graph
+        .run(neo4rs::Query::new(
+            "CREATE (:Pod {uid: 'd'}), (:Pod {uid: 'd'}), (:Pod {uid: 'd'}), (:Pod {uid: 'e'}), (:Pod {uid: 'e'}), \
+             (:Pod {uid: 'f'})"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    let wanted = key_indexes(&["Pod"], &shapes_of::<KubeNodeKey>());
+    assert_eq!(wanted.len(), 1);
+    assert_eq!(wanted[0].kind, KeyIndexKind::Unique);
+
+    let outcome = ensure_key_indexes(graph, &wanted).await.unwrap();
+
+    let [
+        Ensured::Refused {
+            duplicates,
+            instead: Some(instead),
+            ..
+        },
+    ] = &outcome[..]
+    else {
+        panic!("{outcome:#?}")
+    };
+    assert_eq!(*duplicates, Some((2, 5)), "two keys held by five nodes");
+    assert!(
+        matches!(instead.as_ref(), Ensured::Created(i) if i.name() == "polar_index_Pod_uid"),
+        "{instead:?}"
+    );
+    assert_eq!(count(graph, "MATCH (n:Pod) RETURN count(n) AS c").await, 6);
+    assert!(
+        names(graph, "SHOW CONSTRAINTS YIELD name RETURN name")
+            .await
+            .is_empty()
+    );
+}
+
+/// The graph controller makes them itself, at the first contact with the graph.
+#[tokio::test]
+async fn the_graph_controller_makes_them_at_start() {
+    use polar::graph::controller::{GraphControllerActor, GraphControllerArgs};
+    use polar::graph::environment::{GraphSettings, GraphTls};
+
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    let c = polar_test_graph::connection();
+    let settings = GraphSettings {
+        database: "neo4j".to_string(),
+        user: c.user,
+        password: c.password,
+        endpoint: c.bolt,
+        tls: GraphTls::None,
+    };
+    let (controller, handle) = ractor::Actor::spawn(
+        None,
+        GraphControllerActor,
+        GraphControllerArgs::new(std::sync::Arc::new(ractor::OutputPort::default()))
+            .with_settings(settings)
+            .with_key_indexes(kube_indexes()),
+    )
+    .await
+    .unwrap();
+
+    // Made in post_start, after the canary: before the controller takes its first message.
+    let mut made = Vec::new();
+    for _ in 0..100 {
+        made = constraints_and_indexes(graph).await;
+        if kube_indexes().iter().all(|i| made.contains(&i.name())) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    controller.stop(None);
+    handle.await.unwrap();
+    for index in kube_indexes() {
+        assert!(made.contains(&index.name()), "{made:?}");
+    }
 }

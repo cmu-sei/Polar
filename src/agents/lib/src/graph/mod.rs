@@ -24,6 +24,7 @@
 pub mod controller;
 pub mod environment;
 pub mod nodes;
+pub mod schema;
 
 #[cfg(test)]
 pub mod tests;

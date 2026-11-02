@@ -34,3 +34,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 rustls = { workspace = true, features = ["ring"] }
 polar = { path = "../lib" }
 libc = "0.2"
+# EXPLAIN over Neo4j's HTTP API, which returns the plan (`explain`): the Bolt driver keeps it to itself.
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true

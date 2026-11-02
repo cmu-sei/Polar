@@ -193,6 +193,9 @@ impl Actor for ConsumerSupervisor {
         // spawning anything, and reads the dependency endpoints from
         // POLAR_HEALTH_DEP_ENDPOINTS. This agent never encrypts a payload,
         // so it does not declare encryption.
+        // What the graph controller makes at start for the labels this agent owns; read before the builder takes
+        // the configuration.
+        let key_indexes = configured.graph_key_indexes();
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
         for subscription in Self::jira_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
@@ -224,10 +227,12 @@ impl Actor for ConsumerSupervisor {
             Some("jira.process.graph.controller".to_string()),
             GraphControllerActor,
             // The settings come from the builder's snapshot, which already judged them.
-            GraphControllerArgs::new(graph_signal_port).with_settings(
-                polar::graph::environment::GraphSettings::from_env(&*resources.config)
-                    .map_err(ActorProcessingErr::from)?,
-            ),
+            GraphControllerArgs::new(graph_signal_port)
+                .with_settings(
+                    polar::graph::environment::GraphSettings::from_env(&*resources.config)
+                        .map_err(ActorProcessingErr::from)?,
+                )
+                .with_key_indexes(key_indexes),
             myself.get_cell(),
         )
         .await

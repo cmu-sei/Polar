@@ -24,7 +24,9 @@
 //! What kube-consumer is, as the infrastructure asks to be told: see `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ClusterConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{
+    Capability, Cause, Configured, GraphDecl, PolarAgent, StartError, TopicDecl,
+};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -51,6 +53,40 @@ impl PolarAgent for KubeConsumer {
         )
         .because(&[Cause::Topic(kube_common::KUBERNETES_CONSUMER)]),
     ];
+    // The labels it writes, each a node of polar::graph::nodes::kube::KubeNodeKey. Not `State`, the taxonomy anchor
+    // every state instance is OF_TYPE, which build-processor writes too and which has no key.
+    const GRAPH: &'static [GraphDecl] = &[
+        GraphDecl::owns("KubernetesDeployment", "the deployments"),
+        GraphDecl::owns("DeploymentState", "each state a deployment was seen in"),
+        GraphDecl::owns("ReplicaSet", "the replica sets"),
+        GraphDecl::owns("ReplicaSetState", "each state a replica set was seen in"),
+        GraphDecl::owns("Pod", "the pods"),
+        GraphDecl::owns("PodState", "each state a pod was seen in"),
+        GraphDecl::owns("PodContainer", "each pod's containers"),
+        GraphDecl::owns("PodContainerState", "each state a container was seen in"),
+        GraphDecl::owns("Volume", "the volumes pods mount"),
+        GraphDecl::owns("PersistentVolumeClaim", "the claims volumes are backed by"),
+        GraphDecl::owns("Secret", "the secrets pods use, by name"),
+        GraphDecl::owns("ConfigMap", "the config maps pods use, by name"),
+        GraphDecl::owns("KubernetesJob", "the jobs"),
+        GraphDecl::owns("KubernetesJobState", "each state a job was seen in"),
+        GraphDecl::owns("StatefulSet", "the stateful sets that own pods, as anchors"),
+        GraphDecl::owns("DaemonSet", "the daemon sets that own pods, as anchors"),
+        GraphDecl::owns("Node", "the nodes pods run on, as anchors"),
+        GraphDecl::owns("FluxOCIRepository", "Flux's OCI repositories"),
+        GraphDecl::owns(
+            "FluxOCIRepositoryState",
+            "each artifact an OCI repository resolved",
+        ),
+        GraphDecl::owns("FluxKustomization", "Flux's kustomizations"),
+        GraphDecl::owns(
+            "FluxKustomizationState",
+            "each revision a kustomization applied",
+        ),
+    ];
+    // The constraints for the labels above come from here, on what each is merged on.
+    const GRAPH_KEYS: &'static [fn() -> Vec<polar::graph::controller::NodeShape>] =
+        &[polar::graph::controller::shapes_of::<polar::graph::nodes::kube::KubeNodeKey>];
     const HELP: Option<&'static str> = Some(
         "kube-consumer subscribes to the Kubernetes observer's topics on Cassini, writes what it \
          receives into the graph (nodes, ownership edges and temporal state), and answers the \
@@ -88,4 +124,34 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(KubeConsumer);
+
+    /// Every label it owns is merged on a key its vocabulary names, so each gets its constraint or index at start;
+    /// FluxOCIRepository, merged on its uid and, from a reference, on its name and namespace, gets an index for each.
+    #[test]
+    fn every_label_it_owns_gets_a_constraint_or_an_index() {
+        use polar::graph::schema::KeyIndexKind;
+        let indexes = polar_agent_builder::agent::graph_key_indexes::<KubeConsumer>();
+        for decl in KubeConsumer::GRAPH {
+            assert!(
+                indexes.iter().any(|i| i.label == decl.label),
+                "{} has none",
+                decl.label
+            );
+        }
+        let names: Vec<String> = indexes.iter().map(|i| i.name()).collect();
+        assert!(
+            names.contains(&"polar_unique_Pod_uid".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"polar_unique_PodContainerState_pod_uid_name_valid_from".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .filter(|i| i.label == "FluxOCIRepository")
+                .all(|i| i.kind == KeyIndexKind::Index)
+        );
+    }
 }

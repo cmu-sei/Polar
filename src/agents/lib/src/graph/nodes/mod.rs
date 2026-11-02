@@ -91,7 +91,7 @@ mod pattern_tests {
     fn a_pod_state_is_keyed_on_its_pod_and_its_time_whatever_the_variable() {
         let key = KubeNodeKey::PodState {
             pod_uid: "u".into(),
-            valid_from: "1".into(),
+            valid_from: 1,
         };
         assert_eq!(
             key.cypher_match("sinst").0,
