@@ -594,3 +594,195 @@ async fn the_graph_controller_makes_them_at_start() {
         assert!(made.contains(&index.name()), "{made:?}");
     }
 }
+
+// ── Cleaning up what was written ───────────────────────────────────────────
+
+use polar::graph::repair::{BATCH, EMPTY_STATE_TYPE_NODES};
+
+/// The u7c shape, by hand: pods whose transitions point OF_TYPE and HAS_STATE at empty nodes, one a transition, as
+/// the unbound `(:State)` wrote them; and beside them what must be left: an unlabeled node with a property, one with
+/// an outgoing relationship, one with another incoming relationship, a labeled node with no property, and a pod
+/// transitioned since the fix (its HAS_STATE to `:State`), and one pointing at both.
+const U7C: &str = "
+    CREATE (a:Pod {uid: 'a'}), (b:Pod {uid: 'b'}), (fixed:Pod {uid: 'fixed'}), (state:State)
+    CREATE (a)-[:TRANSITIONED_TO]->(a1:PodState {pod_uid: 'a', valid_from: 1})-[:OF_TYPE]->(e1)
+    CREATE (a)-[:TRANSITIONED_TO]->(a2:PodState {pod_uid: 'a', valid_from: 2})-[:OF_TYPE]->(e2)
+    CREATE (a)-[:HAS_STATE]->(e2)
+    CREATE (b)-[:TRANSITIONED_TO]->(b1:PodState {pod_uid: 'b', valid_from: 1})-[:OF_TYPE]->(e3)
+    CREATE (b)-[:HAS_STATE]->(e3)
+    CREATE (fixed)-[:TRANSITIONED_TO]->(f1:PodState {pod_uid: 'fixed', valid_from: 1})-[:OF_TYPE]->(e4)
+    CREATE (fixed)-[:TRANSITIONED_TO]->(f2:PodState {pod_uid: 'fixed', valid_from: 2})-[:OF_TYPE]->(state)
+    CREATE (fixed)-[:HAS_STATE]->(state)
+    CREATE (both:Pod {uid: 'both'})-[:HAS_STATE]->(e5), (both)-[:HAS_STATE]->(state)
+    CREATE (a1)-[:OF_TYPE]->({note: 'has a property'})
+    CREATE (a1)-[:OF_TYPE]->(out)-[:POINTS_TO]->(b)
+    CREATE (a1)-[:OF_TYPE]->(other)<-[:DESCRIBES]-(b)
+    CREATE (a1)-[:OF_TYPE]->(:Labelled)
+";
+
+async fn empties(graph: &Graph) -> i64 {
+    count(
+        graph,
+        "MATCH (n) WHERE size(labels(n)) = 0 AND size(keys(n)) = 0 RETURN count(n) AS c",
+    )
+    .await
+}
+
+/// The repair removes exactly the empty nodes the transitions made, points their OF_TYPE and HAS_STATE at the one
+/// `:State` (a pod transitioned since keeps its one HAS_STATE), leaves everything else, and a second run removes
+/// nothing and changes nothing.
+#[tokio::test]
+async fn the_empty_state_type_nodes_are_removed_and_their_edges_pointed_at_state() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    graph
+        .run(neo4rs::Query::new(U7C.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        empties(graph).await,
+        7,
+        "e1..e5, and the two decoys with edges"
+    );
+
+    assert_eq!(EMPTY_STATE_TYPE_NODES.run(graph).await.unwrap(), 5);
+
+    assert_eq!(
+        empties(graph).await,
+        2,
+        "the decoy with an outgoing edge, and the one with another edge"
+    );
+    assert_eq!(
+        count(graph, "MATCH (n:State) RETURN count(n) AS c").await,
+        1
+    );
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (:PodState)-[:OF_TYPE]->(:State) RETURN count(*) AS c"
+        )
+        .await,
+        5,
+        "every instance of the shape"
+    );
+    for pod in ["a", "b", "fixed", "both"] {
+        assert_eq!(
+            count(
+                graph,
+                &format!("MATCH (:Pod {{uid: '{pod}'}})-[r:HAS_STATE]->() RETURN count(r) AS c")
+            )
+            .await,
+            1,
+            "{pod}"
+        );
+        assert_eq!(
+            count(
+                graph,
+                &format!(
+                    "MATCH (:Pod {{uid: '{pod}'}})-[:HAS_STATE]->(:State) RETURN count(*) AS c"
+                )
+            )
+            .await,
+            1,
+            "{pod}"
+        );
+    }
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (n {note: 'has a property'}) RETURN count(n) AS c"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(graph, "MATCH (n:Labelled) RETURN count(n) AS c").await,
+        1
+    );
+    assert_eq!(
+        count(
+            graph,
+            "MATCH ()-[r:POINTS_TO|DESCRIBES]->() RETURN count(r) AS c"
+        )
+        .await,
+        2
+    );
+
+    let after = polar_test_graph::dump(graph).await;
+    assert_eq!(EMPTY_STATE_TYPE_NODES.run(graph).await.unwrap(), 0);
+    assert_eq!(polar_test_graph::dump(graph).await, after);
+}
+
+/// More empty nodes than one batch: removed in several transactions, every one.
+#[tokio::test]
+async fn more_than_a_batch_of_them_are_all_removed() {
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    let n = BATCH * 2 + 7;
+    graph
+        .run(
+            neo4rs::Query::new(
+                "MERGE (p:Pod {uid: 'many'}) WITH p UNWIND range(1, $n) AS i \
+                 CREATE (p)-[:TRANSITIONED_TO]->(:PodState {pod_uid: 'many', valid_from: i})-[:OF_TYPE]->()"
+                    .to_string(),
+            )
+            .param("n", n),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empties(graph).await, n);
+
+    assert_eq!(EMPTY_STATE_TYPE_NODES.run(graph).await.unwrap(), n);
+
+    assert_eq!(empties(graph).await, 0);
+    assert_eq!(
+        count(
+            graph,
+            "MATCH (:PodState)-[:OF_TYPE]->(:State) RETURN count(*) AS c"
+        )
+        .await,
+        n
+    );
+}
+
+/// kube-consumer's graph controller runs it at start, after its constraints.
+#[tokio::test]
+async fn the_graph_controller_runs_its_repairs_at_start() {
+    use polar::graph::controller::{GraphControllerActor, GraphControllerArgs};
+    use polar::graph::environment::{GraphSettings, GraphTls};
+
+    let (graph, _held) = exclusive().await;
+    let _runtime = polar_test_graph::enter();
+    graph
+        .run(neo4rs::Query::new(U7C.to_string()))
+        .await
+        .unwrap();
+    let c = polar_test_graph::connection();
+    let (controller, handle) = ractor::Actor::spawn(
+        None,
+        GraphControllerActor,
+        GraphControllerArgs::new(std::sync::Arc::new(ractor::OutputPort::default()))
+            .with_settings(GraphSettings {
+                database: "neo4j".to_string(),
+                user: c.user,
+                password: c.password,
+                endpoint: c.bolt,
+                tls: GraphTls::None,
+            })
+            .with_key_indexes(kube_indexes())
+            .with_repairs(vec![EMPTY_STATE_TYPE_NODES]),
+    )
+    .await
+    .unwrap();
+    let mut left = empties(graph).await;
+    for _ in 0..100 {
+        if left == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        left = empties(graph).await;
+    }
+    controller.stop(None);
+    handle.await.unwrap();
+    assert_eq!(left, 2);
+}

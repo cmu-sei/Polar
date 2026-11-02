@@ -442,7 +442,9 @@ impl Actor for ClusterConsumerSupervisor {
                     polar::graph::environment::GraphSettings::from_env(&*resources.config)
                         .map_err(ActorProcessingErr::from)?,
                 )
-                .with_key_indexes(key_indexes),
+                .with_key_indexes(key_indexes)
+                // The empty state-type nodes its transitions made before the fix (graph-write-path.md).
+                .with_repairs(vec![polar::graph::repair::EMPTY_STATE_TYPE_NODES]),
             myself.get_cell(),
         )
         .await

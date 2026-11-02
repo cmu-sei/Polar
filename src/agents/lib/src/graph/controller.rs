@@ -1177,6 +1177,9 @@ pub struct GraphControllerArgs {
     /// (`graph::schema`; docs/architecture/graph-write-path.md, "Constraints and indexes"). The agent builder derives
     /// them from `PolarAgent::GRAPH` and `PolarAgent::GRAPH_KEYS`; empty for a reader, which makes nothing.
     pub key_indexes: Vec<crate::graph::schema::KeyIndex>,
+    /// The repairs of what this writer wrote wrong before, run at the first contact with the graph, after the
+    /// constraints (`graph::repair`).
+    pub repairs: Vec<crate::graph::repair::Repair>,
 }
 
 impl GraphControllerArgs {
@@ -1185,7 +1188,14 @@ impl GraphControllerArgs {
             signal_port,
             settings: None,
             key_indexes: Vec::new(),
+            repairs: Vec::new(),
         }
+    }
+
+    /// Run these repairs at the first contact with the graph.
+    pub fn with_repairs(mut self, repairs: Vec<crate::graph::repair::Repair>) -> Self {
+        self.repairs = repairs;
+        self
     }
 
     /// Make these constraints and indexes at the first contact with the graph.
@@ -1206,21 +1216,37 @@ pub struct GraphControllerState {
     pub signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>,
     /// The constraints and indexes not yet made: until the graph first answers.
     pub pending_key_indexes: Vec<crate::graph::schema::KeyIndex>,
+    /// The repairs not yet run.
+    pub pending_repairs: Vec<crate::graph::repair::Repair>,
 }
 
 impl GraphControllerState {
-    /// Makes the pending constraints and indexes, once the graph answers. What the graph refuses is logged and not
-    /// asked again; a graph that cannot be asked keeps them pending for the next tick.
-    async fn ensure_key_indexes(&mut self) {
-        if self.pending_key_indexes.is_empty() {
-            return;
+    /// Once the graph answers: makes the pending constraints and indexes, then runs the pending repairs. What the
+    /// graph refuses is logged and not asked again; what could not be asked stays pending for the next tick.
+    async fn first_contact(&mut self) {
+        if !self.pending_key_indexes.is_empty() {
+            match crate::graph::schema::ensure_key_indexes(&self.graph, &self.pending_key_indexes)
+                .await
+            {
+                Ok(_) => self.pending_key_indexes.clear(),
+                Err(e) => {
+                    error!(
+                        "GraphControllerActor: could not ask the graph for its constraints, asking again later: {e}"
+                    );
+                    return;
+                }
+            }
         }
-        match crate::graph::schema::ensure_key_indexes(&self.graph, &self.pending_key_indexes).await
-        {
-            Ok(_) => self.pending_key_indexes.clear(),
-            Err(e) => error!(
-                "GraphControllerActor: could not ask the graph for its constraints, asking again later: {e}"
-            ),
+        while let Some(repair) = self.pending_repairs.first().copied() {
+            match repair.run(&self.graph).await {
+                Ok(_) => {
+                    self.pending_repairs.remove(0);
+                }
+                Err(e) => {
+                    error!("GraphControllerActor: {e}; trying again at the next tick");
+                    return;
+                }
+            }
         }
     }
 }
@@ -1243,6 +1269,7 @@ impl Actor for GraphControllerActor {
                     graph,
                     signal_port: args.signal_port,
                     pending_key_indexes: args.key_indexes,
+                    pending_repairs: args.repairs,
                 }),
                 Err(e) => {
                     error!("Failed to set up graph connection. {e}");
@@ -1270,7 +1297,7 @@ impl Actor for GraphControllerActor {
                 info!("GraphControllerActor: canary query succeeded, graph available");
                 state.signal_port.send(GraphSignal::Available);
                 // Before the first op: the actor takes no message until post_start returns.
-                state.ensure_key_indexes().await;
+                state.first_contact().await;
             }
             Err(e) => {
                 let reason = format!("canary query failed: {e}");
@@ -1319,7 +1346,7 @@ impl Actor for GraphControllerActor {
                 {
                     Ok(_) => {
                         state.signal_port.send(GraphSignal::Available);
-                        state.ensure_key_indexes().await;
+                        state.first_contact().await;
                     }
                     Err(e) => {
                         let reason = format!("canary tick failed: {e}");
