@@ -54,4 +54,13 @@
     breaking_note: "Targets deploy cert-issuer as a catalog workload of the kind `ca` (cert-issuer.yaml, cert-issuer-resources.yaml), not the chart. A cluster that ran the chart must lose the chart's cert-issuer when it switches: Flux prunes it on sandbox-local; on a target applied by up.nu it is deleted by hand." }
   { sha: "964d7217", reason: "the broker's memory budget is set at run time", breaking: true,
     breaking_note: "CASSINI_MEMORY_BUDGET_BYTES is now a cap on the runtime budget, not its value; the broker refuses to start with less than 256 MiB (four 64 MiB frames) available." }
+  # Breaking changes since v2.0.0 that were not written as `type!:` (reviewed for 3.0.0, 2026-11-02).
+  { sha: "8c6a94e0", reason: "the Cassini wire protocol is version 2 (the broker stamps the publisher's instance)", breaking: true,
+    breaking_note: "Rebuild and redeploy every image together: a 2.x client and a 3.0 broker refuse each other at registration, naming both protocol versions." }
+  { sha: "7eac25c0", reason: "the Kubernetes state nodes are keyed differently", breaking: true,
+    breaking_note: "PodState is keyed on pod_uid and valid_from, and every Kubernetes state's valid_from is an integer (epoch ms), not text. State nodes written before 3.0.0 keep their old shape and their duplicates; the uniqueness constraints made at start report those duplicates and fall back to an index. A fresh graph has none." }
+  { sha: "c9c40617", reason: "jira-observer refuses settings it used to accept", breaking: true,
+    breaking_note: "JIRA_DEPLOYMENT must be cloud, server or datacenter; QUERY_DATE must be YYYY-MM-DD or YYYY-MM-DD HH:MM; the placeholder JIRA_EMAIL is refused. Each is held and reported in (:AgentHealth) as Configuration, not ignored." }
+  { sha: "96ddd517", reason: "the Jira credential is a signed, escrowed runtime section", breaking: true,
+    breaking_note: "JIRA_TOKEN, JIRA_EMAIL and the jira-secret Secret are gone. On a fresh cluster up.nu seals the target's sops jira_token (and jira_email, for Cloud) into jira-observer's signed credentials section once; after that, rotate it with polar-sign template jira-observer credentials and polar-sign sign --push." }
 ]
