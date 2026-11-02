@@ -437,9 +437,12 @@ Found, not fixed:
   ones issues name (`project_ops`). The listing after the respawn (22:41:42) went to the processor as one `UpsertNodes`
   of 674 items and failed 30 s later with `ConnectionTimedOut`. The earlier pulls (21:34, 22:04, 22:30) left neither an
   error nor the nodes; not yet explained (a batch published before a restarted processor subscribes is lost by design,
-  delivery being best attempt, but 22:04 had both up). To find, test first: a large `UpsertNodes` against a real Neo4j.
+  delivery being best attempt, but 22:04 had both up). FIXED 2026-11-01 for the batch (`cab84865`: one `UNWIND`
+  statement, 674 projects in 0.1 s); the earlier pulls are read but not explained without the cluster's logs, and what
+  would tell is in graph-write-path.md, "The projects that never arrived".
 - **An empty batch is an empty statement:** `UpsertNodes { items: [] }` (groups read anonymously: none) compiles to
-  `""`, which Neo4j refuses (`SyntaxError: Unexpected end of input`), counted as a graph op failure.
+  `""`, which Neo4j refuses (`SyntaxError: Unexpected end of input`), counted as a graph op failure. FIXED 2026-11-01
+  (`cab84865`): an empty batch sends nothing (graph-write-path.md, "Batches").
 - **A restart between two health rounds leaves no transition:** `uptime_secs` falls, `transitions` does not show it.
 - **The hold's message from a signed update** says "set workloads.jira-observer.env in the target's config.nuon", the
   render-time remedy; for a setting a signed update made, the remedy is another signed version.

@@ -184,7 +184,9 @@ Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e
 - **Declarations.** `PolarAgent::GRAPH` holds `GraphDecl::owns` and `GraphDecl::reads`
   (`polar-agent-builder/src/graph_schema.rs`), printed under `graph`; unchanged from the first build. Declared today:
   jira-processor owns `JiraIssue`, `JiraProject`, `JiraUser`, `JiraGroup`, `JiraIssueType` and `JiraIssueChangeLog`;
-  jira-observer reads `JiraIssue`.
+  jira-observer reads `JiraIssue`. Since 2026-11-01 kube-consumer owns the 21 Kubernetes labels it writes, and an owner's
+  graph controller makes the constraints for its owned labels at start, from `PolarAgent::GRAPH_KEYS`
+  (graph-write-path.md, "Constraints and indexes"); the `JiraIssue.key` constraint is not an index on `updated_ms`.
 - **The `soft-state` capability, computed.** `computed_needs` (`polar-agent-builder/src/agent.rs:378`) gives an agent
   `Cassini` first when it is a client, then what it lists, then `SoftState` when it declares a graph read, each once;
   listing `SoftState` by hand is a declaration problem (`:897`). Its rule, `Rule::SoftState` (group `soft-state`,

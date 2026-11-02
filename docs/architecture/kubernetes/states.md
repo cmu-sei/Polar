@@ -414,6 +414,11 @@ And linking them:
 (:Pod)-[:CURRENT_STATE]->(:PodState)
 ```
 
+As built (2026-11-01): `UpdateState` writes `(:Pod)-[:TRANSITIONED_TO]->(:PodState)`, `(:PodState)-[:OF_TYPE]->(:State)`,
+and `(:Pod)-[:HAS_STATE]->(:State)`, the one taxonomy node, not the current instance; until 2026-11-01 the `:State`
+pattern was unbound and each transition made an empty node in its place (graph-write-path.md, "Every key binds its
+variable" and "Kept open").
+
 That decision fundamentally changed the system from “state mirroring” to “temporal modeling.”
 
 From there, several architectural consequences followed:

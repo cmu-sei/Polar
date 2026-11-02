@@ -742,6 +742,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   variable it is given (`(stype:State)`), so ours, `MERGE ({stype})`, is right for every key, and his would write
   `MERGE (stype stype:State)`, which Neo4j refuses (docs/architecture/graph-write-path.md, "Every key binds its
   variable").
+- [ ] THE GRAPH WRITE PATH, AFTER 2026-11-01 (graph-write-path.md; built, tested and measured, not seen on a cluster):
+  see on a cluster the constraints made at start (and the duplicates they report), the repair of the empty state-type
+  nodes, and Apache's 674 projects written; the lost project pulls, which need the next run's logs and, for the
+  Cassini client, an info line at the projects publish and dispatch and a first-come wait for outbox room (the
+  maintainer's call); whether `HAS_STATE` should point at the current instance rather than the `:State` taxonomy node;
+  owned labels and `GRAPH_KEYS` for the writers that declare none yet; drop the repair once every graph has run it.
 - [ ] TYPED RUNTIME DOCUMENTS FROM THE DECLARATIONS (decided by the maintainer 2026-10-31). `polar-sign` renders a
   runtime section from the agent's declared body type (its scaffold), so a missing optional field in a list entry
   becomes `None T` and a present one `Some x`, and the scheduler reads them back as absent. Today (since `50baf2f6`)
