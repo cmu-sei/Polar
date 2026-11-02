@@ -286,3 +286,21 @@ Cassini client, so they wait for the maintainer.
 - kube-consumer sends each `UpdateState` as its own op, a round trip each; not grouped here.
 - The state nodes written before the fix keep their duplicates (a state seen again made another), which the composite
   constraints will report at the first start and index instead.
+
+## Seen on a cluster (u7c, sandbox-local, 2026-11-02)
+
+Main at `66a2ed79`, every image rebuilt and redeployed over the graph of the 2026-11-01 runs (Apache's Jira, read
+anonymously; kube state since 2026-10-31).
+
+- **The repair:** kube-consumer's first start removed 37,948 empty nodes left as state types by unbound `(:State)`
+  transitions; afterwards the graph had no unlabeled node and one `:State`, and the 38,284 `OF_TYPE` edges pointed at
+  it. None appeared again as kube-consumer went on writing transitions.
+- **Constraints:** 22 uniqueness constraints and 28 range indexes where there were none. The refusals were the
+  duplicates the text-typed `valid_from` left before this round (`DeploymentState`: 514 keys held by more than one
+  node, 1,647 nodes; `FluxKustomizationState`: 1,451 keys, 7,542 nodes; and two more), each logged at error, left as
+  they are and given a range index instead, as designed.
+- **Projects:** all 674 of Apache's projects were in the graph from the observer's first pull after its start (51
+  before, the ones issues name). Why the 2026-11-01 pulls at 21:34, 22:04 and 22:30 left nothing is not reproduced.
+- **Jira completeness:** every issue Apache answered as updated since the cursor's first start was in the graph with
+  its update time, 724 of 724 up to the pull at 03:22:32; the two issues Apache updated a minute after it fall to the
+  next pull. No error in either Jira agent; all 14 agents `healthy` in `(:AgentHealth)`.
