@@ -3930,6 +3930,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-scudo",
+ "polar-test-graph",
  "proptest",
  "ractor",
  "regex",

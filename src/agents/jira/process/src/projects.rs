@@ -39,7 +39,7 @@ use tracing::debug;
 /// paths now converge on the same node rather than creating two
 /// separate, non-converging JiraProject nodes for the same real
 /// project.
-fn build_ops_for_projects(projects: &[JiraProject]) -> GraphOp {
+pub(crate) fn build_ops_for_projects(projects: &[JiraProject]) -> GraphOp {
     let items = projects
         .iter()
         .map(|project| {

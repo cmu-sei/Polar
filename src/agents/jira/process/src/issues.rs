@@ -277,7 +277,7 @@ fn system_field_ops(ops: &mut Vec<GraphOp>, issue: &JiraIssue) {
 /// despite it being genuinely complex, hand-written, and never
 /// verified against real Jira data by anyone still working on this
 /// codebase.
-fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
+pub(crate) fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
     let mut ops: Vec<GraphOp> = Vec::new();
     let mut issue_props: Vec<Property> = Vec::new();
 

@@ -47,6 +47,8 @@ regex = "1"
 lazy_static = "1"
 
 [dev-dependencies]
+# The write path measured and tested against a real Neo4j (write_bench.rs).
+polar-test-graph.workspace = true
 proptest.workspace = true
 
 [[bin]]

@@ -29,5 +29,7 @@ pub mod issues;
 pub mod projects;
 pub mod supervisor;
 pub mod users;
+#[cfg(test)]
+mod write_bench;
 
 pub const BROKER_CLIENT_NAME: &str = "jira-processor";
