@@ -81,6 +81,7 @@ members = [
     "polar-operator/common",
     "polar-operator/operator",
     "polar-operator/processor",
+    "polar-cli",
     "resolver",
     "build-processor",
     "polar-scheduler/common",

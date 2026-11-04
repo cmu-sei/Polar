@@ -5900,6 +5900,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-cli"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "k8s-openapi",
+ "kube",
+ "polar-operator-common",
+ "rand 0.10.3",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "x509-parser",
+]
+
+[[package]]
 name = "polar-crypto"
 version = "1.0.0"
 dependencies = [
