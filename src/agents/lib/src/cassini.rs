@@ -508,6 +508,185 @@ impl CassiniClient for TcpClient {
     }
 }
 
+// A `CassiniClient` for test harnesses that exercise anything bound against `&dyn CassiniClient` (a projection, an
+// event publisher) without a real broker, actor supervision, or `TCPClientConfig`: it performs no I/O, and records
+// what was called, in order, for assertion. (cmu-sei/Polar issue 221, 3c3a4b7.)
+
+use std::sync::Mutex;
+
+/// One recorded call to the mock. Kept flat (an enum, not a per-method Vec) so a test asserting "these calls happened,
+/// in this order" does not have to interleave several lists back into one timeline by hand.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordedCall {
+    Register,
+    Publish { topic: String, payload: Vec<u8> },
+    Subscribe { topic: String },
+    Unsubscribe { topic: String },
+    Control,
+    Disconnect,
+    ListSessions,
+    ListTopics,
+}
+
+/// A `CassiniClient` that performs no I/O. Every method succeeds immediately with a fixed value and records the call.
+/// Interior mutability (`Mutex`) so it is `Send + Sync`, as the trait requires.
+///
+/// It does not simulate broker failure modes. A test that needs a specific `CassiniClientError` builds it with
+/// [`MockCassiniClient::failing_with`].
+#[derive(Default)]
+pub struct MockCassiniClient {
+    calls: Mutex<Vec<RecordedCall>>,
+    fail_with: Option<CassiniClientError>,
+}
+
+impl MockCassiniClient {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every call returns this error instead of succeeding. Calls are still recorded before the error is returned, so
+    /// "did it attempt the right call" and "did it handle the failure" can be asserted from one run.
+    pub fn failing_with(err: CassiniClientError) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            fail_with: Some(err),
+        }
+    }
+
+    /// Every call made so far, in order.
+    pub fn calls(&self) -> Vec<RecordedCall> {
+        self.calls.lock().expect("mock mutex poisoned").clone()
+    }
+
+    /// The topics published to, in order, ignoring any other traffic between them.
+    pub fn published_topics(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                RecordedCall::Publish { topic, .. } => Some(topic),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn record(&self, call: RecordedCall) {
+        self.calls.lock().expect("mock mutex poisoned").push(call);
+    }
+
+    fn maybe_fail(&self) -> Result<(), CassiniClientError> {
+        match &self.fail_with {
+            Some(err) => Err(clone_error(err)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// `CassiniClientError` is not `Clone`; rebuilt by matching rather than changing the type for the sake of a mock.
+fn clone_error(err: &CassiniClientError) -> CassiniClientError {
+    match err {
+        CassiniClientError::NotRegistered => CassiniClientError::NotRegistered,
+        CassiniClientError::Disconnected => CassiniClientError::Disconnected,
+        CassiniClientError::Serialization(s) => CassiniClientError::Serialization(s.clone()),
+        CassiniClientError::BrokerRejected(s) => CassiniClientError::BrokerRejected(s.clone()),
+        CassiniClientError::Timeout => CassiniClientError::Timeout,
+        CassiniClientError::BrokerUnavailable => CassiniClientError::BrokerUnavailable,
+        CassiniClientError::TooLarge { bytes, max } => CassiniClientError::TooLarge {
+            bytes: *bytes,
+            max: *max,
+        },
+        CassiniClientError::Busy => CassiniClientError::Busy,
+        CassiniClientError::BufferFull => CassiniClientError::BufferFull,
+    }
+}
+
+impl CassiniClient for MockCassiniClient {
+    fn register(&self) -> Result<String, CassiniClientError> {
+        self.record(RecordedCall::Register);
+        self.maybe_fail()?;
+        Ok("mock-registration-id".to_string())
+    }
+
+    fn publish(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+        self.record(RecordedCall::Publish {
+            topic: req.topic,
+            payload: req.payload,
+        });
+        self.maybe_fail()
+    }
+
+    fn subscribe(&self, req: SubscribeRequest) -> Result<(), CassiniClientError> {
+        self.record(RecordedCall::Subscribe { topic: req.topic });
+        self.maybe_fail()
+    }
+
+    fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<(), CassiniClientError> {
+        self.record(RecordedCall::Unsubscribe { topic: req.topic });
+        self.maybe_fail()
+    }
+
+    fn control(&self, _req: ControlRequest) -> Result<(), CassiniClientError> {
+        self.record(RecordedCall::Control);
+        self.maybe_fail()
+    }
+
+    fn disconnect(&self, _trace_ctx: Option<WireTraceCtx>) -> Result<(), CassiniClientError> {
+        self.record(RecordedCall::Disconnect);
+        self.maybe_fail()
+    }
+
+    fn list_sessions(
+        &self,
+        _trace_ctx: Option<WireTraceCtx>,
+    ) -> Result<Vec<String>, CassiniClientError> {
+        self.record(RecordedCall::ListSessions);
+        self.maybe_fail()?;
+        Ok(Vec::new())
+    }
+
+    fn list_topics(
+        &self,
+        _trace_ctx: Option<WireTraceCtx>,
+    ) -> Result<Vec<String>, CassiniClientError> {
+        self.record(RecordedCall::ListTopics);
+        self.maybe_fail()?;
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+
+    fn publish_to(topic: &str) -> PublishRequest {
+        PublishRequest {
+            topic: topic.into(),
+            trace_ctx: None,
+            payload: b"x".to_vec(),
+            offline_behavior: Default::default(),
+            share_identity: true,
+        }
+    }
+
+    #[test]
+    fn records_publish_calls_in_order() {
+        let mock = MockCassiniClient::new();
+        mock.publish(publish_to("a")).unwrap();
+        mock.publish(publish_to("b")).unwrap();
+        assert_eq!(
+            mock.published_topics(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn failing_client_still_records_the_attempt() {
+        let mock = MockCassiniClient::failing_with(CassiniClientError::BrokerUnavailable);
+        let result = mock.publish(publish_to("a"));
+        assert!(matches!(result, Err(CassiniClientError::BrokerUnavailable)));
+        assert_eq!(mock.published_topics(), vec!["a".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -78,6 +78,9 @@ members = [
     "polar-policy",
     "polar-router",
     "polar-test-graph",
+    "polar-operator/common",
+    "polar-operator/operator",
+    "polar-operator/processor",
     "resolver",
     "build-processor",
     "polar-scheduler/common",
@@ -217,6 +220,7 @@ polar-policy = { path = "polar-policy" }
 polar-agent-builder = { path = "polar-agent-builder" }
 polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
+polar-operator-common = { path = "polar-operator/common" }
 soft-state-common = { path = "soft-state/common" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}

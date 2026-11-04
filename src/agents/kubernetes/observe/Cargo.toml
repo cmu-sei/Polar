@@ -32,6 +32,7 @@ cassini-types.workspace = true
 futures.workspace = true
 k8s-openapi = { workspace = true }
 kube-common.workspace = true
+polar-operator-common.workspace = true
 kube.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true

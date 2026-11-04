@@ -49,6 +49,7 @@ use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage, Subscription,
 };
+use polar_operator_common::PolarAgent;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
@@ -300,6 +301,9 @@ impl ClusterConsumerSupervisor {
                         graph_controller,
                         tcp_client,
                     )?,
+                    polar_operator_common::KIND => {
+                        Self::handle_event::<PolarAgent>(ev, cache, graph_controller, tcp_client)?
+                    }
                     _ => warn!("Unexpected resource type {}", ev.kind),
                 }
             }

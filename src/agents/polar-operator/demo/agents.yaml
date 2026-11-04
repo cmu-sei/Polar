@@ -1,0 +1,54 @@
+# Two services that follow the agent contract without being Polar agents: plain busybox
+# shell. The contract is only this: never end with 0, say why you ended in
+# /dev/termination-log, and drain within your budget on SIGTERM.
+#
+#   kubectl apply -f src/agents/polar-operator/demo/agents.yaml
+#   kubectl get pagent -n polar-demo -w
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: polar-demo
+---
+# Runs for LIFETIME seconds, then asks to be replaced, the way an agent rejuvenates when its
+# certificate nears expiry. On SIGTERM it drains and says so.
+apiVersion: polar.sei.cmu.edu/v1alpha1
+kind: PolarAgent
+metadata:
+  name: steady
+  namespace: polar-demo
+spec:
+  image: busybox:1.37
+  needs: [cassini, tracing]
+  shutdownBudgetSecs: 5
+  env:
+    - { name: LIFETIME, value: "45" }
+    - { name: GREETING, value: "hello" }
+  command: [sh, -c]
+  args:
+    - |
+      echo "$GREETING from $POLAR_AGENT_NAME: provided [$POLAR_CAPABILITIES], budget ${POLAR_SHUTDOWN_BUDGET_SECS}s"
+      trap 'echo "SIGTERM: draining"; sleep 2; echo "shutdown: SIGTERM, drained in 2s" > /dev/termination-log; exit 1' TERM
+      i=0
+      while [ "$i" -lt "$LIFETIME" ]; do sleep 1; i=$((i+1)); done
+      echo "rejuvenating: certificate within its renewal window" > /dev/termination-log
+      exit 1
+---
+# Refuses to start, the way a builder agent does when the deployment does not provide a
+# capability its code requires. It backs off, then is held.
+apiVersion: polar.sei.cmu.edu/v1alpha1
+kind: PolarAgent
+metadata:
+  name: refuses
+  namespace: polar-demo
+spec:
+  image: busybox:1.37
+  needs: [cassini]
+  shutdownBudgetSecs: 5
+  command: [sh, -c]
+  args:
+    - |
+      case ",$POLAR_CAPABILITIES," in
+        *,graph-write,*) echo "has graph-write; running"; while true; do sleep 1; done ;;
+      esac
+      echo "refused to start: requires graph-write, the deployment provides [$POLAR_CAPABILITIES]" | tee /dev/termination-log
+      exit 1

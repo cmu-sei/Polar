@@ -48,7 +48,8 @@ use tracing::{instrument, trace};
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, NodeWatcher,
-    OciRepositoryWatcher, TCP_CLIENT_NAME, WatcherMsg, emit_event, impl_namespaced_watcher,
+    OciRepositoryWatcher, PolarAgentWatcher, TCP_CLIENT_NAME, WatcherMsg, emit_event,
+    impl_namespaced_watcher,
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
@@ -115,6 +116,8 @@ pub struct ClusterObserverSupervisorState {
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     /// Watches Nodes cluster-wide.
     node_watcher: Option<Watcher>,
+    /// Watches the operator's PolarAgent resources cluster-wide.
+    polar_agent_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
     /// Watches Flux OCIRepository resources cluster-wide.
     oci_repository_watcher: Option<Watcher>,
@@ -160,6 +163,7 @@ impl ClusterObserverSupervisor {
                     infrastructure,
                     namespace_watcher: None,
                     node_watcher: None,
+                    polar_agent_watcher: None,
                     oci_repository_watcher: None,
                     kustomization_watcher: None,
                 })
@@ -311,6 +315,9 @@ impl Actor for ClusterObserverSupervisor {
                 if let Some(w) = state.kustomization_watcher.take() {
                     w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
                 }
+                if let Some(w) = state.polar_agent_watcher.take() {
+                    w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
+                }
                 if let Some(w) = state.node_watcher.take() {
                     w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
                 }
@@ -402,6 +409,27 @@ impl Actor for ClusterObserverSupervisor {
                         debug!(
                             "Kustomization watcher already running; skipping respawn on reconnect"
                         );
+                    }
+
+                    if state.polar_agent_watcher.is_none() {
+                        let agent_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: polar_operator_common::KIND,
+                            cluster_uid: state.cluster_uid.clone(),
+                        };
+
+                        let (agent_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.polar.agents".into()),
+                            PolarAgentWatcher,
+                            agent_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
+
+                        state.polar_agent_watcher = Some(agent_watcher);
+                    } else {
+                        debug!("PolarAgent watcher already running; skipping respawn on reconnect");
                     }
 
                     if state.node_watcher.is_none() {

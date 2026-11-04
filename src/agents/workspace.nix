@@ -259,6 +259,11 @@ let
       crateArgs = individualCrateArgs;
     };
 
+    polarOperator = import ./polar-operator/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
+
     polarCustody = import ./polar-custody/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
@@ -270,5 +275,5 @@ let
     };
 in
 {
-        inherit scudo workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent softState buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarCustody polarTools healthcheck credentialsAgent secretHarness;
+        inherit scudo workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent softState buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarOperator polarCustody polarTools healthcheck credentialsAgent secretHarness;
 }

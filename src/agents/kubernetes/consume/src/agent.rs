@@ -84,6 +84,14 @@ impl PolarAgent for KubeConsumer {
         GraphDecl::owns("KubernetesNode", "the nodes pods run on"),
         GraphDecl::owns("KubernetesNodeState", "each state a node was seen in"),
         GraphDecl::owns("KubernetesCluster", "each cluster an observer announced"),
+        GraphDecl::owns(
+            "KubernetesPolarAgent",
+            "the PolarAgent resources the operator keeps, one per deployed agent",
+        ),
+        GraphDecl::owns(
+            "KubernetesPolarAgentState",
+            "each state a PolarAgent resource was seen in",
+        ),
         GraphDecl::owns("Namespace", "the namespaces, by cluster"),
         GraphDecl::owns("NamespaceState", "each state a namespace was seen in"),
         GraphDecl::owns("FluxOCIRepository", "Flux's OCI repositories"),

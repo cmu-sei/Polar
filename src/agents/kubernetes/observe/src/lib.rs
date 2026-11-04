@@ -543,3 +543,13 @@ impl_global_watcher!(
     resource = Kustomization,
     kind = KIND_KUSTOMIZATION
 );
+
+// ---- Polar operator ----
+//
+// PolarAgent resources across every namespace, like the Flux watchers: the operator's CRD is optional, so a cluster
+// without it gets a warning, not a crash.
+impl_global_watcher!(
+    PolarAgentWatcher,
+    resource = polar_operator_common::PolarAgent,
+    kind = polar_operator_common::KIND
+);
