@@ -46,3 +46,5 @@ oci-client.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+testcontainers.workspace = true
+testcontainers-modules.workspace = true

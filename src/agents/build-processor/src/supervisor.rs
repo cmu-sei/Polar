@@ -21,18 +21,15 @@
    DM26-0670
 */
 
-use crate::{
-    build::{BuildActor, BuildActorArgs},
-    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
-};
+use crate::project;
 use cassini_types::{ClientEvent, WireTraceCtx};
-use neo4rs::Graph;
+use chrono::Utc;
 use polar::{
     BUILD_EVENTS_TOPIC, BUILD_PROCESSOR_NAME, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError,
     SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
     get_neo_config,
-    graph::controller::{GraphController, GraphControllerActor, GraphSignal},
+    graph::controller::{GraphController, GraphControllerActor, GraphControllerMsg, GraphSignal},
     health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage},
 };
 use ractor::concurrency::Duration;
@@ -46,35 +43,36 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 // ── State ──────────────────────────────────────────────────────────────────────
 
 pub struct BuildProcessorState {
-    pub graph: Graph,
     pub broker_client: Arc<dyn CassiniClient>,
-    /// Graph controller for execution lifecycle projection (BuildJob, BuildStage, etc.)
+    /// Serializes every graph write. Spawned once the broker client registers;
+    /// None until then, and events arriving earlier are dropped (the broker
+    /// log is the source of truth).
     pub graph_controller: Option<GraphController>,
-    /// Linker actor for artifact domain projection (Sbom, Package, ContainerImage, etc.)
-    pub linker: Option<ActorRef<ProvenanceEvent>>,
-    /// Linker actor for artifact domain projection (Sbom, Package, ContainerImage, etc.)
-    pub build_handler: Option<ActorRef<ProvenanceEvent>>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
 
 // ── Supervisor ─────────────────────────────────────────────────────────────────
 
-/// Supervisor for the unified build processor agent.
+/// Supervisor for the build processor: the single writer of build, artifact,
+/// finding and registry facts into the graph.
 ///
-/// Owns the full pipeline event projection — both build execution lifecycle
-/// and artifact provenance — in a single subscription loop. All CI systems
-/// and observer agents publish canonical [`ProvenanceEvent`] instances to
-/// the broker; this supervisor deserializes and dispatches them.
+/// Every agent publishes canonical [`ProvenanceEvent`]s to the broker. This
+/// supervisor decodes each one, turns it into graph operations with
+/// [`project::project`] (pure, see `project/`), and sends those operations in
+/// order to the graph controller.
 ///
 /// ## Actor tree
 ///
 /// ```text
 /// BuildProcessorSupervisor
-///   ├── TcpClient          (Cassini broker connection)
-///   ├── GraphControllerActor (Neo4j writes for execution lifecycle events)
-///   └── ProvenanceLinker   (Neo4j writes for artifact domain events)
+///   ├── TcpClient             (Cassini broker connection)
+///   └── GraphControllerActor  (serializes every Neo4j write)
 /// ```
+///
+/// There are no per-domain projector actors. Projection is stateless and every
+/// write is an idempotent MERGE, so one mailbox costs nothing in throughput,
+/// keeps each producer's events in order, and leaves exactly one dispatch.
 ///
 /// ## Deserialization
 ///
@@ -126,7 +124,10 @@ impl Actor for BuildProcessorSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let graph = neo4rs::Graph::connect(get_neo_config()?)?;
+        // The graph controller loads its own connection config; loading it
+        // here as well fails startup fast when the graph env is missing,
+        // rather than at the first broker registration.
+        get_neo_config()?;
 
         let broker_client = Arc::new(
             TcpClient::spawn(
@@ -138,11 +139,8 @@ impl Actor for BuildProcessorSupervisor {
         );
 
         Ok(BuildProcessorState {
-            graph,
             broker_client,
             graph_controller: None,
-            linker: None,
-            build_handler: None,
             healthcheck,
             draining: false,
         })
@@ -180,35 +178,8 @@ impl Actor for BuildProcessorSupervisor {
                     )
                     .await?;
 
-                    state.graph_controller = Some(controller.clone());
+                    state.graph_controller = Some(controller);
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-
-                    // ── Build handler ───────────────────────────────────────────
-                    let build_handler = polar::spawn_linked_unless_running(
-                        &format!("{BUILD_PROCESSOR_NAME}.build_handler"),
-                        BuildActor,
-                        BuildActorArgs {
-                            graph_controller: controller.clone(),
-                        },
-                        myself.clone().into(),
-                    )
-                    .await?;
-
-                    state.build_handler = Some(build_handler);
-
-                    // ── Provenance linker ──────────────────────────────────────
-                    // Owns Neo4j writes for artifact domain events.
-                    let linker = polar::spawn_linked_unless_running(
-                        &format!("{BUILD_PROCESSOR_NAME}.linker"),
-                        ProvenanceLinker,
-                        ProvenanceLinkerArgs {
-                            compiler: controller,
-                        },
-                        myself.clone().into(),
-                    )
-                    .await?;
-
-                    state.linker = Some(linker);
 
                     // ── Topic subscriptions ────────────────────────────────────
                     // BUILD_EVENTS_TOPIC: canonical ProvenanceEvent stream from
@@ -325,8 +296,8 @@ impl Actor for BuildProcessorSupervisor {
             SupervisionEvent::ActorFailed(cell, e) => {
                 let actor_name = cell.get_name().unwrap_or_default();
                 error!("child actor failed: {:?} error: {:?}", actor_name, e);
-                // TODO: implement selective restart — graph controller and linker
-                // should restart on failure; broker client failure should stop the agent.
+                // TODO: implement selective restart — graph controller should
+                // restart on failure; broker client failure should stop the agent.
                 if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
                     state.draining = true;
                     warn!("entering drain window before exit ({actor_name} failed)");
@@ -379,72 +350,25 @@ impl BuildProcessorSupervisor {
         Self::dispatch(event, state);
     }
 
-    /// Route a deserialized [`ProvenanceEvent`] to the correct handler.
-    ///
-    /// Execution lifecycle events are projected inline via `project_event` —
-    /// they need the graph controller and the build_id from the event itself.
-    ///
-    /// Artifact domain events are forwarded to the linker actor, which owns
-    /// the artifact graph projection logic.
+    /// Project the event and send its graph operations, in order, to the
+    /// graph controller. Routing lives in [`project::project`] alone.
     fn dispatch(event: ProvenanceEvent, state: &mut BuildProcessorState) {
-        match &event {
-            // ── Execution lifecycle ────────────────────────────────────────────
-            // Projected inline — build_id is on the variant, graph controller
-            // is in state. No actor hop needed.
-            ProvenanceEvent::ExecutionStarted { .. }
-            | ProvenanceEvent::StageStarted { .. }
-            | ProvenanceEvent::StageCompleted { .. }
-            | ProvenanceEvent::ExecutionCompleted { .. }
-            | ProvenanceEvent::ExecutionFailed { .. }
-            | ProvenanceEvent::ExecutionCancelled { .. } => {
-                let Some(handler) = &state.build_handler else {
-                    error!("build handler not ready — dropping lifecycle event");
-                    return;
-                };
-                if let Err(e) = handler.send_message(event) {
-                    error!(error = %e, "failed to forward event to linker");
-                }
+        let Some(controller) = &state.graph_controller else {
+            error!("graph controller not ready — dropping event");
+            return;
+        };
+        let ops = match project::project(event, &Utc::now().to_rfc3339()) {
+            Ok(ops) => ops,
+            Err(e) => {
+                warn!(error = %e, "event could not be projected — dropping it");
+                return;
             }
-
-            // ── Artifact domain ────────────────────────────────────────────────
-            // Forwarded to the linker actor which owns these handlers.
-            ProvenanceEvent::ArtifactProduced(_)
-            | ProvenanceEvent::SbomAnalyzed(_)
-            | ProvenanceEvent::BinaryLinked(_)
-            | ProvenanceEvent::ContainerImageCreated(_)
-            | ProvenanceEvent::OCIArtifactResolved { .. }
-            | ProvenanceEvent::OCIArtifactCreated { .. }
-            | ProvenanceEvent::ImageRefResolved { .. }
-            | ProvenanceEvent::SecurityAdvisoryFound { .. }
-            | ProvenanceEvent::PackageStatusFound { .. }
-            | ProvenanceEvent::OCIRegistryDiscovered { .. } => {
-                let Some(linker) = &state.linker else {
-                    error!("linker not ready — dropping artifact event");
-                    return;
-                };
-                if let Err(e) = linker.send_message(event) {
-                    error!(error = %e, "failed to forward event to linker");
-                }
+        };
+        for op in ops {
+            if let Err(e) = controller.cast(GraphControllerMsg::Op(op)) {
+                error!(error = %e, "failed to send graph operation to the controller");
+                return;
             }
-
-            // ── Discovery events ───────────────────────────────────────────────
-            // These trigger the resolver — log and discard here, the resolver
-            // subscribes to PROVENANCE_DISCOVERY_TOPIC independently.
-            ProvenanceEvent::OCIArtifactDiscovered { uri, .. } => {
-                debug!("OCI artifact discovered: {uri} — resolver will handle");
-            }
-            ProvenanceEvent::ArtifactDiscovered { name, .. } => {
-                debug!("artifact discovered: {name} — no handler yet");
-            }
-
-            // ── Source analysis ────────────────────────────────────────────────
-            // The events exist in the shared vocabulary; this processor does not project them yet.
-            ProvenanceEvent::PackageAnalysisStarted(_)
-            | ProvenanceEvent::AnalysisFindingReported(_) => {
-                debug!("source analysis event — no projection yet");
-            }
-
-            ProvenanceEvent::Ignored => {}
         }
     }
 }
