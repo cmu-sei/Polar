@@ -437,6 +437,13 @@ impl BuildProcessorSupervisor {
                 debug!("artifact discovered: {name} — no handler yet");
             }
 
+            // ── Source analysis ────────────────────────────────────────────────
+            // The events exist in the shared vocabulary; this processor does not project them yet.
+            ProvenanceEvent::PackageAnalysisStarted(_)
+            | ProvenanceEvent::AnalysisFindingReported(_) => {
+                debug!("source analysis event — no projection yet");
+            }
+
             ProvenanceEvent::Ignored => {}
         }
     }

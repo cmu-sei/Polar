@@ -21,6 +21,7 @@
    DM26-0670
 */
 
+pub mod agents;
 pub mod builds;
 pub mod git;
 pub mod gitlab;

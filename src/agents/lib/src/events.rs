@@ -174,6 +174,12 @@ pub struct PackageRef {
     /// trusting this field for anything load-bearing involving your own
     /// crates.
     pub source: Option<String>,
+    /// Lowercase hex sha256 of the published package archive, from the SBOM
+    /// component's SHA-256 hash (for cargo, the Cargo.lock `checksum`). This
+    /// is the content pin an analysis request needs; None for packages with
+    /// no published archive (path and git dependencies).
+    #[serde(default)]
+    pub archive_sha256: Option<String>,
 }
 
 /// A dependency edge from the CycloneDX `dependencies` array.
@@ -214,6 +220,50 @@ pub struct SbomGraphFragment {
     pub components: Vec<PackageRef>,
     /// Dependency tree edges from the CycloneDX `dependencies` array.
     pub edges: Vec<DependencyEdge>,
+}
+
+/// Payload for [`ProvenanceEvent::PackageAnalysisStarted`].
+///
+/// Projects as `(BuildJob)-[:ANALYZED]->(Package)`. Whether a package has been
+/// analyzed by a given analyzer is then a graph query — which is what lets the
+/// graph, rather than the orchestrator, hold the record of past runs.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct PackageAnalysisStartedPayload {
+    pub build_id: String,
+    /// Package URL of the analyzed package. Join key to the `Package` node.
+    pub purl: String,
+    /// Lowercase hex sha256 of the archive the analyzer ran against, verified
+    /// by the init container before extraction.
+    pub archive_sha256: String,
+    /// Fully qualified analyzer image reference, pinned by digest. A different
+    /// digest is a different analyzer for the purposes of "has this been analyzed".
+    pub analyzer_image: String,
+}
+
+/// Payload for [`ProvenanceEvent::AnalysisFindingReported`].
+///
+/// Deliberately carries no package reference: the finding belongs to a run
+/// (`build_id`), and the run's `ANALYZED` edge says what was analyzed. The
+/// analyzer cannot misattribute a finding to a package it was not given.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct AnalysisFindingPayload {
+    pub build_id: String,
+    /// Name of the check that fired, stable across runs, e.g. "build-script".
+    pub rule_id: String,
+    /// Human-readable description of this specific finding.
+    pub message: String,
+    /// Free string; analyzers differ in severity vocabulary.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// Path relative to the workspace root, when the finding has a location.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// Payload for a raw pipeline artifact that was produced during a build.
@@ -452,6 +502,22 @@ pub enum ProvenanceEvent {
     /// See [`ContainerImageCreatedPayload`] for field semantics.
     ContainerImageCreated(ContainerImageCreatedPayload),
 
+    // ── Source analysis ────────────────────────────────────────────────────────
+    // A source analysis run is a build execution like any other: it has a
+    // BuildJob node and the usual lifecycle events, so its outcome and backend
+    // linkage come from the execution projection. These variants add what is
+    // specific to analysis: what was analyzed, by which analyzer, and what it
+    // found.
+    /// The orchestrator started an analyzer against a published package.
+    /// Emitted by the orchestrator, not the analyzer — the orchestrator is the
+    /// only party that authoritatively knows which image ran against which
+    /// verified archive. See [`PackageAnalysisStartedPayload`].
+    PackageAnalysisStarted(PackageAnalysisStartedPayload),
+
+    /// An analyzer reported a finding. Emitted by the analyzer container.
+    /// See [`AnalysisFindingPayload`].
+    AnalysisFindingReported(AnalysisFindingPayload),
+
     // ── Discovery events ───────────────────────────────────────────────────────
     // Emitted by observer agents (GitLab, k8s, registry scanners).
     // Consumed by the resolver, which verifies claims and emits resolution events.
@@ -522,4 +588,130 @@ pub enum ProvenanceEvent {
         digest: String,
         media_type: String,
     },
+}
+
+// ── Agent lifecycle ────────────────────────────────────────────────────────────
+
+/// Where an agent is deployed: the object on a deployment target that declares it.
+///
+/// The agent itself is only its name (what its code declares), so that nothing about
+/// a target is said of the agent. Each target is a variant, as in [`DiscoverySourceRef`].
+#[derive(
+    Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeploymentRef {
+    /// A `PolarAgent` resource. `cluster_uid` is the UID of the cluster's kube-system
+    /// namespace (issue #236), as the kube agents scope every node they write.
+    Kubernetes {
+        cluster_uid: String,
+        namespace: String,
+        name: String,
+        uid: String,
+    },
+    // Future targets as they are added, e.g. NomadJob { job_id, namespace }.
+}
+
+/// One run of a deployment, on its target.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstanceRef {
+    KubernetesPod {
+        cluster_uid: String,
+        pod_uid: String,
+        pod_name: String,
+    },
+}
+
+/// What an operator observes about the deployments it keeps alive, published on
+/// [`crate::topics::AGENT_LIFECYCLE_EVENTS`] and projected by the agent processor.
+///
+/// Every variant names the agent (by the name its code declares) and the deployment,
+/// so a processor that joins late still ties whatever it receives to both. Times are
+/// milliseconds since the Unix epoch, UTC, as the kube consumer writes them.
+///
+/// Capabilities are deliberately absent: a deployment's configuration saying one is
+/// provided asserts nothing about whether it is present. The agent judges that itself
+/// when it starts, and a refusal shows up here as an [`InstanceEnded`](Self::InstanceEnded).
+///
+/// The operator starts instances; configuring them is the scheduler's. An instance's
+/// `identity` is what the scheduler sees register, so the two can be joined.
+#[derive(
+    Clone, Debug, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentLifecycleEvent {
+    /// What the deployment declares. Sent when it changes, and once for every
+    /// deployment each time the operator starts or reconnects.
+    DeploymentDeclared {
+        agent: String,
+        deployment: DeploymentRef,
+        spec_hash: String,
+        image: String,
+        shutdown_budget_secs: u32,
+        /// The identity its instances run as: the name on their certificates.
+        identity: String,
+        observed_at: i64,
+    },
+
+    /// The operator's view of the deployment moved to another phase (`Running`,
+    /// `BackingOff`, `CrashLoop`, ...).
+    DeploymentPhaseChanged {
+        agent: String,
+        deployment: DeploymentRef,
+        phase: String,
+        message: Option<String>,
+        observed_at: i64,
+    },
+
+    /// An instance was started.
+    InstanceStarted {
+        agent: String,
+        deployment: DeploymentRef,
+        instance: InstanceRef,
+        /// The deployment's instance count when it started: 1 for its first.
+        number: u64,
+        spec_hash: String,
+        started_at: i64,
+    },
+
+    /// An instance ended, and how, as far as the target can tell.
+    InstanceEnded {
+        agent: String,
+        deployment: DeploymentRef,
+        /// `None` when the target no longer says which instance it was.
+        instance: Option<InstanceRef>,
+        /// `Exited`, `Completed`, `Killed`, `OomKilled` or `Lost`.
+        kind: String,
+        exit_code: i32,
+        /// The target's reason (`Error`, `OOMKilled`, `Evicted`, ...).
+        reason: String,
+        /// The instance's own account: its termination message, or its last log lines.
+        message: Option<String>,
+        ran_secs: i64,
+        finished_at: i64,
+    },
+}
+
+impl AgentLifecycleEvent {
+    /// The agent, by the name its code declares.
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::DeploymentDeclared { agent, .. }
+            | Self::DeploymentPhaseChanged { agent, .. }
+            | Self::InstanceStarted { agent, .. }
+            | Self::InstanceEnded { agent, .. } => agent,
+        }
+    }
+
+    pub fn deployment(&self) -> &DeploymentRef {
+        match self {
+            Self::DeploymentDeclared { deployment, .. }
+            | Self::DeploymentPhaseChanged { deployment, .. }
+            | Self::InstanceStarted { deployment, .. }
+            | Self::InstanceEnded { deployment, .. } => deployment,
+        }
+    }
 }

@@ -221,9 +221,19 @@ pub enum ArtifactNodeKey {
     OCIArtifact {
         digest: String, // sha256:...
     },
-    /// Content-addressed filesystem layer
+    /// A layer blob as a registry stores it, keyed by its *compressed* digest
+    /// (the manifest's layer descriptor). Written from resolver-fetched
+    /// manifests.
     OCILayer {
         digest: String, // sha256:...
+    },
+    /// A layer as the image config identifies it, keyed by its *uncompressed*
+    /// diff ID (`rootfs.diff_ids`) — what SBOM tools such as syft reference.
+    /// Distinct from `OCILayer`: the same layer has a different digest in each
+    /// space, so they must not share a label. Both hang off the image's
+    /// `OCIArtifact` with an `order`; layer i and diff ID i are the same layer.
+    OCILayerDiffId {
+        diff_id: String, // sha256:...
     },
     /// OCI config object
     OCIConfig {
@@ -299,6 +309,9 @@ impl GraphNodeKey for ArtifactNodeKey {
             Self::OCILayer { digest } => {
                 NodeIdentity::fixed(&["OCILayer"], vec![("digest", s(digest))])
             }
+            Self::OCILayerDiffId { diff_id } => {
+                NodeIdentity::fixed(&["OCILayerDiffId"], vec![("diff_id", s(diff_id))])
+            }
             Self::OCIConfig { digest, .. } => {
                 NodeIdentity::fixed(&["OCIConfig"], vec![("digest", s(digest))])
             }
@@ -339,6 +352,7 @@ impl NodeKeyVocabulary for ArtifactNodeKey {
             Self::ContainerImageRef { normalized: s() },
             Self::OCIArtifact { digest: s() },
             Self::OCILayer { digest: s() },
+            Self::OCILayerDiffId { diff_id: s() },
             Self::OCIConfig {
                 digest: s(),
                 os: s(),
@@ -366,6 +380,7 @@ impl NodeKeyVocabulary for ArtifactNodeKey {
                 | Self::ContainerImageRef { .. }
                 | Self::OCIArtifact { .. }
                 | Self::OCILayer { .. }
+                | Self::OCILayerDiffId { .. }
                 | Self::OCIConfig { .. }
                 | Self::Binary { .. }
                 | Self::Sbom { .. }
