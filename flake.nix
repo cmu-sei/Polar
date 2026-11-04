@@ -279,6 +279,8 @@
           secretHarnessIntruderImage = polarPkgs.secretHarness.intruderImage;
           polarInitImage = polarPkgs.polarInit.image;
           polarOperatorImage = polarPkgs.polarOperator.image;
+          buildOrchestratorImage = polarPkgs.buildOrchestrator.image;
+          buildOrchestratorObjectStoreImage = polarPkgs.buildOrchestrator.objectStoreImage;
           polarCustodyImage = polarPkgs.polarCustody.image;
 
           # ── ACE dashboard ────────────────────────────────────────────────────

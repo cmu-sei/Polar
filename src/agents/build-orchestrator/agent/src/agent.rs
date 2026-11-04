@@ -1,0 +1,183 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! build-orchestrator as an agent built on `polar-agent-builder`: the builder owns the broker connection, the
+//! certificate lifecycle, health and shutdown; this agent keeps the supervisor of builds.
+
+use crate::actors::supervisor::{OrchestratorSupervisor, SupervisorArguments};
+use crate::config::OrchestratorConfig;
+use crate::credentials::CREDENTIALS;
+use crate::mappings::MAPPINGS;
+use crate::settings::{BuildOrchestratorSettings, SECTION};
+use orchestrator_backend_k8s::backend::KubernetesBackend;
+use orchestrator_backend_k8s::job::{JobIdentity, JobOptions};
+use orchestrator_core::backend::BuildBackend;
+use orchestrator_core::types::subjects::BUILD_REQUESTS_TOPIC;
+use polar::BUILD_EVENTS_TOPIC;
+use polar::topics::GIT_REPOSITORY_EVENTS;
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
+use ractor::Actor;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub const AGENT_NAME: &str = "build-orchestrator";
+pub const SERVICE_NAME: &str = "polar.build-orchestrator";
+
+/// How long a drain may take. Jobs outlive the orchestrator, which finds them again by their labels, so
+/// the drain is only to stop taking requests and let a build in the middle of being submitted finish.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
+
+pub struct BuildOrchestrator;
+
+impl PolarAgent for BuildOrchestrator {
+    const NAME: &'static str = AGENT_NAME;
+    const PURPOSE: &'static str = "The authoritative builder: runs a repository's pipeline as a job against pinned source and reports what ran";
+    // It also creates the jobs and, for each, a service account and a secret; the deployment's Role is what
+    // says so. The capability is the token it asks the API server with. Encryption is for the credentials a
+    // repository's builds may be cloned with, which arrive sealed to this agent.
+    const NEEDS: &'static [Capability] = &[Capability::KubeApiRead, Capability::Encryption];
+    const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    // What Cassini lets it publish and subscribe to is written into its certificate from these (and from what the
+    // builder implies for a Cassini client), so a topic it uses and does not declare is refused.
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            GIT_REPOSITORY_EVENTS,
+            "the git observer reports that a ref of an observed repository moved, which builds it if a mapping names it",
+        ),
+        TopicDecl::subscribe(
+            BUILD_REQUESTS_TOPIC,
+            "a request to build a repository at a commit, from anything that may ask",
+        )
+        .waiting("nothing in the catalog requests builds yet; a build is started by hand, or by the analysis scheduler to come"),
+        TopicDecl::publish(
+            BUILD_EVENTS_TOPIC,
+            "what a build did: started, completed, and the provenance it reports itself",
+        )
+        .because(&[Cause::Topic(GIT_REPOSITORY_EVENTS), Cause::Topic(BUILD_REQUESTS_TOPIC)])
+        .waiting("the build processor reads it and is not yet an agent built on the builder, so the catalog cannot see it"),
+    ];
+    const SECTIONS: &'static [&'static polar_env::Section] = &[&SECTION];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
+        &[&MAPPINGS, &CREDENTIALS];
+    const HELP: Option<&'static str> = Some(
+        "build-orchestrator builds a repository when the git observer reports that a ref moved, or when a build request \
+         arrives on polar.orchestrator.builds.requests, if the `mappings` runtime section (a signed document) \
+         names the repository. Each build is a Kubernetes Job in the namespace of the configuration file; \
+         what the job is given is decided here, from the section, and never from the request. The `credentials` section \
+         (also signed, with each secret sealed to this agent) holds what a mapping may name for its builds to clone with.",
+    );
+
+    async fn start(configured: Configured) -> Result<(), StartError> {
+        configured.init_logging(SERVICE_NAME);
+
+        // The Kubernetes client is made before the broker's, and rustls will not choose between the providers
+        // the dependencies bring in. The fork's own client installs `ring`, so the same one.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let settings = BuildOrchestratorSettings::read(configured.config())
+            .map_err(|e| format!("could not read build-orchestrator's settings: {e}"))?;
+        let config = OrchestratorConfig::load_from(&settings.config_file)
+            .map_err(|e| format!("could not load {}: {e}", settings.config_file))?;
+
+        let backend: Arc<dyn BuildBackend> = match config.backend.driver.as_str() {
+            "kubernetes" => {
+                let k8s = config
+                    .backend
+                    .kubernetes
+                    .as_ref()
+                    .ok_or("the kubernetes backend is selected but not configured")?;
+                let mut options = JobOptions::new(k8s.namespace.clone());
+                options.ca_bundle_secret = k8s.ca_bundle_secret.clone();
+                options.workspace_size_limit = k8s.workspace_size_limit.clone();
+                options.image_pull_policy = k8s.image_pull_policy.clone();
+                options.keep_git = k8s.keep_git;
+                options.retention = config.retention();
+                options.identity = k8s
+                    .identity
+                    .as_deref()
+                    .map(JobIdentity::from_json)
+                    .transpose()
+                    .map_err(|e| {
+                        format!("the jobs' identity in the configuration does not read: {e}")
+                    })?;
+                options.accounts = k8s.accounts.clone();
+                if options.identity.is_none() {
+                    tracing::warn!(
+                        "jobs share one certificate: builds that overlap will supersede each other"
+                    );
+                } else if options.accounts.is_empty() {
+                    return Err("jobs are to have certificates but the configuration names no ServiceAccounts to run them as \
+                                (backend.kubernetes.accounts)"
+                        .into());
+                }
+                if let Some(r) = &k8s.resources {
+                    let d = &mut options.resources;
+                    for (field, value) in [
+                        (&mut d.cpu_limit, &r.cpu_limit),
+                        (&mut d.memory_limit, &r.memory_limit),
+                        (&mut d.cpu_request, &r.cpu_request),
+                        (&mut d.memory_request, &r.memory_request),
+                    ] {
+                        if let Some(v) = value {
+                            *field = v.clone();
+                        }
+                    }
+                }
+                tracing::info!(resources = ?options.resources, namespace = %k8s.namespace, "job options");
+                Arc::new(
+                    KubernetesBackend::new(options)
+                        .await
+                        .map_err(|e| format!("the Kubernetes backend did not start: {e}"))?,
+                )
+            }
+            other => return Err(format!("unsupported backend driver: {other}").into()),
+        };
+
+        crate::client::StorageClient::new(&config.storage)
+            .ensure_bucket()
+            .await;
+
+        let (_supervisor, handle) = Actor::spawn(
+            Some(format!("{SERVICE_NAME}.supervisor")),
+            OrchestratorSupervisor,
+            SupervisorArguments {
+                backend,
+                config: Arc::new(config),
+                configured,
+            },
+        )
+        .await
+        .map_err(|e| format!("the orchestrator's supervisor did not start: {e}"))?;
+        handle
+            .await
+            .map_err(|e| format!("the orchestrator's supervisor task failed: {e}"))?;
+        Err("the orchestrator's supervisor stopped".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    polar_agent_builder::polar_agent_tests!(BuildOrchestrator);
+}

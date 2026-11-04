@@ -82,6 +82,9 @@ members = [
     "polar-operator/operator",
     "polar-operator/processor",
     "polar-cli",
+    "build-orchestrator/agent",
+    "build-orchestrator/core",
+    "build-orchestrator/k8s",
     "resolver",
     "build-processor",
     "polar-scheduler/common",
@@ -108,6 +111,14 @@ name = "polar"
 rstest = "0.21"
 assert_matches = "1"
 anyhow = "1.0.102"
+# build-orchestrator's object store client. The SDK's default HTTPS client is rustls over aws-lc-rs, which the fork
+# does not use (ring only, static musl builds), so the default client is off and the agent gives it one over ring
+# (aws-smithy-http-client, rustls-ring).
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
+config = "0.14"
+http-body-util = "0.1.3"
+hyper = "1.9.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
@@ -222,6 +233,8 @@ polar-agent-builder = { path = "polar-agent-builder" }
 polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
 polar-operator-common = { path = "polar-operator/common" }
+orchestrator-core = { path = "build-orchestrator/core" }
+orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
 soft-state-common = { path = "soft-state/common" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
