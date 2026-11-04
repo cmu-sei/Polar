@@ -42,7 +42,10 @@ Two, built with nix (`workspace.nix`, `flake.nix`):
 ## Deploying
 
 `types/build-orchestrator.dhall` in the deployment library is the stage: the agent, its Role in the jobs' namespace, the
-store, and the secret that opens it. Blitz's plan includes it after the git agents.
+store, and the secret that opens it.
+Every build's pod runs as one ServiceAccount, `build-job`, a workload with many instances (`backend.kubernetes.account`): each
+pod has a certificate and a session of its own, naming the pod, and `max_concurrent_builds` is the only limit. A deployment that has
+not marked its workload can still give a fixed set (`backend.kubernetes.accounts`, one running job to each); the two are refused together. Blitz's plan includes it after the git agents.
 
 ## What it builds, and what it leaves
 

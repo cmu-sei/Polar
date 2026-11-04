@@ -213,6 +213,7 @@ stages:
                       },
                       "identity_scope_claim": null,
                       "instance_binding_claim": "kubernetes.io/pod/uid",
+                      "instance_name_claim": "kubernetes.io/pod/name",
                       "issuer": "https://kubernetes.default.svc.cluster.local",
                       "jwks_cache_ttl_max": {
                         "nanos": 0,
@@ -258,6 +259,8 @@ stages:
                 value: cassini-ip-svc.polar.svc.cluster.local:8080
               - name: CASSINI_SERVER_NAME
                 value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_CAPABILITIES
+                value: cassini
               - name: RUST_LOG
                 value: "info,cert_issuer=debug"
               - name: KUBERNETES_CA_CERT
@@ -378,6 +381,8 @@ stages:
                 value: /tmp/polar-health.json
               - name: POLAR_HEALTH_CERTS
                 value: /home/polar/certs/cert.pem
+              - name: POLAR_CAPABILITIES
+                value: ''
               - name: TLS_SERVER_CERT_CHAIN
                 value: /home/polar/certs/cert.pem
               - name: TLS_CA_CERT
@@ -585,6 +590,8 @@ stages:
                 value: /tmp/polar-health.json
               - name: POLAR_HEALTH_CERTS
                 value: /home/polar/certs/cert.pem
+              - name: POLAR_CAPABILITIES
+                value: cassini
               - name: CREDENTIALS_AGENT_CERT_ISSUER_URL
                 value: https://cert-issuer.polar.svc.cluster.local:8443
               - name: GRAPH_ENDPOINT
@@ -736,6 +743,8 @@ stages:
                 value: /tmp/polar-health.json
               - name: POLAR_HEALTH_CERTS
                 value: /home/polar/certs/cert.pem
+              - name: POLAR_CAPABILITIES
+                value: cassini
             fsGroup: 1000
             imagePullPolicy: IfNotPresent
             initContainers:
@@ -1007,6 +1016,8 @@ stages:
                 value: /home/polar/certs/cert.pem
               - name: POLAR_HEALTH_DEP_ENDPOINTS
                 value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: POLAR_CAPABILITIES
+                value: cassini
               - name: POLAR_GIT_SERVER_CERT
                 value: /home/polar/git-server/cert.pem
               - name: POLAR_GIT_SERVER_CA_CERT
@@ -1164,7 +1175,7 @@ stages:
         automountServiceAccountToken: false
         kind: ServiceAccount
         metadata:
-          name: polar-scheduler-processor
+          name: polar-scheduler
           namespace: polar
       - apiVersion: v1
         automountServiceAccountToken: false
@@ -1175,7 +1186,7 @@ stages:
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         kind: PolarAgent
         metadata:
-          name: polar-scheduler-processor
+          name: polar-scheduler
           namespace: polar
         spec:
           image: scheduler-processor:latest
@@ -1200,6 +1211,8 @@ stages:
                 value: /home/polar/certs/cert.pem
               - name: POLAR_HEALTH_DEP_ENDPOINTS
                 value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: POLAR_CAPABILITIES
+                value: "cassini,graph-write"
               - name: GRAPH_ENDPOINT
                 value: bolt://polar-db-svc.polar.svc.cluster.local:7687
               - name: GRAPH_DB
@@ -1350,6 +1363,8 @@ stages:
                 value: /home/polar/certs/cert.pem
               - name: POLAR_HEALTH_DEP_ENDPOINTS
                 value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: POLAR_CAPABILITIES
+                value: cassini
               - name: POLAR_SCHEDULER_REMOTE_URL
                 value: https://polar-git-server.polar.svc.cluster.local:8443/polar-schedules.git
               - name: POLAR_SCHEDULER_LOCAL_PATH
@@ -1445,7 +1460,7 @@ stages:
         equals: Running
         field: status.phase
         kind: PolarAgent
-        name: polar-scheduler-processor
+        name: polar-scheduler
         namespace: polar
         timeoutSecs: 300
       - apiVersion: polar.sei.cmu.edu/v1alpha1
