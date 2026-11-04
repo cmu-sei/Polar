@@ -423,10 +423,13 @@ The broker runs without the rest of Polar, as documented there and checked step 
   versions, so Flux could not see one change and they need tags or digests (solved by the image lock, stage 3a); and the git server's config document
   carries its default seed root, a `/nix/store/...-polar-git-server-seeds` path, so those manifests change with that
   image build. (An earlier scan seemed to miss the agents' Job images; the catalog writes the key quoted, `'image':`.)
-- **Open: `src/deploy/`.** Dead, but `scripts/pipeline/render-manifests.nu` renders its tree for Flux, and
-  `cyclops.yaml` (the removed build orchestrator, under `src/agents/build-orchestrator` in history) is its config;
-  a colleague's branch may bring cyclops back. Remove it with `scripts/polar-init.nu` and `scripts/setup-neo4j.sh`
-  once the Flux target replaces `render-manifests.nu`.
+- **`src/deploy/` stays where it is** (decided 2026-11-03; it was "Open: dead, remove it"). It is the Dhall deployment
+  library Blitz renders its deployment from (`polar render`, `polar plan`), and `port/public-polar-blitz-deploy` carries public
+  Polar's version of it forward (`docs/requests/public-polar-port.md`). It is not removed, moved or marked dead. What was
+  open stays open and is for when that branch is merged: `scripts/pipeline/render-manifests.nu` still renders the old tree
+  under `src/deploy/local` for Flux, and `local/conf/cyclops.yaml` is the old build orchestrator's config, which the branch
+  brings back as `src/agents/build-orchestrator`. `scripts/polar-init.nu` and `scripts/setup-neo4j.sh` were to go with the
+  tree and are not decided by this.
 
 ## Builder migration and catalog (ACTIVE, started 2026-10-10)
 
@@ -1328,7 +1331,7 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 
 - [ ] Docs still say `git-observer.polar...`
 - [ ] `cert-issuer/server/src/main.rs` module comment says "v1 omits TLS"
-- [ ] `src/deploy/` vs `infra/`: confirm `src/deploy/` is dead, then remove or mark
+- [ ] `src/deploy/` vs `infra/`: `src/deploy/` stays where it is (decided 2026-11-03: Blitz renders from it); what the two do about each other is for when `port/public-polar-blitz-deploy` is merged
 - [x] `DOCUMENTATION.md` pointed at `docs/devops.md`, which does not exist, and it said `nu infra/render.nu <target> --apply` (render no longer applies; `up.nu` does): fixed 2026-10-19, with its other dead pointers (`attestation_and_issuance.md`, `secrets-management.md`, two scripts), now pointing at `infra/INFRA.md` and `up.nu`
 - [ ] The empty `infra/secrets/` directory tree (from the first pipeline design) is unused; secrets are per target (`secrets.sops.yaml`, `secrets.nu`). Remove it
 - [ ] README Keycloak walkthrough: confirm the HTTPS curl works against the port-forward

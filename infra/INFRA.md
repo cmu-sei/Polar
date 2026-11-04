@@ -1195,7 +1195,7 @@ beside one that may still be alive), but it is an outage until someone acts.
 - **Only the kube agents declare capabilities in Rust.** Other agents still hard-code health arguments and Cassini/Neo4j endpoints; they move to the builder one pair at a time.
 - **`POLAR_CAPABILITIES` unset is a warning, not an error,** so an agent run outside the cluster still starts. A deployment that forgets to set it is therefore not caught by the builder; the catalog sets it for every workload it renders.
 - **The cluster domain drives catalog addresses,** but custom charts still hard-code `svc.cluster.local`, and `polar-init --cluster-domain` is not passed.
-- **`src/deploy/`** is the old system. Confirm it is dead and remove it, or mark it.
+- **`src/deploy/`** is the older system, and it stays where it is (decided 2026-11-03): it is the library Blitz renders its deployment from. How it and `infra/` relate is for when `port/public-polar-blitz-deploy` is merged.
 - **Resolving the workloads is not cached.** A render runs `resolve` twice per workload in separate processes (0.69 s a call, 0.22 s
   of it loading the script). Only the scaffold inside it, the hand-written charts and the catalog's Dhall are cached; see "The render cache".
 - **A first render is slow.** With nothing cached every Dhall render has to run (over a minute for `sandbox-local`); only repeats are fast.

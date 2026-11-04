@@ -72,8 +72,10 @@ Scudo, ring), and each commit names the Polar commits it carries.
   health in the graph) and needs a design conversation, not only a merge". It is carried because it was asked for, and it
   is not reconciled: it keeps agents alive by its own phases and back-off. `PolarAgent` is also the fork's builder trait;
   the resource is a different thing.
-- **`src/deploy` is carried although the fork means to remove it** (`remaining-work.md`, "`src/deploy/`: remove it once
-  nothing renders it"). Blitz renders its deployment from this library. It was written on 2026-10-29 to 31 and has not been
+- **`src/deploy` stays where it is** (decided 2026-11-03, recorded in `remaining-work.md` and `infra/INFRA.md` by this
+  branch; the entry that said to remove it is changed). Blitz renders its deployment from this library. `main` has since
+  reworded that entry ("`src/deploy/`: remove it once nothing renders it"), so the same change has to be made to
+  it when this branch is rebased; what the two systems do about each other is for the merge. It was written on 2026-10-29 to 31 and has not been
   checked against the fork's later work (pulled health, signed runtime sections). `scripts/pipeline/render-manifests.nu`
   still renders the old tree under `src/deploy/local` for Flux; that was not run against the merged library.
 - **aws-lc is not in the build.** The orchestrator's S3 client is `aws-sdk-s3` with its default client off and one over
@@ -121,5 +123,6 @@ Not run:
 - Polar's `src/fork` can go once this is reviewed. Blitz points at it in five places: `infra/README.md`,
   `infra/values/local.dhall`, `docs/ace-catch-up.md`, `docs/build-orchestrator-job-credentials.md` and
   `scripts/ci/README.md`.
-- To run the branch on the dev cluster it has to be replayed onto 1b82f624, as the fork's other fixes were (the broker
-  on `main` speaks Cassini protocol 2).
+- The dev cluster that ran the images built from 1b82f624 has been torn down (2026-11-03), so there is nothing to replay
+  the branch onto. Deployment testing is for a fresh cluster, on images built from this branch once it is rebased and pushed
+  (by the maintainer).
