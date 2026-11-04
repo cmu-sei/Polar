@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: example
+  namespace: example
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: example
+  namespace: example
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    polar.sei.cmu.edu/agent: example
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-data
+  namespace: example
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "1Gi"

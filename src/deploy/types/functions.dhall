@@ -104,6 +104,37 @@ let makeDeployment
           }
         }
 
+-- A single-instance Deployment in a namespace of the caller's choosing. `Recreate` stops the old pod
+-- before starting the new one, so two instances of one service (and two writers of one volume)
+-- never overlap during a rollout.
+let makeDeploymentIn
+    : Text → Text → kubernetes.PodSpec.Type → kubernetes.Deployment.Type
+    = λ(namespace : Text) →
+      λ(name : Text) →
+      λ(podSpec : kubernetes.PodSpec.Type) →
+        kubernetes.Deployment::{
+        , metadata = kubernetes.ObjectMeta::{
+          , name = Some name
+          , namespace = Some namespace
+          }
+        , spec = Some kubernetes.DeploymentSpec::{
+          , selector = kubernetes.LabelSelector::{
+            , matchLabels = Some (toMap { name })
+            }
+          , replicas = Some 1
+          , strategy = Some kubernetes.DeploymentStrategy::{
+            , type = Some "Recreate"
+            }
+          , template = kubernetes.PodTemplateSpec::{
+            , metadata = Some kubernetes.ObjectMeta::{
+              , name = Some name
+              , labels = Some [ { mapKey = "name", mapValue = name } ]
+              }
+            , spec = Some podSpec
+            }
+          }
+        }
+
 let ProxyVolume =
       λ(cert : Optional Text) →
         merge
@@ -335,6 +366,7 @@ You could argue they're the highest-value exports precisely because they encode 
 in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
+    , makeDeploymentIn
     , makeSaTokenVolume
     , DockerRegistrySecret
     , mkProxySecret

@@ -103,6 +103,34 @@ let certIssuerUrl : Text =
 
 let initScriptConfigMapName = "cert-init-script"
 
+-- -------------------------------------------------------------------------
+-- Custody daemon and the pinned CA
+-- -------------------------------------------------------------------------
+-- A pod's mTLS key can be the custody daemon's: a native sidecar that makes the key and signs over a socket, so
+-- the workload never holds it (ACE docs/architecture/key-custody.md, "Step 4"). These are the daemon's place in the
+-- pod, and the CA it judges certificates by, as the fork's catalog fixes them (ACE infra/resolve.nu, CUSTODY).
+let custody =
+      { sidecar = "polar-custody"
+      , volume = "polar-custody"
+      , dir = "/run/polar-custody"
+      , socket = "/run/polar-custody/custody.sock"
+      , daemonUid = 1001
+      }
+
+-- The cluster's CA certificate, public, which polar-init and the daemon verify what they are issued against. The
+-- plan makes the CA (`ca`, below) and a ConfigMap of this name, copied from it, in each namespace that has agents.
+let pinnedCa =
+      { configMap = "polar-ca"
+      , volume = "polar-ca"
+      , dir = "/etc/polar-ca"
+      , cert = "/etc/polar-ca/ca.pem"
+      }
+
+-- The cluster's CA, as the plan makes it: the Secret the issuer loads it from holds `ca.crt` and `ca.key` (the names
+-- the fork's issuer reads), and is the one place the key is. Ten years, since replacing a CA reissues every
+-- certificate in the cluster.
+let ca = { commonName = "Polar Internal CA", validityDays = 3650 }
+
 let saTokenVolumeName    = "sa-token"
 let certVolumeName       = "polar-certs"
 let initScriptVolumeName = "cert-init-script"
@@ -111,6 +139,9 @@ let certTokenExpiry      = 3600
 in  { polarNamespace
     , certDir
     , certPaths
+    , custody
+    , pinnedCa
+    , ca
     , saTokenDir
     , saTokenFile
     , cassiniHttpPort

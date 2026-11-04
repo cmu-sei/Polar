@@ -1,0 +1,1457 @@
+name: polar-core
+stages:
+  - configMaps: []
+    description: the PolarAgent CRD and the operator that keeps agents alive
+    installCrd: true
+    name: operator
+    objects:
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: polar
+      - apiVersion: v1
+        automountServiceAccountToken: true
+        kind: ServiceAccount
+        metadata:
+          name: polar-operator
+          namespace: polar
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: polar-operator
+        rules:
+          - apiGroups:
+              - polar.sei.cmu.edu
+            resources:
+              - polaragents
+            verbs:
+              - get
+              - list
+              - watch
+          - apiGroups:
+              - polar.sei.cmu.edu
+            resources:
+              - polaragents/status
+            verbs:
+              - get
+              - patch
+              - update
+          - apiGroups:
+              - ''
+            resources:
+              - pods
+            verbs:
+              - get
+              - list
+              - watch
+              - create
+              - delete
+          - apiGroups:
+              - ''
+            resources:
+              - serviceaccounts
+            verbs:
+              - get
+              - create
+          - apiGroups:
+              - ''
+            resources:
+              - namespaces
+            verbs:
+              - get
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: polar-operator
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: polar-operator
+        subjects:
+          - kind: ServiceAccount
+            name: polar-operator
+            namespace: polar
+      - apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: polar-operator
+          namespace: polar
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: polar-operator
+          strategy:
+            type: Recreate
+          template:
+            metadata:
+              labels:
+                app: polar-operator
+              name: polar-operator
+            spec:
+              containers:
+                - args:
+                    - run
+                  command:
+                    - polar-operator
+                  env: []
+                  image: polar-operator:latest
+                  imagePullPolicy: IfNotPresent
+                  name: operator
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                    readOnlyRootFilesystem: true
+                    runAsGroup: 65532
+                    runAsNonRoot: true
+                    runAsUser: 65532
+              serviceAccountName: polar-operator
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: apps/v1
+        equals: '1'
+        field: status.readyReplicas
+        kind: Deployment
+        name: polar-operator
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps:
+      - keys:
+          ca.pem:
+            copy:
+              key: ca.crt
+              name: cert-issuer-ca
+              namespace: polar
+        name: polar-ca
+        namespace: polar
+    description: "the cluster's CA, made once, with the certificate every namespace's agents verify against"
+    installCrd: false
+    name: ca
+    objects: []
+    optional: false
+    secrets:
+      - keys:
+          ca.crt:
+            ca:
+              commonName: Polar Internal CA
+              id: root
+              part: certificate
+              validityDays: 3650
+          ca.key:
+            ca:
+              commonName: Polar Internal CA
+              id: root
+              part: key
+              validityDays: 3650
+        name: cert-issuer-ca
+        namespace: polar
+    shared: true
+    waits: []
+  - configMaps: []
+    description: "the secrets, and the certificate issuer"
+    installCrd: false
+    name: issuer
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: true
+        kind: ServiceAccount
+        metadata:
+          name: cert-issuer
+          namespace: polar
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: cert-issuer-ca
+          namespace: polar
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: "1Gi"
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: cert-issuer
+          namespace: polar
+        spec:
+          ports:
+            - name: https
+              port: 8443
+              targetPort: 8443
+          selector:
+            polar.sei.cmu.edu/agent: cert-issuer
+          type: ClusterIP
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: cert-issuer
+          namespace: polar
+        spec:
+          image: cert-issuer:latest
+          needs: []
+          pod:
+            automountServiceAccountToken: true
+            env:
+              - name: CERT_ISSUER_ISSUERS
+                value: |
+                  [
+                    {
+                      "allowed_algorithms": [
+                        "RS256",
+                        "ES256",
+                        "EdDSA"
+                      ],
+                      "audience": [ "polar-cert-issuer.local" ],
+                      "identity_normalization": {
+                        "cluster_domain": "cluster.local",
+                        "strategy": "kubernetes_service_account"
+                      },
+                      "identity_scope_claim": null,
+                      "instance_binding_claim": "kubernetes.io/pod/uid",
+                      "issuer": "https://kubernetes.default.svc.cluster.local",
+                      "jwks_cache_ttl_max": {
+                        "nanos": 0,
+                        "secs": 3600
+                      },
+                      "jwks_cache_ttl_min": {
+                        "nanos": 0,
+                        "secs": 30
+                      },
+                      "jwks_uri": "https://kubernetes.default.svc.cluster.local/openid/v1/jwks",
+                      "workload_identity_claim": "sub"
+                    }
+                  ]
+              - name: CERT_ISSUER_CA_CERT_PATH
+                value: /home/polar/ca/ca.crt
+              - name: CERT_ISSUER_CA_KEY_PATH
+                value: /home/polar/ca/ca.key
+              - name: CERT_ISSUER_CA_PROVISIONING
+                value: provisioned
+              - name: CERT_ISSUER_DEFAULT_LIFETIME_SECS
+                value: '3600'
+              - name: CERT_ISSUER_SERVER_LIFETIME_SECS
+                value: '3600'
+              - name: CERT_ISSUER_USER_LIFETIME_SECS
+                value: '31536000'
+              - name: CERT_ISSUER_SERVICE_LIFETIME_SECS
+                value: '31536000'
+              - name: CERT_ISSUER_SERVER_IDENTITY
+                value: cert-issuer.polar.svc.cluster.local
+              - name: CERT_ISSUER_INTERNAL_CALLERS
+                value: credentials-agent.polar.serviceaccount.cluster.local
+              - name: CERT_ISSUER_OWN_TOKEN
+                value: /workspace/token
+              - name: CERT_ISSUER_RECORD_PATH
+                value: /home/polar/issued.jsonl
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: TLS_CLIENT_KEY
+                value: /home/polar/certs/key.pem
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: RUST_LOG
+                value: "info,cert_issuer=debug"
+              - name: KUBERNETES_CA_CERT
+                value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers: []
+            livenessProbe:
+              failureThreshold: 3
+              initialDelaySeconds: 20
+              periodSeconds: 10
+              tcpSocket:
+                port: 8443
+            ports:
+              - containerPort: 8443
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar
+                name: ca
+              - mountPath: /home/polar/certs
+                name: own-tls
+              - mountPath: /workspace
+                name: own-token
+                readOnly: true
+              - mountPath: /home/polar/ca
+                name: provisioned-ca
+                readOnly: true
+            volumes:
+              - name: ca
+                persistentVolumeClaim:
+                  claimName: cert-issuer-ca
+              - emptyDir:
+                  medium: Memory
+                name: own-tls
+              - name: own-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - name: provisioned-ca
+                secret:
+                  defaultMode: 288
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                    - key: ca.key
+                      path: ca.key
+                  secretName: cert-issuer-ca
+          shutdownBudgetSecs: 20
+    optional: false
+    secrets:
+      - keys:
+          token:
+            random: 24
+        name: cassini-shutdown-token
+        namespace: polar
+      - group: graph
+        keys:
+          secret:
+            id: password
+            random: 16
+        name: polar-graph-pw
+        namespace: polar
+      - group: graph
+        keys:
+          secret:
+            template: "neo4j/{password}"
+        name: neo4j-secret
+        namespace: polar
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: cert-issuer
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps: []
+    description: "Cassini, the message broker"
+    installCrd: false
+    name: broker
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: cassini
+          namespace: polar
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: cassini-ip-svc
+          namespace: polar
+        spec:
+          ports:
+            - name: http
+              port: 8080
+              targetPort: 8080
+          selector:
+            polar.sei.cmu.edu/agent: cassini
+          type: ClusterIP
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: cassini
+          namespace: polar
+        spec:
+          image: cassini:latest
+          needs: []
+          pod:
+            env:
+              - name: POLAR_CUSTODY_SOCKET
+                value: /run/polar-custody/custody.sock
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: TLS_SERVER_CERT_CHAIN
+                value: /home/polar/certs/cert.pem
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: CASSINI_BIND_ADDR
+                value: "0.0.0.0:8080"
+              - name: CASSINI_SHUTDOWN_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    key: token
+                    name: cassini-shutdown-token
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - env:
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                  - name: POLAR_CUSTODY_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_INSTALLER_UID
+                    value: '1000'
+                  - name: POLAR_CUSTODY_WORKLOAD_UIDS
+                    value: '1000'
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                image: polar-custody:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-custody
+                restartPolicy: Always
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                    drop:
+                      - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1001
+                volumeMounts:
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+              - args:
+                  - "--cert"
+                  - server:/home/polar/certs:custody:cassini-ip-svc.polar.svc.cluster.local
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: cert-issuer
+                  - name: POLAR_INIT_CERT_ISSUER_URL
+                    value: https://cert-issuer.polar.svc.cluster.local:8443
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports:
+              - containerPort: 8080
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /run/polar-custody
+                name: polar-custody
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir:
+                  medium: Memory
+                name: polar-custody
+          shutdownBudgetSecs: 20
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: cassini
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps: []
+    description: the credentials agent and its observer
+    installCrd: false
+    name: credentials
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: credentials-agent
+          namespace: polar
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: credentials-agent-observer
+          namespace: polar
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: credentials-agent-data
+          namespace: polar
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: "1Gi"
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: credentials-agent-observer
+          namespace: polar
+        spec:
+          ports:
+            - name: http
+              port: 8080
+              targetPort: 8080
+          selector:
+            polar.sei.cmu.edu/agent: credentials-agent-observer
+          type: ClusterIP
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: polar-bootstrap
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: polar-admin-bootstrap
+          namespace: polar-bootstrap
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: credentials-agent
+          namespace: polar
+        spec:
+          image: credentials-agent-consumer:latest
+          needs:
+            - cassini
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_CUSTODY_SOCKET
+                value: /run/polar-custody/custody.sock
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: CREDENTIALS_AGENT_CERT_ISSUER_URL
+                value: https://cert-issuer.polar.svc.cluster.local:8443
+              - name: GRAPH_ENDPOINT
+                value: bolt://polar-db-svc.polar.svc.cluster.local:7687
+              - name: GRAPH_DB
+                value: neo4j
+              - name: GRAPH_USER
+                value: neo4j
+              - name: GRAPH_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: secret
+                    name: polar-graph-pw
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - env:
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                  - name: POLAR_CUSTODY_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_INSTALLER_UID
+                    value: '1000'
+                  - name: POLAR_CUSTODY_WORKLOAD_UIDS
+                    value: '1000'
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                image: polar-custody:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-custody
+                restartPolicy: Always
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                    drop:
+                      - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1001
+                volumeMounts:
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+              - args:
+                  - "--cert"
+                  - client:/home/polar/certs:custody
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: cert-issuer
+                  - name: POLAR_INIT_CERT_ISSUER_URL
+                    value: https://cert-issuer.polar.svc.cluster.local:8443
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports: []
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /run/polar-custody
+                name: polar-custody
+              - mountPath: /var/lib/credentials-agent
+                name: data
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir:
+                  medium: Memory
+                name: polar-custody
+              - name: data
+                persistentVolumeClaim:
+                  claimName: credentials-agent-data
+          shutdownBudgetSecs: 50
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: credentials-agent-observer
+          namespace: polar
+        spec:
+          image: credentials-agent-observer:latest
+          needs:
+            - cassini
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_CUSTODY_SOCKET
+                value: /run/polar-custody/custody.sock
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - env:
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                  - name: POLAR_CUSTODY_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_INSTALLER_UID
+                    value: '1000'
+                  - name: POLAR_CUSTODY_WORKLOAD_UIDS
+                    value: '1000'
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                image: polar-custody:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-custody
+                restartPolicy: Always
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                    drop:
+                      - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1001
+                volumeMounts:
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+              - args:
+                  - "--cert"
+                  - client:/home/polar/certs:custody
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: cert-issuer
+                  - name: POLAR_INIT_CERT_ISSUER_URL
+                    value: https://cert-issuer.polar.svc.cluster.local:8443
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports:
+              - containerPort: 8080
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /run/polar-custody
+                name: polar-custody
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir:
+                  medium: Memory
+                name: polar-custody
+          shutdownBudgetSecs: 40
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: credentials-agent
+        namespace: polar
+        timeoutSecs: 300
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: credentials-agent-observer
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps: []
+    description: "the graph, with a password (development grade: no TLS)"
+    installCrd: false
+    name: graph
+    objects:
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: polar-db-data
+          namespace: polar
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: "5Gi"
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: polar-db-svc
+          namespace: polar
+        spec:
+          ports:
+            - name: bolt
+              port: 7687
+              targetPort: 7687
+          selector:
+            polar.sei.cmu.edu/agent: polar-neo4j
+          type: ClusterIP
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: polar-neo4j
+          namespace: polar
+        spec:
+          image: neo4j:5.26.2
+          needs: []
+          pod:
+            env:
+              - name: NEO4J_AUTH
+                valueFrom:
+                  secretKeyRef:
+                    key: secret
+                    name: neo4j-secret
+              - name: NEO4J_server_memory_heap_initial__size
+                value: "512m"
+              - name: NEO4J_server_memory_heap_max__size
+                value: "512m"
+              - name: NEO4J_server_memory_pagecache_size
+                value: "256m"
+            fsGroup: 7474
+            imagePullPolicy: IfNotPresent
+            initContainers: []
+            livenessProbe:
+              failureThreshold: 5
+              initialDelaySeconds: 90
+              periodSeconds: 15
+              tcpSocket:
+                port: 7687
+            ports:
+              - containerPort: 7687
+            readOnlyRootFilesystem: false
+            runAsUser: 7474
+            volumeMounts:
+              - mountPath: /data
+                name: data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: polar-db-data
+          shutdownBudgetSecs: 20
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: polar-neo4j
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps: []
+    description: "the configuration git server, which makes and seeds the schedules repository"
+    installCrd: false
+    name: git
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: polar-git-server
+          namespace: polar
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: polar-git-server-data
+          namespace: polar
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: "1Gi"
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: polar-git-server
+          namespace: polar
+        spec:
+          ports:
+            - name: http
+              port: 8443
+              targetPort: 8443
+          selector:
+            polar.sei.cmu.edu/agent: polar-git-server
+          type: ClusterIP
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: polar-git-server
+          namespace: polar
+        spec:
+          image: polar-git-server:latest
+          needs:
+            - cassini
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_CUSTODY_SOCKET
+                value: /run/polar-custody/custody.sock
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: POLAR_HEALTH_DEP_ENDPOINTS
+                value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: POLAR_GIT_SERVER_CERT
+                value: /home/polar/git-server/cert.pem
+              - name: POLAR_GIT_SERVER_CA_CERT
+                value: /home/polar/git-server/ca.pem
+              - name: POLAR_GIT_SERVER_REPO_ROOT
+                value: /var/lib/polar-git-server/repos
+              - name: POLAR_GIT_SERVER_PORT
+                value: '8443'
+              - name: POLAR_GIT_SERVER_REPOS
+                value: "{\"admins\":[],\"repos\":[{\"name\":\"polar-schedules\",\"readers\":[\"polar-scheduler-observer.polar.serviceaccount.cluster.local\"],\"writers\":[],\"seed\":\"polar-schedules\"}]}"
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - env:
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                  - name: POLAR_CUSTODY_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_INSTALLER_UID
+                    value: '1000'
+                  - name: POLAR_CUSTODY_WORKLOAD_UIDS
+                    value: '1000'
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                image: polar-custody:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-custody
+                restartPolicy: Always
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                    drop:
+                      - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1001
+                volumeMounts:
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+              - args:
+                  - "--check-dep-cert"
+                  - cassini-ip-svc.polar.svc.cluster.local:8080:300
+                  - "--cert"
+                  - client:/home/polar/certs:custody
+                  - "--cert"
+                  - server:/home/polar/git-server:custody:polar-git-server.polar.svc.cluster.local
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: credentials-agent
+                  - name: POLAR_INIT_OBSERVER_URL
+                    value: http://credentials-agent-observer.polar.svc.cluster.local:8080
+                  - name: POLAR_INIT_CREDENTIALS_AGENT_IDENTITY
+                    value: credentials-agent.polar.serviceaccount.cluster.local
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /home/polar/git-server
+                    name: git-server-tls
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports:
+              - containerPort: 8443
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /run/polar-custody
+                name: polar-custody
+              - mountPath: /home/polar/git-server
+                name: git-server-tls
+                readOnly: true
+              - mountPath: /var/lib/polar-git-server
+                name: data
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir:
+                  medium: Memory
+                name: polar-custody
+              - emptyDir: {}
+                name: git-server-tls
+              - name: data
+                persistentVolumeClaim:
+                  claimName: polar-git-server-data
+          shutdownBudgetSecs: 45
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: polar-git-server
+        namespace: polar
+        timeoutSecs: 300
+  - configMaps: []
+    description: "the scheduler: its processor, and the observer that watches the schedules repository"
+    installCrd: false
+    name: scheduler
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: polar-scheduler-processor
+          namespace: polar
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: polar-scheduler-observer
+          namespace: polar
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: polar-scheduler-processor
+          namespace: polar
+        spec:
+          image: scheduler-processor:latest
+          needs:
+            - cassini
+            - graph-write
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_CUSTODY_SOCKET
+                value: /run/polar-custody/custody.sock
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: POLAR_HEALTH_DEP_ENDPOINTS
+                value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: GRAPH_ENDPOINT
+                value: bolt://polar-db-svc.polar.svc.cluster.local:7687
+              - name: GRAPH_DB
+                value: neo4j
+              - name: GRAPH_USER
+                value: neo4j
+              - name: GRAPH_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: secret
+                    name: polar-graph-pw
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - env:
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                  - name: POLAR_CUSTODY_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_INSTALLER_UID
+                    value: '1000'
+                  - name: POLAR_CUSTODY_WORKLOAD_UIDS
+                    value: '1000'
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                image: polar-custody:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-custody
+                restartPolicy: Always
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                    drop:
+                      - ALL
+                  readOnlyRootFilesystem: true
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1001
+                volumeMounts:
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+              - args:
+                  - "--check-dep-cert"
+                  - cassini-ip-svc.polar.svc.cluster.local:8080:300
+                  - "--cert"
+                  - client:/home/polar/certs:custody
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: credentials-agent
+                  - name: POLAR_INIT_OBSERVER_URL
+                    value: http://credentials-agent-observer.polar.svc.cluster.local:8080
+                  - name: POLAR_INIT_CREDENTIALS_AGENT_IDENTITY
+                    value: credentials-agent.polar.serviceaccount.cluster.local
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                  - name: POLAR_CUSTODY_SOCKET
+                    value: /run/polar-custody/custody.sock
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+                  - mountPath: /run/polar-custody
+                    name: polar-custody
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports: []
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /run/polar-custody
+                name: polar-custody
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir:
+                  medium: Memory
+                name: polar-custody
+          shutdownBudgetSecs: 50
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: polar-scheduler-observer
+          namespace: polar
+        spec:
+          image: scheduler-observer:latest
+          needs:
+            - cassini
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: TLS_CLIENT_KEY
+                value: /home/polar/certs/key.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: POLAR_HEALTH_DEP_ENDPOINTS
+                value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: POLAR_SCHEDULER_REMOTE_URL
+                value: https://polar-git-server.polar.svc.cluster.local:8443/polar-schedules.git
+              - name: POLAR_SCHEDULER_LOCAL_PATH
+                value: /var/lib/polar-scheduler-observer/polar-schedules
+              - name: POLAR_SCHEDULER_GIT_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: POLAR_SCHEDULER_GIT_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: POLAR_SCHEDULER_GIT_CLIENT_KEY
+                value: /home/polar/certs/key.pem
+              - name: POLAR_SCHEDULER_SYNC_INTERVAL
+                value: '300'
+              - name: HOME
+                value: /tmp
+            fsGroup: 1000
+            imagePullPolicy: IfNotPresent
+            initContainers:
+              - args:
+                  - "--check-dep-cert"
+                  - cassini-ip-svc.polar.svc.cluster.local:8080:300
+                  - "--cert"
+                  - client:/home/polar/certs:ecdsa-p256
+                command:
+                  - polar-init
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: credentials-agent
+                  - name: POLAR_INIT_OBSERVER_URL
+                    value: http://credentials-agent-observer.polar.svc.cluster.local:8080
+                  - name: POLAR_INIT_CREDENTIALS_AGENT_IDENTITY
+                    value: credentials-agent.polar.serviceaccount.cluster.local
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: POLAR_INIT_CA_CERT
+                    value: /etc/polar-ca/ca.pem
+                image: polar-init:latest
+                imagePullPolicy: IfNotPresent
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+                  - mountPath: /etc/polar-ca
+                    name: polar-ca
+                    readOnly: true
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports: []
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+              - mountPath: /var/lib/polar-scheduler-observer
+                name: checkout
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+              - configMap:
+                  name: polar-ca
+                name: polar-ca
+              - emptyDir: {}
+                name: checkout
+          shutdownBudgetSecs: 20
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: polar-scheduler-processor
+        namespace: polar
+        timeoutSecs: 300
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: polar-scheduler-observer
+        namespace: polar
+        timeoutSecs: 300
