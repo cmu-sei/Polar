@@ -146,6 +146,9 @@ let issuersJson
                       , jwks_uri = JSON.string v.jwksUri
                       , workload_identity_claim = JSON.string "sub"
                       , instance_binding_claim = JSON.string "kubernetes.io/pod/uid"
+                      -- A multi-instance workload's certificate names its pod beside its UID (`i:pod:`), and the credentials agent
+                      -- refuses one whose token carries no pod name.
+                      , instance_name_claim = JSON.string "kubernetes.io/pod/name"
                       , identity_normalization =
                           JSON.object
                             ( toMap
