@@ -32,7 +32,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
 use crate::job::{
-    JobOptions, build_job_manifest_as, expired, free_account, git_secret_name_for_build,
+    JobOptions, build_job_manifest_as, choose_account, expired, git_secret_name_for_build,
     job_name_for_build,
 };
 
@@ -95,27 +95,28 @@ impl BuildBackend for KubernetesBackend {
         let job_name = job_name_for_build(spec.build_id);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
 
-        // The pod runs under one of the ServiceAccounts the deployment made, the first no running job holds: the
-        // broker allows one session per identity. The jobs the cluster has say which are held.
+        // The pod runs under the one ServiceAccount of a multi-instance workload, or under one of a fixed set the
+        // deployment made, the first no running job holds (the broker allows one session per identity there). The
+        // jobs the cluster has say which are held, so only the fixed set needs them listed.
         let _account_choice = self.accounts.lock().await;
-        let account = match &self.options.identity {
-            Some(_) => {
-                let running = jobs.list(&ListParams::default()).await.map_err(|e| {
+        let exclusive = self.options.identity.is_some() && self.options.shared_account.is_none();
+        let running = if exclusive {
+            jobs.list(&ListParams::default())
+                .await
+                .map_err(|e| {
                     BackendError::SubmissionFailed(format!(
                         "could not list the jobs to find a free account: {e}"
                     ))
-                })?;
-                let free =
-                    free_account(&self.options.accounts, &running.items).ok_or_else(|| {
-                        BackendError::SubmissionFailed(format!(
-                            "every one of the {} ServiceAccounts for jobs is held by a running job",
-                            self.options.accounts.len()
-                        ))
-                    })?;
-                Some(free.clone())
-            }
-            None => None,
+                })?
+                .items
+        } else {
+            Vec::new()
         };
+        let account = choose_account(&self.options, &running).map_err(|held| {
+            BackendError::SubmissionFailed(format!(
+                "every one of the {held} ServiceAccounts for jobs is held by a running job"
+            ))
+        })?;
         let manifest = build_job_manifest_as(spec, &self.options, account.as_deref());
 
         tracing::debug!(

@@ -161,6 +161,22 @@ pub fn free_account<'a>(accounts: &'a [String], jobs: &[Job]) -> Option<&'a Stri
     accounts.iter().find(|a| !held.contains(a))
 }
 
+/// The ServiceAccount a job's pod runs under, or `None` when jobs have no certificate of their own. With a
+/// `shared_account` it is that one, however many jobs hold it. Otherwise it is the first of `accounts` no unfinished
+/// job holds, or, when there is none, `Err` with the number of accounts that are all held.
+pub fn choose_account(options: &JobOptions, jobs: &[Job]) -> Result<Option<String>, usize> {
+    if options.identity.is_none() {
+        return Ok(None);
+    }
+    if let Some(shared) = &options.shared_account {
+        return Ok(Some(shared.clone()));
+    }
+    free_account(&options.accounts, jobs)
+        .cloned()
+        .map(Some)
+        .ok_or(options.accounts.len())
+}
+
 /// How a finished Job ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -273,6 +289,10 @@ pub struct JobOptions {
     /// knows, and the broker allows one session per identity, so a job takes an account no running job holds
     /// (`free_account`). Needed with an `identity`.
     pub accounts: Vec<String>,
+    /// The one ServiceAccount every job runs under, when its workload has many instances (the fork's authority model,
+    /// "Multi-instance workloads"): each pod has a certificate and a session of its own, so jobs never wait for it.
+    /// Exclusive with `accounts`. Needed with an `identity` when `accounts` is empty.
+    pub shared_account: Option<String>,
     /// Keep the repository's `.git` in the workspace. The instrumented pipeline records which commit and tree it
     /// built, so it needs it; a pipeline that only reads source does not.
     pub keep_git: bool,
@@ -294,6 +314,7 @@ impl JobOptions {
             image_pull_policy: None,
             identity: None,
             accounts: Vec::new(),
+            shared_account: None,
             keep_git: false,
             retention: Retention::default(),
         }
@@ -1511,6 +1532,63 @@ mod tests {
             free_account(&accounts(), &both),
             None,
             "two running builds leave nothing to give a third"
+        );
+    }
+
+    fn options_with(
+        identity: bool,
+        accounts: Vec<String>,
+        shared_account: Option<&str>,
+    ) -> JobOptions {
+        let mut options = JobOptions::new("polar-builds");
+        if identity {
+            options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        }
+        options.accounts = accounts;
+        options.shared_account = shared_account.map(str::to_string);
+        options
+    }
+
+    #[test]
+    fn a_shared_account_is_given_to_every_job_however_many_hold_it() {
+        let options = options_with(true, Vec::new(), Some("build-job"));
+        let running = [
+            a_job_as("build-job", &[]),
+            a_job_as("build-job", &[]),
+            a_job_as("build-job", &[]),
+        ];
+        assert_eq!(
+            choose_account(&options, &running),
+            Ok(Some("build-job".to_string())),
+            "a multi-instance workload's pods each have a certificate, so a job never waits for the account"
+        );
+    }
+
+    #[test]
+    fn exclusive_accounts_are_still_taken_one_job_at_a_time() {
+        let options = options_with(true, accounts(), None);
+        let running = [a_job_as("build-job-1", &[])];
+        assert_eq!(
+            choose_account(&options, &running),
+            Ok(Some("build-job-2".to_string()))
+        );
+        let both = [a_job_as("build-job-1", &[]), a_job_as("build-job-2", &[])];
+        assert_eq!(
+            choose_account(&options, &both),
+            Err(2),
+            "every one of the two accounts is held"
+        );
+    }
+
+    #[test]
+    fn a_job_without_a_certificate_of_its_own_runs_under_no_account_of_ours() {
+        assert_eq!(
+            choose_account(&options_with(false, accounts(), None), &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            choose_account(&options_with(false, Vec::new(), Some("build-job")), &[]),
+            Ok(None)
         );
     }
 

@@ -115,6 +115,12 @@ pub struct KubernetesBackendConfig {
     #[serde(default)]
     pub accounts: Vec<String>,
 
+    /// The one ServiceAccount every job's pod runs under, when the deployment makes it a workload with many instances
+    /// (the authority model's `instances: "many"`): each pod has a certificate and a session of its own, so builds
+    /// never wait for an account and only `max_concurrent_builds` limits them. Instead of `accounts`, not with it.
+    #[serde(default)]
+    pub account: Option<String>,
+
     /// Leave the repository's `.git` in each job's workspace, for a pipeline that records which commit it built.
     #[serde(default)]
     pub keep_git: bool,
@@ -202,6 +208,25 @@ impl OrchestratorConfig {
             Some(k) if k.identity.is_some() && !k.accounts.is_empty() => cap.min(k.accounts.len()),
             _ => cap,
         }
+    }
+}
+
+/// What is wrong with how a deployment gives jobs their ServiceAccounts, or `None`. With certificates for jobs
+/// (`identity`) there must be exactly one way: a shared `account` or a fixed set of `accounts`.
+pub fn job_accounts_problem(k: &KubernetesBackendConfig) -> Option<String> {
+    k.identity.as_ref()?;
+    match (&k.account, k.accounts.is_empty()) {
+        (Some(_), false) => Some(
+            "jobs are given both a shared account and a fixed set of ServiceAccounts \
+             (backend.kubernetes.account and backend.kubernetes.accounts): name one"
+                .into(),
+        ),
+        (None, true) => Some(
+            "jobs are to have certificates but the configuration names no ServiceAccount to run them as \
+             (backend.kubernetes.account, or backend.kubernetes.accounts)"
+                .into(),
+        ),
+        _ => None,
     }
 }
 
@@ -354,6 +379,74 @@ mod build_cap {
             config(1, k).build_cap(),
             1,
             "the cap still applies below the accounts"
+        );
+    }
+
+    #[test]
+    fn an_account_every_job_shares_leaves_the_cap_to_the_setting() {
+        let k = serde_json::json!({ "namespace": "build-jobs", "identity": "{}", "account": "build-job" });
+        assert_eq!(
+            config(8, k).build_cap(),
+            8,
+            "a multi-instance workload's pods each have a session of their own, so no account is held"
+        );
+    }
+
+    #[test]
+    fn the_account_survives_the_loader() {
+        let dir = std::env::temp_dir().join(format!("bo-config-account-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("build-orchestrator.yaml");
+        std::fs::write(
+            &file,
+            r#"{"max_concurrent_builds": 3,
+                "backend": {"driver": "kubernetes", "command": ["nu"],
+                  "kubernetes": {"namespace": "build-jobs", "identity": "{}", "account": "build-job"}},
+                "storage": {"endpoint_url": "http://localhost:9000", "bucket": "b", "region": "r", "access_key": "abcdefghijklmnop", "secret_key": "abcdefghijklmnop"}}"#,
+        )
+        .unwrap();
+        let c = OrchestratorConfig::load_from(file.to_str().unwrap()).expect("loads");
+        let k = c.backend.kubernetes.as_ref().unwrap();
+        assert_eq!(k.account.as_deref(), Some("build-job"));
+        assert_eq!(c.build_cap(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn jobs_with_certificates_need_exactly_one_way_to_be_given_an_account() {
+        let k = |v: serde_json::Value| -> KubernetesBackendConfig {
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(
+            job_accounts_problem(&k(serde_json::json!({ "namespace": "b" }))),
+            None,
+            "no certificates, no accounts"
+        );
+        assert_eq!(
+            job_accounts_problem(&k(
+                serde_json::json!({ "namespace": "b", "identity": "{}", "account": "build-job" })
+            )),
+            None
+        );
+        assert_eq!(
+            job_accounts_problem(&k(
+                serde_json::json!({ "namespace": "b", "identity": "{}", "accounts": ["a"] })
+            )),
+            None
+        );
+        assert!(
+            job_accounts_problem(&k(
+                serde_json::json!({ "namespace": "b", "identity": "{}" })
+            ))
+            .is_some(),
+            "certificates with no account to run them as"
+        );
+        assert!(
+            job_accounts_problem(&k(serde_json::json!({
+                "namespace": "b", "identity": "{}", "account": "a", "accounts": ["b"]
+            })))
+            .is_some(),
+            "both a shared account and a fixed set is ambiguous"
         );
     }
 

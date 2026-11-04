@@ -121,14 +121,14 @@ impl PolarAgent for BuildOrchestrator {
                         format!("the jobs' identity in the configuration does not read: {e}")
                     })?;
                 options.accounts = k8s.accounts.clone();
+                options.shared_account = k8s.account.clone();
+                if let Some(problem) = crate::config::job_accounts_problem(k8s) {
+                    return Err(problem.into());
+                }
                 if options.identity.is_none() {
                     tracing::warn!(
                         "jobs share one certificate: builds that overlap will supersede each other"
                     );
-                } else if options.accounts.is_empty() {
-                    return Err("jobs are to have certificates but the configuration names no ServiceAccounts to run them as \
-                                (backend.kubernetes.accounts)"
-                        .into());
                 }
                 if let Some(r) = &k8s.resources {
                     let d = &mut options.resources;
