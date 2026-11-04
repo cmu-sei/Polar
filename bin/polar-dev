@@ -28,6 +28,8 @@
 #   bin/polar-dev attach    log in again
 #   bin/polar-dev cert [u]  copy your Polar certificate out and import it into Librewolf here (infra/user-cert-install.sh)
 #   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687) and ACE (8050)
+#   bin/polar-dev sops      copy your personal sops files (infra/targets/*/user.sops.yaml, gitignored) into the pod's checkout;
+#                           `up` does this too, and what the pod has of its own stays
 #   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
 #   bin/polar-dev down      sync, then stop the pod (its volumes stay); --purge removes the namespace and the volumes too
 #   bin/polar-dev build-image [tag] [target]
@@ -379,6 +381,37 @@ copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - 
 # A socket there (gpg-agent's, in a deployment PKI's GnuPG home) cannot be copied; tar leaves it out, and is told not to say so.
 copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar --warning=no-file-ignored -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
 
+# ── Your personal sops files ─────────────────────────────────────────────────
+# Gitignored, so the pod's clone has none, and without one a token in it is simply not there: up.nu carries on, and says only
+# that the target has no such secret. They are encrypted, and the key the pod is given opens them.
+
+# Each target's user.sops.yaml, and the .user.sops.yaml that says who it is encrypted to, under the checkout $1, one per line.
+user_sops_files() {
+    local f
+    ( cd "$1" || exit 0
+      for f in infra/targets/*/user.sops.yaml infra/targets/*/.user.sops.yaml; do
+          if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+      done )
+}
+
+# Copies them into the pod's checkout, unless the pod has its own already (it keeps what it made), as ~/.config goes in.
+copy_user_sops() {
+    local files
+    files=$(user_sops_files "$HERE")
+    if [ -z "$files" ]; then
+        say "no user.sops.yaml under $HERE/infra/targets: nothing personal to copy into the pod"
+        return 0
+    fi
+    say "your personal sops files go into the pod's checkout, unless it has its own:"
+    printf '%s\n' "$files" | sed 's/^/  /'
+    # shellcheck disable=SC2086 # one path per line, and a target's name has no spaces. COPYFILE_DISABLE: see build_image.
+    COPYFILE_DISABLE=1 tar -C "$HERE" -cf - $files | k exec -i "deploy/$DEPLOY" -c dev -- tar -C /workspace --no-same-owner --skip-old-files -xf - \
+        || die "copying your personal sops files into the pod failed (above)"
+    # shellcheck disable=SC2046
+    k exec "deploy/$DEPLOY" -c dev -- chown "$(id -u):$(id -g)" $(printf '%s\n' "$files" | sed 's|^|/workspace/|') \
+        || die "giving you your personal sops files in the pod failed (above)"
+}
+
 # ── build-image, and the image `up` applies ──────────────────────────────────
 # image_warning, oci_arch and image_tag_ok only read their arguments; their tests are bin/tests/polar-dev.bash.
 
@@ -472,7 +505,7 @@ build_image() {
 
 # Every command but the help talks to the cluster: say so plainly when kubectl cannot reach it, before anything is half done.
 case "${1:-}" in
-    up|attach|cert|forward|sync|down|build-image)
+    up|attach|cert|forward|sops|sync|down|build-image)
         kubectl version --request-timeout=5s >/dev/null 2>&1 || die "the cluster does not answer (KUBECONFIG is ${KUBECONFIG:-not set}): point kubectl at it, then run this again" ;;
 esac
 
@@ -516,6 +549,8 @@ case "${1:-}" in
             fi
             rm -f "$clone_out"
         fi
+        # Not into a /workspace the clone left empty: git will not clone into one that has something in it.
+        if ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git"; then copy_user_sops; fi
         say "logging in (bin/polar-dev attach to come back)"
         login ;;
     attach) login ;;
@@ -528,6 +563,7 @@ case "${1:-}" in
         kubectl -n polar-graph port-forward svc/polar-db-svc 7473:7473 7687:7687 >/tmp/polar-dev-$U-neo4j.log 2>&1 &
         kubectl -n polar port-forward svc/ace-svc 8050:8050 >/tmp/polar-dev-$U-ace.log 2>&1 &
         echo "polar-dev: Neo4j at https://localhost:7473, ACE at http://localhost:8050 (logs in /tmp/polar-dev-$U-*.log)" ;;
+    sops) copy_user_sops ;;
     sync) copy_out polar-deploy; copy_out polar-admin; echo "polar-dev: copied polar-deploy and polar-admin to ~/.config" ;;
     down)
         "$0" sync

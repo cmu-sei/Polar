@@ -262,5 +262,48 @@ image_tag_ok ""; is "nothing is not" "$?" 1
 image_tag_ok "$(printf 'a%.0s' $(seq 1 129))"; is "129 characters are too many" "$?" 1
 image_tag_ok "$(printf 'a%.0s' $(seq 1 128))"; is "128 are not" "$?" 0
 
+# ── The personal sops files ─────────────────────────────────────────────────
+
+TREE=$(mktemp -d)
+is "no target has any: nothing" "$(user_sops_files "$TREE")" ""
+mkdir -p "$TREE/infra/targets/one" "$TREE/infra/targets/two" "$TREE/infra/targets/three"
+for f in one/user.sops.yaml one/.user.sops.yaml two/user.sops.yaml one/secrets.sops.yaml one/user.sops.yaml.example three/.sops.yaml; do
+    echo encrypted > "$TREE/infra/targets/$f"
+done
+is "each target's personal files, and only those" "$(user_sops_files "$TREE")" "infra/targets/one/user.sops.yaml
+infra/targets/two/user.sops.yaml
+infra/targets/one/.user.sops.yaml"
+
+# copy_user_sops against a stand-in for the pod: a directory, with the pod's tar (GNU's: BSD's has no --skip-old-files).
+if tar --version 2>/dev/null | head -1 | command grep -q GNU; then
+    POD=$(mktemp -d)
+    k() {
+        shift 5 # exec -i deploy/... -c dev (or exec deploy/... -c dev --, which is one fewer)
+        [ "$1" = "--" ] && shift
+        case "$1" in
+            tar) local a out=(); for a in "$@"; do out+=("${a//\/workspace/$POD}"); done; "${out[@]}" ;;
+            chown) echo "$*" > "$POD/chowned" ;;
+            *) echo "the pod was asked to run $1, which is not in its image for certain" >&2; return 1 ;;
+        esac
+    }
+    DEPLOY=polar-dev-test
+    HERE=$TREE
+    mkdir -p "$POD/infra/targets/two"
+    echo "the pod's own" > "$POD/infra/targets/two/user.sops.yaml"
+    copied=$(copy_user_sops 2>&1)
+    is "what the pod has none of goes in" "$(cat "$POD/infra/targets/one/user.sops.yaml")" encrypted
+    is "the file that says who it is for goes too" "$(cat "$POD/infra/targets/one/.user.sops.yaml")" encrypted
+    is "what the pod has of its own stays" "$(cat "$POD/infra/targets/two/user.sops.yaml")" "the pod's own"
+    [ ! -e "$POD/infra/targets/one/secrets.sops.yaml" ]; is "what git carries does not go" "$?" 0
+    has "it says what it copied" "$copied" "infra/targets/one/user.sops.yaml"
+    has "the files become the user's in the pod" "$(cat "$POD/chowned" 2>/dev/null)" "/workspace/infra/targets/one/user.sops.yaml"
+    rm -rf "$POD"
+    EMPTY=$(mktemp -d)
+    HERE=$EMPTY
+    has "with none here it says so, and that it is not a failure" "$(copy_user_sops 2>&1)" "no user.sops.yaml"
+    rm -rf "$EMPTY"
+fi
+rm -rf "$TREE"
+
 echo "polar-dev tests: $passed passed, $failures failed"
 [ "$failures" -eq 0 ]
