@@ -25,6 +25,201 @@
 
 All notable changes to the platform are documented in this file, newest first. It is generated at each release by `nu infra/changelog.nu`, from the same classification of commits that chooses the version. A release is one version for every Polar image.
 
+## [3.0.0] - 2026-11-02
+
+Images built from `de146b15cb82`, the commit that set VERSION to 3.0.0.
+
+> Multi-instance workloads (protocol 2); measured back-pressure under several publishers; pulled health in the graph, with configuration and credential problems held instead of crash-looping; the Jira pair checked issue for issue against a real Data Center across a restart, its token signed and escrowed, its settings changed at run time; the graph's writes batched, indexed and cleared of empty nodes.
+
+### 💥 Breaking changes
+
+- *(cassini)* The broker stamps the publisher's instance; protocol 2
+  Rebuild and redeploy every image together: a 2.x client and a 3.0 broker refuse each other at registration, naming both protocol versions.
+- *(jira)* Refuse what cannot be meant at start, and ask the site what it is
+  JIRA_DEPLOYMENT must be cloud, server or datacenter; QUERY_DATE must be YYYY-MM-DD or YYYY-MM-DD HH:MM; the placeholder JIRA_EMAIL is refused. Each is held and reported in (:AgentHealth) as Configuration, not ignored.
+- *(jira)* The credential is a signed, escrowed runtime section
+  JIRA_TOKEN, JIRA_EMAIL and the jira-secret Secret are gone. On a fresh cluster up.nu seals the target's sops jira_token (and jira_email, for Cloud) into jira-observer's signed credentials section once; after that, rotate it with polar-sign template jira-observer credentials and polar-sign sign --push.
+- *(graph)* Every node key binds the variable it is given
+  PodState is keyed on pod_uid and valid_from, and every Kubernetes state's valid_from is an integer (epoch ms), not text. State nodes written before 3.0.0 keep their old shape and their duplicates; the uniqueness constraints made at start report those duplicates and fall back to an index. A fresh graph has none.
+
+### 📦 Images
+
+| Image | Change |
+|---|---|
+| `ace-viz:latest` | `sha256:ed7c637a795e` -> `sha256:e4285fb84857` |
+| `build-processor:latest` | `sha256:7f1298582b08` -> `sha256:b0e89d29c3a2` |
+| `cassini:latest` | `sha256:19471a5ed1d7` -> `sha256:7e11fcaca8a1` |
+| `cert-issuer:latest` | `sha256:06ab51683dd4` -> `sha256:9abc3dbd44e5` |
+| `credentials-agent-consumer:latest` | `sha256:e66933fa6a68` -> `sha256:87d5fccd5450` |
+| `credentials-agent-observer:latest` | `sha256:d1bf25c5502d` -> `sha256:b8976ea1eed7` |
+| `dev:latest` | `sha256:37ca3648d68e` -> `sha256:ecb0968eb3b0` |
+| `git-controller:latest` | `sha256:bbcf74fb8548` -> `sha256:b40569cc771f` |
+| `git-observer:latest` | `sha256:e751b943f851` -> `sha256:d6942acf2375` |
+| `git-processor:latest` | `sha256:c8b6b1a20507` -> `sha256:026e40e07bed` |
+| `gitlab-consumer:latest` | `sha256:f4e99b02fb47` -> `sha256:1fb7296f5d0f` |
+| `gitlab-observer:latest` | `sha256:67816dde4540` -> `sha256:2ecfe332c06d` |
+| `harness-producer:latest` | `sha256:475422bc9ae4` -> `sha256:99457513288a` |
+| `harness-sink:latest` | `sha256:414f27babb07` -> `sha256:9c1ca98a4de4` |
+| `jira-observer:latest` | `sha256:569b1477f38e` -> `sha256:8ab09583d992` |
+| `jira-processor:latest` | `sha256:c85bdd156f54` -> `sha256:2ae1ecf72790` |
+| `kube-consumer:latest` | `sha256:8534efcfc43b` -> `sha256:a22398138e02` |
+| `kube-observer:latest` | `sha256:da8284746b5c` -> `sha256:3da8dc01be06` |
+| `oci-resolver:latest` | `sha256:52527d87916c` -> `sha256:370bb8da81bd` |
+| `openapi-observer:latest` | `sha256:7069531a0f1a` -> `sha256:5b74f0623f94` |
+| `openapi-processor:latest` | `sha256:2ebc795c4b91` -> `sha256:99701814fd1b` |
+| `polar-custody:latest` | `sha256:c59e5a859eda` -> `sha256:64081625e045` |
+| `polar-git-server:latest` | `sha256:129413f8642d` -> `sha256:f5bffea5aed1` |
+| `polar-init:latest` | `sha256:79d20132be9e` -> `sha256:aa19d9db61fd` |
+| `polar-nu-init:latest` | `sha256:ddf4ec503bc6` -> `sha256:eb6c52abdc72` |
+| `polar-tools:latest` | `sha256:0fa696960cea` -> `sha256:6cb335770027` |
+| `scheduler-observer:latest` | `sha256:7fa564bb190e` -> `sha256:927e4d7a0aa5` |
+| `scheduler-processor:latest` | `sha256:19a8e0d5b01a` -> `sha256:2cdb2976cf25` |
+| `secret-harness-intruder:latest` | `sha256:1aad7c08ec88` -> `sha256:7af623a32cf0` |
+| `secret-harness-owner:latest` | `sha256:2616e00fa0d9` -> `sha256:ae02a007d491` |
+| `soft-state-observer:latest` | `sha256:376cdaf437ee` -> `sha256:bd6ecf2b0435` |
+| `soft-state-processor:latest` | new, `sha256:e440f9111e14` |
+
+### 🚀 Features
+
+**builder**
+
+- Pulled health, answered by the health actor's report
+- A held agent tries again when a signed update arrives
+
+**cassini**
+
+- Cassini-client and cassini-c2 answer --version
+- The stall rule ends only a subscriber that makes no progress
+
+**cassini-broker**
+
+- The memory controller's latency target and step are settings
+- Under a container limit the budget's ceiling is half the limit
+- Supersession by identity and instance
+
+**cert-issuer**
+
+- A multi-instance workload's certificate names its pod
+
+**credentials-agent**
+
+- The first escrow issuance per identity is serialized
+- The revoked set says which were revoked for a compromise
+- A retry is not a second request
+- An escrow certificate asked again, or abandoned, is issued again
+- A multi-instance certificate requires its pod's name
+
+**crypto**
+
+- An HTTP credential for a bound host, beside git's
+
+**graph**
+
+- Owners make the constraints for their labels at start
+
+**harness**
+
+- A sink slow before it acknowledges, so the broker feels it
+- Broker settings per run, and what the broker's bounds said over it
+- An image tag retags a run's every container, and the fifth set's plans
+
+**infra**
+
+- The broker's container gets a 1 GiB memory limit
+- A catalog workload may be multi-instance
+- The load harness's producer is multi-instance; the pressure plan
+- U7c reads Apache's Jira anonymously
+- The seed seals the Jira token from sops once, on a fresh cluster
+
+**jira**
+
+- Read a site anonymously with JIRA_ANONYMOUS=true
+- Hold a failure a retry cannot fix through the agent's health
+- Settings change at run time, by a signed update
+
+**polar-agent-builder**
+
+- A multi-instance pod's clean shutdown ends its session
+
+**soft-state**
+
+- The state agent's writer asks every agent about its health
+
+**up**
+
+- --import-tag brings a cluster up on a published release's images
+
+### 🐛 Bug fixes
+
+**cassini-broker**
+
+- A stopped broker holds none of its names
+- Bind a connection to its session before telling the client it is registered
+
+**cert-issuer**
+
+- Refuse a future nbf or iat and a token that lives too long
+
+**credentials-agent**
+
+- A held request is given the answer it was given first
+- The certificate lookup answers with the escrow certificate
+
+**git-repo-observer**
+
+- Report a ref when it moves, not on every pass
+- The worker's path reports a ref only when it moves, too
+
+**gitlab-consumer**
+
+- A second registration restarts the consumers instead of colliding
+
+**images**
+
+- --also-tag takes comma-separated text, which a shell can pass
+
+**infra**
+
+- Tests act only on a cluster named for them, never the ambient KUBECONFIG
+- Ca.nu and load-harness.nu find binaries where cargo put them
+- Jira-check reads JIRA_ANONYMOUS as the agent does
+
+**jira**
+
+- A configuration that cannot work keeps jira-observer up, held
+- Decode changelog authors and users without an email
+- Skip a property the graph refuses, not the whole issue
+- Walk every page of groups, users and issues
+- Classify Jira failures, honour Retry-After, resume at the failed page
+- Drain the graph controller at shutdown instead of stopping it
+- Find the system fields by id, not by English display name
+- Reading anonymously, the users observer is not started
+- A sub-task is CHILD_OF its parent by the parent's key
+
+**kube**
+
+- Remove the empty state-type nodes at kube-consumer's start
+
+**polar-agent-builder**
+
+- A submit waits for its judgement, not CALL_TIMEOUT
+
+**polar-custody-daemon**
+
+- A custodian refused as revoked reports its own certificate alone
+
+**polar-init**
+
+- A run again in the same pod goes on from what the daemon holds
+
+### ⚡ Performance
+
+**graph**
+
+- Write batches and transactions as UNWIND statements
+
+Also in this release, not listed: 28 documentation, 7 test and 4 housekeeping commits.
+
 ## [2.0.0] - 2026-10-31
 
 Images built from `55f97ed2c3c9`, the commit that set VERSION to 2.0.0.

@@ -320,6 +320,7 @@ Things that look wrong and are not:
 ```bash
 bin/polar-dev attach               # log in to the dev container again
 git -C /workspace pull             # (in the dev container) new code; then up.nu --dev to rebuild and roll it out
+bin/polar-dev sops                 # copy your personal user.sops.yaml into the dev container's checkout (`up` does this too)
 bin/polar-dev sync                 # copy ~/.config/polar-deploy and polar-admin back to your machine
 bin/polar-dev down                 # sync, then stop the dev container; its volumes stay. --purge removes them too
 ```
@@ -870,7 +871,10 @@ Two genuinely different kinds of secrets exist for a target like
   GitLab token, your own Jira token). Encrypted to *only your own*
   key, via a separate, personal `.user.sops.yaml` config you create
   yourself. Gitignored — this one never gets committed at all, even
-  encrypted.
+  encrypted. So a dev container's clone has none: `bin/polar-dev up` (or
+  `bin/polar-dev sops`) copies yours in from your machine's checkout, still
+  encrypted, unless the dev container has its own. It decrypts there with the
+  key `POLAR_DEV_SOPS_KEY` names, which must be one yours is encrypted to.
 
 Both use `sops`, both use your existing SSH keypair as your identity
 (via `rage`'s SSH-key support) rather than a separate `age` key you'd

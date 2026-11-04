@@ -104,7 +104,9 @@ pub fn escrow_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polar_signing::testing::{EscrowSpec, escrow_certificate, now, root};
+    use polar_signing::testing::{
+        EscrowSpec, escrow_certificate, escrow_certificate_for, now, p256_public_key_pem, root,
+    };
 
     #[test]
     fn an_agents_escrow_identity_is_its_name_in_the_polar_namespace() {
@@ -112,6 +114,29 @@ mod tests {
             escrow_identity("git-repo-observer"),
             "git-repo-observer.polar.serviceaccount.cluster.local"
         );
+    }
+
+    /// A custody daemon's escrow key is P-256, whose certificate says `keyAgreement`: a secret can be sealed to it.
+    #[test]
+    fn a_secret_can_be_sealed_to_a_p256_escrow_key_as_the_issuer_certifies_it() {
+        let ca = root("Polar Internal CA");
+        let certificate = escrow_certificate_for(
+            &ca,
+            EscrowSpec {
+                key_usages: vec![rcgen::KeyUsagePurpose::KeyAgreement],
+                ..EscrowSpec::default()
+            },
+            &p256_public_key_pem(),
+        );
+        let trust = polar_signing::Trust::from_pem(std::slice::from_ref(&ca.pem)).unwrap();
+        let key = escrow_key(
+            &certificate,
+            &trust,
+            now(),
+            &escrow_identity("git-repo-observer"),
+        )
+        .unwrap();
+        polar_escrow::EscrowedSecret::encrypt_bound(b"a token", &key, b"a context").unwrap();
     }
 
     #[test]

@@ -407,9 +407,11 @@ pub fn sign_to_dhall(payload: Value, identity: &Identity) -> Result<String, Stri
     document_dhall(&document).map_err(|e| e.to_string())
 }
 
-/// What a Dhall source evaluates to, as JSON (the observer evaluates it the same way).
+/// What a signed Dhall file evaluates to, as JSON. The observer evaluates it the same way: a file with an import is
+/// refused, before anything it names is read or asked for.
 pub fn evaluate(source: &str) -> Result<Value, String> {
     let simple: serde_dhall::SimpleValue = serde_dhall::from_str(source)
+        .imports(false)
         .parse()
         .map_err(|e| format!("not valid Dhall: {e}"))?;
     serde_json::to_value(&simple).map_err(|e| e.to_string())
@@ -480,6 +482,30 @@ mod tests {
         roundtrip(json!({ "a b": 1, "c.d": 2 }));
     }
 
+    /// A file to verify may have come from anyone: what it names is not read.
+    #[test]
+    fn a_file_with_an_import_is_refused_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = dir.path().join("held.txt");
+        std::fs::write(&held, "HELD-IN-THE-FILE").unwrap();
+        let held = held.display();
+        for source in [
+            format!("{{ a = {held} as Text }}"),
+            format!("if False then {held} as Text else \"unreached\""),
+            "env:HOME as Text".to_string(),
+            "missing".to_string(),
+        ] {
+            let why = evaluate(&source).unwrap_err();
+            assert!(!why.contains("HELD-IN-THE-FILE"), "`{source}`: {why}");
+        }
+        assert_eq!(evaluate("{ a = 1 }").unwrap(), json!({ "a": 1 }));
+        // Dhall's fallback takes its other side: still nothing is read.
+        assert_eq!(
+            evaluate(&format!("{held} as Text ? \"other\"")).unwrap(),
+            json!("other")
+        );
+    }
+
     /// What the scheduler's observer does with a committed file (polar-scheduler/observer/src/watcher.rs,
     /// `evaluate_dhall_file_to_json`): the file, read by serde_dhall, into JSON.
     fn as_the_scheduler_reads_it(source: &str) -> Value {
@@ -487,6 +513,7 @@ mod tests {
         let file = dir.path().join("document.dhall");
         std::fs::write(&file, source).unwrap();
         let simple: serde_dhall::SimpleValue = serde_dhall::from_file(&file)
+            .imports(false)
             .parse()
             .unwrap_or_else(|e| panic!("`{source}` does not evaluate: {e}"));
         serde_json::to_value(&simple).unwrap()

@@ -195,7 +195,13 @@ pub fn escrow_certificate(issuer: &Authority, spec: EscrowSpec) -> String {
     escrow_certificate_for(issuer, spec, ESCROW_PUBLIC_KEY_PEM)
 }
 
-/// The same, over an RSA public key of the caller's, for a test that has to open what was encrypted to it.
+/// A P-256 public key, of the kind a custody daemon's escrow key is, with the private half thrown away.
+pub fn p256_public_key_pem() -> String {
+    rcgen::KeyPair::generate().unwrap().public_key_pem()
+}
+
+/// The same, over a public key of the caller's: for a test that has to open what was encrypted to it, or a P-256 key, whose
+/// certificate permits `keyAgreement` instead.
 pub fn escrow_certificate_for(
     issuer: &Authority,
     spec: EscrowSpec,
