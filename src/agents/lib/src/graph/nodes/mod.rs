@@ -93,10 +93,11 @@ mod pattern_tests {
         let key = KubeNodeKey::PodState {
             pod_uid: "u".into(),
             valid_from: 1,
+            cluster_uid: "c".into(),
         };
         assert_eq!(
             key.cypher_match("sinst").0,
-            "(sinst:PodState { pod_uid: $sinst_pod_uid, valid_from: $sinst_valid_from })"
+            "(sinst:PodState { pod_uid: $sinst_pod_uid, valid_from: $sinst_valid_from, cluster_uid: $sinst_cluster_uid })"
         );
     }
 

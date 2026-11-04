@@ -47,6 +47,15 @@ impl PolarAgent for KubeConsumer {
             polar::topics::KUBERNETES_RESOLUTION_EVENTS,
             "what the resolver found for a container's image, joined to the container",
         ),
+        TopicDecl::subscribe(
+            kube_common::KUBERNETES_DISCOVERY_ANNOUNCE,
+            "the UID of each cluster an observer watches, so the cluster is known before its first event",
+        ),
+        TopicDecl::publish(
+            kube_common::KUBERNETES_DISCOVERY_QUERY,
+            "a request that every observer say again which cluster it watches, when it registers",
+        )
+        .because(&[Cause::Registered]),
         TopicDecl::publish(
             polar::topics::PROVENANCE_DISCOVERY,
             "each container image it meets, for the resolver to resolve",
@@ -72,7 +81,11 @@ impl PolarAgent for KubeConsumer {
         GraphDecl::owns("KubernetesJobState", "each state a job was seen in"),
         GraphDecl::owns("StatefulSet", "the stateful sets that own pods, as anchors"),
         GraphDecl::owns("DaemonSet", "the daemon sets that own pods, as anchors"),
-        GraphDecl::owns("Node", "the nodes pods run on, as anchors"),
+        GraphDecl::owns("KubernetesNode", "the nodes pods run on"),
+        GraphDecl::owns("KubernetesNodeState", "each state a node was seen in"),
+        GraphDecl::owns("KubernetesCluster", "each cluster an observer announced"),
+        GraphDecl::owns("Namespace", "the namespaces, by cluster"),
+        GraphDecl::owns("NamespaceState", "each state a namespace was seen in"),
         GraphDecl::owns("FluxOCIRepository", "Flux's OCI repositories"),
         GraphDecl::owns(
             "FluxOCIRepositoryState",
@@ -140,11 +153,13 @@ mod tests {
         }
         let names: Vec<String> = indexes.iter().map(|i| i.name()).collect();
         assert!(
-            names.contains(&"polar_unique_Pod_uid".to_string()),
+            names.contains(&"polar_unique_Pod_uid_cluster_uid".to_string()),
             "{names:?}"
         );
         assert!(
-            names.contains(&"polar_unique_PodContainerState_pod_uid_name_valid_from".to_string()),
+            names.contains(
+                &"polar_unique_PodContainerState_pod_uid_name_valid_from_cluster_uid".to_string()
+            ),
             "{names:?}"
         );
         assert!(

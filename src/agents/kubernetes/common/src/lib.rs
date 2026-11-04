@@ -39,6 +39,13 @@ pub const RESYNC_ACTIUON: &str = "Resync";
 pub const KIND_OCI_REPOSITORY: &str = "OCIRepository";
 pub const KIND_KUSTOMIZATION: &str = "Kustomization";
 
+/// Fixed, well-known discovery topics (cmu-sei/Polar issue 236): an observer announces the identity of the cluster
+/// it watches, and asks for the announcements again when a consumer asks. The fork requires every topic to be an
+/// exact, declared name, so public Polar's per-cluster events topic (`polar.kubernetes.<cluster uid>.events`) is not
+/// ported: events stay on one topic and each carries its cluster's UID (`RawKubeEvent::cluster_uid`).
+pub const KUBERNETES_DISCOVERY_ANNOUNCE: &str = "polar.kubernetes.discovery.announce";
+pub const KUBERNETES_DISCOVERY_QUERY: &str = "polar.kubernetes.discovery.query";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RawKubeEvent {
     /// e.g. "Pod", "ConfigMap", "Service"
@@ -49,6 +56,9 @@ pub struct RawKubeEvent {
     pub object: Value,
 
     pub resource_version: Option<String>,
+    /// UID of the kube-system namespace in the cluster this event was observed in. Stamped by the observer at
+    /// emit time. See cmu-sei/Polar issue 236.
+    pub cluster_uid: String,
 }
 
 /// Messages intended to be serialized and set across the broker boundary to consumers for processing

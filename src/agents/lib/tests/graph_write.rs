@@ -87,11 +87,16 @@ async fn count(graph: &Graph, cypher: &str) -> i64 {
 
 fn pod_transition(pod: &str, at: i64, phase: &str) -> GraphOp {
     GraphOp::UpdateState {
-        resource_key: KubeNodeKey::Pod { uid: pod.into() }.into_key(),
+        resource_key: KubeNodeKey::Pod {
+            uid: pod.into(),
+            cluster_uid: "c".into(),
+        }
+        .into_key(),
         state_type_key: KubeNodeKey::State.into_key(),
         state_instance_key: KubeNodeKey::PodState {
             pod_uid: pod.into(),
             valid_from: at,
+            cluster_uid: "c".into(),
         }
         .into_key(),
         state_instance_props: vec![
@@ -176,6 +181,7 @@ fn pods(n: usize) -> GraphOp {
                 (
                     KubeNodeKey::Pod {
                         uid: format!("pod-{i}"),
+                        cluster_uid: "c".into(),
                     }
                     .into_key(),
                     vec![
@@ -261,19 +267,28 @@ async fn a_mixed_batch_writes_the_same_nodes_as_one_statement_an_item() {
 
     let items: Vec<(Box<dyn GraphNodeKey>, Vec<Property>)> = vec![
         (
-            KubeNodeKey::Pod { uid: "a".into() }.into_key(),
+            KubeNodeKey::Pod {
+                uid: "a".into(),
+                cluster_uid: "c".into(),
+            }
+            .into_key(),
             vec![Property("phase".into(), GraphValue::String("x".into()))],
         ),
         (
             KubeNodeKey::PodContainer {
                 pod_uid: "a".into(),
                 name: "c".into(),
+                cluster_uid: "c".into(),
             }
             .into_key(),
             vec![Property("image".into(), GraphValue::String("i".into()))],
         ),
         (
-            KubeNodeKey::Pod { uid: "a".into() }.into_key(),
+            KubeNodeKey::Pod {
+                uid: "a".into(),
+                cluster_uid: "c".into(),
+            }
+            .into_key(),
             vec![
                 Property("phase".into(), GraphValue::String("y".into())),
                 Property("ready".into(), GraphValue::Bool(true)),
@@ -300,7 +315,14 @@ async fn a_mixed_batch_writes_the_same_nodes_as_one_statement_an_item() {
                 Property("n".into(), GraphValue::F64(1.5)),
             ],
         ),
-        (KubeNodeKey::Pod { uid: "b".into() }.into_key(), vec![]),
+        (
+            KubeNodeKey::Pod {
+                uid: "b".into(),
+                cluster_uid: "c".into(),
+            }
+            .into_key(),
+            vec![],
+        ),
     ];
 
     let (graph, _held) = exclusive().await;
@@ -462,19 +484,28 @@ async fn merge_seeks_by_them_instead_of_scanning_the_label() {
     let (graph, _held) = exclusive().await;
     let _runtime = polar_test_graph::enter();
     let pod = || GraphOp::UpsertNode {
-        key: KubeNodeKey::Pod { uid: "x".into() }.into_key(),
+        key: KubeNodeKey::Pod {
+            uid: "x".into(),
+            cluster_uid: "c".into(),
+        }
+        .into_key(),
         props: vec![],
     };
     let pod_state = || GraphOp::UpsertNode {
         key: KubeNodeKey::PodState {
             pod_uid: "x".into(),
             valid_from: 1,
+            cluster_uid: "c".into(),
         }
         .into_key(),
         props: vec![],
     };
     let flux = || GraphOp::UpsertNode {
-        key: KubeNodeKey::FluxOciRepository { uid: "x".into() }.into_key(),
+        key: KubeNodeKey::FluxOciRepository {
+            uid: "x".into(),
+            cluster_uid: "c".into(),
+        }
+        .into_key(),
         props: vec![],
     };
     let uid = serde_json::json!({ "uid": "x" });

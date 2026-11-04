@@ -36,11 +36,26 @@ impl PolarAgent for KubeObserver {
         "Watches the Kubernetes API and publishes what it sees to Cassini";
     const NEEDS: &'static [Capability] = &[Capability::KubeApiRead];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
-    const TOPICS: &'static [TopicDecl] = &[TopicDecl::publish(
-        kube_common::KUBERNETES_CONSUMER,
-        "every change it sees to a watched resource, of any kind, as a RawKubeEvent (JSON)",
-    )
-    .because(&[Cause::Outside("the Kubernetes API")])];
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::publish(
+            kube_common::KUBERNETES_CONSUMER,
+            "every change it sees to a watched resource, of any kind, as a RawKubeEvent (JSON) carrying the \
+             UID of the cluster it was seen in",
+        )
+        .because(&[Cause::Outside("the Kubernetes API")]),
+        TopicDecl::subscribe(
+            kube_common::KUBERNETES_DISCOVERY_QUERY,
+            "a consumer asking every observer to say which cluster it watches",
+        ),
+        TopicDecl::publish(
+            kube_common::KUBERNETES_DISCOVERY_ANNOUNCE,
+            "the UID of the cluster it watches, as UTF-8 text: when it registers, and when asked",
+        )
+        .because(&[
+            Cause::Registered,
+            Cause::Topic(kube_common::KUBERNETES_DISCOVERY_QUERY),
+        ]),
+    ];
     const HELP: Option<&'static str> = Some(
         "kube-observer watches the cluster's resources through the Kubernetes API, with the \
          service account the deployment gives it (read access to everything, nothing else), and \

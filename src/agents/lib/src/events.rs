@@ -52,6 +52,8 @@ pub enum DiscoverySourceRef {
         pod_uid: String,
         image_id: Option<String>,
         container_name: String,
+        /// The cluster the pod runs in: the UID of its kube-system namespace.
+        cluster_uid: String,
     },
     OCIRepository {
         repo_uri: String,

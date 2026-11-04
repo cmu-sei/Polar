@@ -99,11 +99,12 @@ pub struct WatcherActor;
 ///
 /// This function is intentionally actor-agnostic. Lifecycle control
 /// is delegated to the caller.
-#[instrument(skip(tcp_client, kube_client))]
+#[instrument(skip(tcp_client, kube_client, cluster_uid))]
 pub async fn list_and_watch_global<T>(
     tcp_client: &TcpClient,
     kube_client: Client,
     kind: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
@@ -126,6 +127,7 @@ where
     // We can push the envelope to the consumer, but there's really no escaping it since we're querying for already deployed resources
     for obj in list.items {
         let ev = RawKubeEvent {
+            cluster_uid: cluster_uid.to_string(),
             kind: kind.to_string(),
             action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
@@ -174,6 +176,7 @@ where
         match event {
             Event::Apply(obj) => {
                 let ev = RawKubeEvent {
+                    cluster_uid: cluster_uid.to_string(),
                     kind: kind.into(),
                     action: RESOURCE_APPLIED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
@@ -185,6 +188,7 @@ where
 
             Event::Delete(obj) => {
                 let ev = RawKubeEvent {
+                    cluster_uid: cluster_uid.to_string(),
                     kind: kind.into(),
                     action: RESOURCE_DELETED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
@@ -211,12 +215,13 @@ where
         "watch stream for {kind} ended unexpectedly"
     )))
 }
-#[instrument(skip(tcp_client, kube_client))]
+#[instrument(skip(tcp_client, kube_client, cluster_uid))]
 pub async fn list_and_watch_namespaced<T>(
     tcp_client: &TcpClient,
     kube_client: Client,
     kind: &str,
     namespace: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
@@ -235,6 +240,7 @@ where
     for obj in list.items {
         debug!("Discovered k8s object of kind: {kind}.");
         let ev = RawKubeEvent {
+            cluster_uid: cluster_uid.to_string(),
             kind: kind.to_string(),
             action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
@@ -283,6 +289,7 @@ where
         match event {
             Event::Apply(obj) => {
                 let ev = RawKubeEvent {
+                    cluster_uid: cluster_uid.to_string(),
                     kind: kind.into(),
                     action: RESOURCE_APPLIED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
@@ -294,6 +301,7 @@ where
 
             Event::Delete(obj) => {
                 let ev = RawKubeEvent {
+                    cluster_uid: cluster_uid.to_string(),
                     kind: kind.into(),
                     action: RESOURCE_DELETED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
@@ -350,12 +358,16 @@ pub struct GlobalWatcherState {
     pub kube_client: Client,
     pub tcp_client: TcpClient,
     pub kind: &'static str,
+    /// The cluster's identity (the kube-system namespace's UID), stamped on every event.
+    pub cluster_uid: std::sync::Arc<str>,
 }
 pub struct NamespacedWatcherState {
     pub kube_client: Client,
     pub tcp_client: TcpClient,
     pub namespace: String,
     pub kind: &'static str,
+    /// The cluster's identity (the kube-system namespace's UID), stamped on every event.
+    pub cluster_uid: std::sync::Arc<str>,
 }
 
 // TODO: Change existging calls to these macros to use constants defined in kube-common
@@ -407,6 +419,7 @@ macro_rules! impl_namespaced_watcher {
                             state.kube_client.clone(),
                             state.kind,
                             &state.namespace,
+                            &state.cluster_uid,
                         )
                         .await
                         {
@@ -469,6 +482,7 @@ macro_rules! impl_global_watcher {
                             &state.tcp_client,
                             state.kube_client.clone(),
                             state.kind,
+                            &state.cluster_uid,
                         )
                         .await
                         {
