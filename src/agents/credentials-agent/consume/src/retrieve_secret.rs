@@ -155,17 +155,20 @@ impl RetrieveSecretHandler {
                 return RetrieveSecretReply::Failed { detail: e };
             }
         };
-        let target_public_key_pem = match cert_issuer_common::public_key::extract_public_key_pem(
-            &escrow_record.certificate_pem,
-        ) {
-            Ok(pem) => pem,
-            Err(e) => {
-                error!("Escrow certificate for {requested_by} failed public-key extraction: {e}");
-                return RetrieveSecretReply::Failed {
-                    detail: e.to_string(),
-                };
-            }
-        };
+        let target_public_key_pem =
+            match cert_issuer_common::public_key::extract_escrow_public_key_pem(
+                &escrow_record.certificate_pem,
+            ) {
+                Ok(pem) => pem,
+                Err(e) => {
+                    error!(
+                        "Escrow certificate for {requested_by} failed public-key extraction: {e}"
+                    );
+                    return RetrieveSecretReply::Failed {
+                        detail: e.to_string(),
+                    };
+                }
+            };
 
         let Some(stored) = stored else {
             return RetrieveSecretReply::NotFound;
@@ -472,6 +475,54 @@ pub(crate) mod tests {
                 // and not passed through, and not encrypted to the mTLS key (which cannot encrypt).
                 let decrypted = secret.decrypt(&escrow_private_key).unwrap();
                 assert_eq!(&*decrypted, b"a real secret");
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    /// An escrow key is P-256 since the custody daemon holds it, and what comes back is sealed to it.
+    #[tokio::test]
+    async fn a_permitted_secret_is_sealed_to_a_p256_escrow_key() {
+        let w = world(Some(("requester", "gitlab-token"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let certificate_pem =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap()
+                .self_signed(&key_pair)
+                .unwrap()
+                .pem();
+        append(
+            &w.ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: "requester".to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: "requester-escrow-serial-1".to_string(),
+                timestamp: 1000,
+                certificate_pem,
+            },
+        )
+        .await;
+        store_secret(
+            &w.ledger,
+            &w.escrow_keypair,
+            "gitlab-token",
+            b"a real secret",
+        )
+        .await;
+
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+
+        match reply {
+            RetrieveSecretReply::Found { secret } => {
+                let squash = |pem: &str| pem.split_whitespace().collect::<String>();
+                assert_eq!(
+                    squash(secret.encrypted_to_pem()),
+                    squash(&key_pair.public_key_pem())
+                );
             }
             other => panic!("expected Found, got {other:?}"),
         }

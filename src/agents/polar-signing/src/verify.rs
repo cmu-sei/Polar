@@ -65,7 +65,9 @@ pub enum VerifyError {
     KeyUsage,
     #[error("the signature does not verify")]
     BadSignature,
-    #[error("the certificate is not made for encrypting to: it does not permit key encipherment")]
+    #[error(
+        "the certificate is not made for encrypting to: it does not permit what its kind of key is sealed to with"
+    )]
     NotForEncryption,
     #[error("the certificate to encrypt to is a CA certificate")]
     LeafIsCa,
@@ -158,8 +160,16 @@ pub fn verify_escrow_certificate(
     identity: &str,
 ) -> Result<String, VerifyError> {
     believed_leaf(chain_pem, trust, now, identity, |leaf| {
+        // What a secret is sealed with follows the key, as cert-issuer's usage does (polar-escrow's `Suite`): by key agreement
+        // to a P-256 key, by wrapping to an RSA key.
+        let permitted = |usage: &x509_parser::extensions::KeyUsage| match leaf.public_key().parsed()
+        {
+            Ok(x509_parser::public_key::PublicKey::EC(_)) => usage.key_agreement(),
+            Ok(x509_parser::public_key::PublicKey::RSA(_)) => usage.key_encipherment(),
+            _ => false,
+        };
         match leaf.key_usage() {
-            Ok(Some(usage)) if usage.value.key_encipherment() => {}
+            Ok(Some(usage)) if permitted(usage.value) => {}
             _ => return Err(VerifyError::NotForEncryption),
         }
         // The application layer's certificate, not one the transport layer would take.
@@ -177,6 +187,10 @@ pub fn verify_escrow_certificate(
                 "it has no extended key usage, so it is taken for any use",
             )),
         }
+    })
+    .and_then(|leaf| {
+        cert_issuer_common::public_key::extract_escrow_public_key_pem(&leaf)
+            .map_err(|e| VerifyError::NoUsableKey(e.to_string()))
     })
 }
 
@@ -213,6 +227,10 @@ pub fn verify_authority_certificate(
                 "it has no extended key usage, so it is taken for any use",
             )),
         }
+    })
+    .and_then(|leaf| {
+        cert_issuer_common::public_key::extract_public_key_pem(&leaf)
+            .map_err(|e| VerifyError::NoUsableKey(e.to_string()))
     })
 }
 
@@ -280,8 +298,7 @@ fn believed_leaf(
         });
     }
 
-    cert_issuer_common::public_key::extract_public_key_pem(&blocks[0])
-        .map_err(|e| VerifyError::NoUsableKey(e.to_string()))
+    Ok(blocks[0].to_string())
 }
 
 /// The certificates in a PEM string, one string each, in order.

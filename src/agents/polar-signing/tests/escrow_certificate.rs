@@ -24,7 +24,8 @@
 //! Checking an agent's escrow certificate before encrypting to it, against real certificates.
 
 use polar_signing::testing::{
-    ESCROW_PUBLIC_KEY_PEM, EscrowSpec, escrow_certificate, intermediate, now, root,
+    ESCROW_PUBLIC_KEY_PEM, EscrowSpec, escrow_certificate, escrow_certificate_for, intermediate,
+    now, p256_public_key_pem, root,
 };
 use polar_signing::{Trust, VerifyError, verify_escrow_certificate};
 use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
@@ -141,6 +142,31 @@ fn a_certificate_not_made_for_encryption_is_refused() {
                 ..EscrowSpec::default()
             },
         );
+        assert_eq!(
+            verify_escrow_certificate(&cert, &trust(&ca.pem), now(), OBSERVER).unwrap_err(),
+            VerifyError::NotForEncryption
+        );
+    }
+}
+
+/// What a secret is sealed to an escrow key with follows the key, as cert-issuer's `escrow_key_usage` does: by key agreement
+/// to a P-256 key (HPKE), by wrapping to an RSA key (RSA-OAEP). So each is believed with its own usage, and not the other's.
+#[test]
+fn a_certificate_permits_what_a_secret_is_sealed_to_its_kind_of_key_with() {
+    let ca = root("Polar Internal CA");
+    let p256 = p256_public_key_pem();
+    let spec = |usage| EscrowSpec {
+        key_usages: vec![usage],
+        ..EscrowSpec::default()
+    };
+    let cert = escrow_certificate_for(&ca, spec(KeyUsagePurpose::KeyAgreement), &p256);
+    let key = verify_escrow_certificate(&cert, &trust(&ca.pem), now(), OBSERVER).unwrap();
+    assert!(same_key(&key, &p256), "{key}");
+
+    for cert in [
+        escrow_certificate_for(&ca, spec(KeyUsagePurpose::KeyEncipherment), &p256),
+        escrow_certificate(&ca, spec(KeyUsagePurpose::KeyAgreement)),
+    ] {
         assert_eq!(
             verify_escrow_certificate(&cert, &trust(&ca.pem), now(), OBSERVER).unwrap_err(),
             VerifyError::NotForEncryption

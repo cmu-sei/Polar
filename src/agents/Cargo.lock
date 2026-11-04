@@ -6234,6 +6234,7 @@ dependencies = [
  "polar-version",
  "proptest",
  "rand 0.10.3",
+ "rcgen",
  "reqwest 0.12.28",
  "rsa 0.10.0-rc.18",
  "serde_dhall",
