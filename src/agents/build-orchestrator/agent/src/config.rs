@@ -103,6 +103,11 @@ pub struct KubernetesBackendConfig {
     #[serde(default)]
     pub image_pull_policy: Option<String>,
 
+    /// The image of the init container that clones a build's source, pinned by digest (`clone_image_problem`).
+    /// Unset, the orchestrator's default tag, which runtime attestation refuses.
+    #[serde(default)]
+    pub clone_image: Option<String>,
+
     /// The pod additions that give each job a certificate of its own, as JSON text (see
     /// `orchestrator_backend_k8s::job::JobIdentity`). Unset, jobs share the `client-tls` Secret, and
     /// builds that overlap supersede each other on the broker.
@@ -228,6 +233,16 @@ pub fn job_accounts_problem(k: &KubernetesBackendConfig) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// Why the configured clone image cannot be used, if it cannot: a tag can move, so it must be named by digest.
+pub fn clone_image_problem(k: &KubernetesBackendConfig) -> Option<String> {
+    let image = k.clone_image.as_deref()?;
+    (!orchestrator_core::types::pinned_by_digest(image)).then(|| {
+        format!(
+            "the clone image must be pinned by digest (backend.kubernetes.clone_image, name@sha256:<64 hex digits>), not {image:?}"
+        )
+    })
 }
 
 // ── Repo mappings ─────────────────────────────────────────────────────────────
@@ -448,6 +463,30 @@ mod build_cap {
             .is_some(),
             "both a shared account and a fixed set is ambiguous"
         );
+    }
+
+    #[test]
+    fn a_configured_clone_image_must_be_pinned_by_digest() {
+        let k = |v: serde_json::Value| -> KubernetesBackendConfig {
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(
+            clone_image_problem(&k(serde_json::json!({ "namespace": "b" }))),
+            None,
+            "unset: the default, with a warning at start"
+        );
+        let pinned = format!("reg/git-clone@sha256:{}", "e".repeat(64));
+        assert_eq!(
+            clone_image_problem(&k(
+                serde_json::json!({ "namespace": "b", "clone_image": pinned })
+            )),
+            None
+        );
+        let problem = clone_image_problem(&k(
+            serde_json::json!({ "namespace": "b", "clone_image": "reg/git-clone:latest" }),
+        ))
+        .unwrap();
+        assert!(problem.contains("pinned by digest"), "{problem}");
     }
 
     #[test]

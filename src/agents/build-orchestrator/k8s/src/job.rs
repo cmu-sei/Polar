@@ -103,12 +103,9 @@ use uuid::Uuid;
 /// It is separate from both the bootstrap image and the pipeline image —
 /// its only job is to clone a repo at a specific commit into /workspace.
 ///
-/// Pinned by digest here as a compile-time constant. When this image is
-/// updated, update this constant and redeploy. In future this will be
-/// injected from config like the bootstrap image.
-///
-/// TODO: move this to OrchestratorConfig once the config schema is extended.
-const CLONE_INIT_IMAGE: &str = "build-orchestrator/git-clone:latest";
+/// The default only, used when the configuration names no clone image (`JobOptions::clone_image`). It is a tag,
+/// not a digest, so runtime attestation refuses a pod that runs it; a deployment names the image by digest.
+pub const CLONE_INIT_IMAGE: &str = "build-orchestrator/git-clone:latest";
 
 /// Name of the emptyDir volume shared between init and main containers.
 const WORKSPACE_VOLUME: &str = "workspace";
@@ -283,6 +280,9 @@ pub struct JobOptions {
     /// `Always`, `IfNotPresent` or `Never` for the clone and pipeline images. Left alone, a `latest` tag is
     /// pulled every time, which an image loaded into a node by hand cannot survive.
     pub image_pull_policy: Option<String>,
+    /// The image of the init container that clones the source. `CLONE_INIT_IMAGE` unless the configuration names
+    /// one, which it must name by digest.
+    pub clone_image: String,
     /// A certificate for the job, issued to the ServiceAccount its pod runs under (see `JobIdentity`).
     pub identity: Option<JobIdentity>,
     /// The ServiceAccounts a job may run under, made by the deployment. Each is a workload the authority model
@@ -312,6 +312,7 @@ impl JobOptions {
             resources: PipelineResources::default(),
             workspace_size_limit: None,
             image_pull_policy: None,
+            clone_image: CLONE_INIT_IMAGE.to_string(),
             identity: None,
             accounts: Vec::new(),
             shared_account: None,
@@ -366,6 +367,7 @@ pub fn build_job_manifest_as(spec: &BuildSpec, options: &JobOptions, account: Op
 
     let has_git_secret = spec.git_secret.is_some() && matches!(spec.source, SourceRef::Git { .. });
     let mut init_container = clone_init_container(&spec.source, options.keep_git, has_git_secret);
+    init_container.image = Some(options.clone_image.clone());
     init_container.image_pull_policy = options.image_pull_policy.clone();
 
     let identity = options.identity.as_ref();
@@ -1105,6 +1107,36 @@ mod tests {
         assert_eq!(
             ws.empty_dir.unwrap().size_limit,
             Some(Quantity("1Gi".into()))
+        );
+    }
+
+    #[test]
+    fn the_configured_clone_image_is_the_clone_containers() {
+        let pinned = format!("reg/git-clone@sha256:{}", "e".repeat(64));
+        let clone_of = |options: &JobOptions| {
+            let job = build_job_manifest(
+                &spec(SourceRef::Git {
+                    url: "https://github.com/cmu-sei/Polar.git".into(),
+                    commit_sha: "a".repeat(40),
+                }),
+                options,
+            );
+            let pod = job.spec.unwrap().template.spec.unwrap();
+            pod.init_containers
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "clone")
+                .unwrap()
+                .image
+        };
+        let options = JobOptions {
+            clone_image: pinned.clone(),
+            ..JobOptions::new("polar-builds")
+        };
+        assert_eq!(clone_of(&options), Some(pinned));
+        assert_eq!(
+            clone_of(&JobOptions::new("polar-builds")),
+            Some(CLONE_INIT_IMAGE.to_string())
         );
     }
 

@@ -110,6 +110,17 @@ impl PolarAgent for BuildOrchestrator {
                 options.ca_bundle_secret = k8s.ca_bundle_secret.clone();
                 options.workspace_size_limit = k8s.workspace_size_limit.clone();
                 options.image_pull_policy = k8s.image_pull_policy.clone();
+                if let Some(problem) = crate::config::clone_image_problem(k8s) {
+                    return Err(problem.into());
+                }
+                match &k8s.clone_image {
+                    Some(image) => options.clone_image = image.clone(),
+                    None => tracing::warn!(
+                        image = %options.clone_image,
+                        "no clone image is configured (backend.kubernetes.clone_image): jobs clone with the default, \
+                         a tag, which runtime attestation refuses"
+                    ),
+                }
                 options.keep_git = k8s.keep_git;
                 options.retention = config.retention();
                 options.identity = k8s
