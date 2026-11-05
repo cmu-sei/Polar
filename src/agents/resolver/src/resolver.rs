@@ -42,18 +42,13 @@ pub struct ResolverAgent;
 
 impl ResolverAgent {
     pub fn registry_from_image_ref(uri: &str) -> Option<String> {
-        let first = uri.split('/').next()?;
-        // A hostname must either contain a dot (e.g. "ghcr.io") or a colon
-        // with a port AND a path component (e.g. "localhost:5000/repo").
-        // A bare "name:tag" with no slash in the URI is a Docker Hub short
-        // ref, not a registry hostname.
-        let has_dot = first.contains('.');
-        let has_port = first.contains(':') && uri.contains('/');
-        if has_dot || has_port {
-            Some(first.to_string())
-        } else {
-            None
-        }
+        // Docker's rule: the first component is a registry only when a path follows it (a `/`) and it contains a dot
+        // ("ghcr.io") or a colon ("localhost:5000"), or is "localhost". With no `/`, the whole reference is a name with its tag
+        // or digest: the dots of a tag ("neo4j:5.26.2") or the colon of a digest ("app@sha256:...") are not a host, and taking
+        // them for one sent "neo4j:5.26.2" to a registry as if it were qualified while "postgres:17.5" was skipped.
+        let (first, rest) = uri.split_once('/')?;
+        let is_host = first.contains('.') || first.contains(':') || first == "localhost";
+        (is_host && !rest.is_empty()).then(|| first.to_string())
     }
 
     #[instrument(level = "debug", name = "resolver.inspect_image", skip(state))]
@@ -193,6 +188,17 @@ mod tests {
             ("localhost:5000/repo:1", Some("localhost:5000")),
             ("polar-nu-init:latest", None),
             ("ubuntu", None),
+            ("localhost/repo:1", Some("localhost")),
+            ("docker.io/library/postgres:17.5", Some("docker.io")),
+            ("quay.io/keycloak/keycloak:26.2.4", Some("quay.io")),
+            // A tag's dots and a digest's colon are not a host (seen on a cluster: "neo4j:5.26.2" was sent to a registry).
+            ("neo4j:5.26.2", None),
+            ("postgres:17.5", None),
+            (
+                "ws-image@sha256:74be7d88879d59479314d30d331733f73cd3ec640fe575a310c9aaa149a4ae6c",
+                None,
+            ),
+            ("library/postgres:17.5", None),
         ] {
             assert_eq!(
                 ResolverAgent::registry_from_image_ref(uri).as_deref(),
