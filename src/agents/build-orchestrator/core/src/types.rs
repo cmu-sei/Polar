@@ -190,6 +190,18 @@ impl SourceRef {
     }
 }
 
+/// Whether an image reference is pinned by digest: a name, then `@sha256:` and 64 lower-case hex digits. A tag can
+/// move, so what a job runs is named this way; runtime attestation also refuses a container whose image is not.
+pub fn pinned_by_digest(image: &str) -> bool {
+    let Some((name, digest)) = image.rsplit_once('@') else {
+        return false;
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    !name.is_empty() && hex.len() == 64 && hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BuildRequestError {
     #[error(transparent)]
@@ -689,6 +701,23 @@ mod source_ref_tests {
             request(archive(), Some("reg/analyzer@sha256:abc")).validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn only_a_full_sha256_digest_pins_an_image() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert!(pinned_by_digest(&format!("reg/x@sha256:{hex}")));
+        assert!(pinned_by_digest(&format!("reg/x:1.0@sha256:{hex}")));
+        for image in [
+            "reg/x".to_string(),
+            "reg/x:latest".to_string(),
+            "reg/x@sha256:abc".to_string(),
+            format!("reg/x@sha256:{}", hex.to_uppercase()),
+            format!("reg/x@sha512:{hex}"),
+            format!("@sha256:{hex}"),
+        ] {
+            assert!(!pinned_by_digest(&image), "{image}");
+        }
     }
 
     #[test]

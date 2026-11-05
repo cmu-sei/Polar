@@ -28,6 +28,7 @@
 //! decides from this, never from a build request, which a build receives.
 
 use crate::config::RepoMapping;
+use orchestrator_core::types::pinned_by_digest;
 use polar_agent_builder::RuntimeSection;
 use polar_agent_builder::runtime::SectionAuthority;
 use serde_json::{Map, Value};
@@ -137,7 +138,13 @@ fn entry(i: usize, item: &Value) -> Result<RepoMapping, Vec<String>> {
     };
     let pipeline_image = match object.get("pipeline_image") {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::String(s)) if pinned_by_digest(s) => Some(s.clone()),
+        Some(Value::String(s)) => {
+            problems.push(format!(
+                "{label}: `pipeline_image` must be pinned by digest (name@sha256:<64 hex digits>), not {s:?}"
+            ));
+            None
+        }
         Some(_) => {
             problems.push(format!("{label}: `pipeline_image` must be text"));
             None
@@ -166,7 +173,7 @@ mod tests {
     #[test]
     fn a_mapping_reads() {
         let parsed = parse(&json!({"repositories": [
-            {"url": "https://git.example.org/a/b.git", "pipeline_image": "reg/x@sha256:1", "credentials": ["git-a"]}
+            {"url": "https://git.example.org/a/b.git", "pipeline_image": format!("reg/x@sha256:{}", "a".repeat(64)), "credentials": ["git-a"]}
         ]}))
         .unwrap();
         assert_eq!(parsed.len(), 1);
@@ -200,6 +207,22 @@ mod tests {
             !problems.iter().any(|p| p.contains("u:p")),
             "a login must never be echoed"
         );
+    }
+
+    #[test]
+    fn an_image_is_refused_unless_pinned_by_digest() {
+        for image in ["reg/x:latest", "reg/x", "reg/x@sha256:1", ""] {
+            let problems = parse(&json!({"repositories": [
+                {"url": "https://git.example.org/a/b.git", "pipeline_image": image}
+            ]}))
+            .unwrap_err();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("entry 0: `pipeline_image` must be pinned by digest")),
+                "{image:?}: {problems:?}"
+            );
+        }
     }
 
     #[test]
