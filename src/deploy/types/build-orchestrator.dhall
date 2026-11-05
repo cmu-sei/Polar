@@ -87,7 +87,9 @@ let configDir = "/etc/build-orchestrator"
 let BuildOrchestratorValues =
       { Type =
           { platform : Builder.Platform.Type
-          , images : { buildOrchestrator : Text, objectStore : Text }
+          -- `clone`: the init container that clones a build's source (Polar's `cloneImage`), pinned by digest
+          -- (`name@sha256:...`); the orchestrator does not start with a tag here.
+          , images : { buildOrchestrator : Text, objectStore : Text, clone : Text }
           , storageClass : Optional Text
           , storeSize : Text
           -- What a job runs, when its repository's mapping gives no command of its own.
@@ -263,6 +265,7 @@ let configuration =
                                             }
                                             v.trustedCa
                                       , image_pull_policy = JSON.string (merge { Some = λ(p : Text) → p, None = "IfNotPresent" } v.platform.imagePullPolicy)
+                                      , clone_image = JSON.string v.images.clone
                                       -- A job's certificate: `polar-init`, no secret shared between builds, issued to
                                       -- the ServiceAccount the job runs under (`account`), whose pods are instances of
                                       -- one workload, each with a certificate that names its pod.
