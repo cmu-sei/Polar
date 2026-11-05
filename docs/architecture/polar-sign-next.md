@@ -88,8 +88,9 @@ About 150 lines in a new `next.rs`, reusing `verify_source`, `push::place`, the 
 ## Open questions
 
 1. **Does N+1 keep the document's `id`?** The file's `id` is optional, and `sign` makes a new one when it is absent. Keeping it says
-   "the same document, its next version". Whether the receivers or the graph treat an `id` across versions in any particular way should
-   be checked before choosing.
+   "the same document, its next version". Seen on 2026-11-05: mappings version 4 was signed with a new `id` (`24ea2a1b…`; version 3's was
+   `11d9ada3…`), and the build-orchestrator verified and loaded it. So the receiver does not tie versions to an `id`. Whether the graph
+   or the outcome events should is still to decide.
 2. **The repository is not what the agent applied.** If the latest file was refused (a signer without the capability, a tag where a
    digest belongs), `next` builds on the refused version. N+1 is still higher, so nothing breaks, but the header should say "latest in
    the repository", not "applied". An agent's applied version is in its log only.
