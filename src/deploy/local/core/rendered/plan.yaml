@@ -95,7 +95,7 @@ stages:
                   command:
                     - polar-operator
                   env: []
-                  image: polar-operator:latest
+                  image: localhost/polar-operator:latest
                   imagePullPolicy: IfNotPresent
                   name: operator
                   securityContext:
@@ -192,7 +192,7 @@ stages:
           name: cert-issuer
           namespace: polar
         spec:
-          image: cert-issuer:latest
+          image: localhost/cert-issuer:latest
           needs: []
           pod:
             automountServiceAccountToken: true
@@ -371,7 +371,7 @@ stages:
           name: cassini
           namespace: polar
         spec:
-          image: cassini:latest
+          image: localhost/cassini:latest
           needs: []
           pod:
             env:
@@ -410,7 +410,7 @@ stages:
                     value: cassini-ip-svc.polar.svc.cluster.local:8080
                   - name: CASSINI_SERVER_NAME
                     value: cassini.polar.serviceaccount.cluster.local
-                image: polar-custody:latest
+                image: localhost/polar-custody:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-custody
                 restartPolicy: Always
@@ -447,7 +447,7 @@ stages:
                     value: /etc/polar-ca/ca.pem
                   - name: POLAR_CUSTODY_SOCKET
                     value: /run/polar-custody/custody.sock
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:
@@ -571,7 +571,7 @@ stages:
           name: credentials-agent
           namespace: polar
         spec:
-          image: credentials-agent-consumer:latest
+          image: localhost/credentials-agent-consumer:latest
           needs:
             - cassini
           pod:
@@ -621,7 +621,7 @@ stages:
                     value: cassini-ip-svc.polar.svc.cluster.local:8080
                   - name: CASSINI_SERVER_NAME
                     value: cassini.polar.serviceaccount.cluster.local
-                image: polar-custody:latest
+                image: localhost/polar-custody:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-custody
                 restartPolicy: Always
@@ -658,7 +658,7 @@ stages:
                     value: /etc/polar-ca/ca.pem
                   - name: POLAR_CUSTODY_SOCKET
                     value: /run/polar-custody/custody.sock
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:
@@ -724,7 +724,7 @@ stages:
           name: credentials-agent-observer
           namespace: polar
         spec:
-          image: credentials-agent-observer:latest
+          image: localhost/credentials-agent-observer:latest
           needs:
             - cassini
           pod:
@@ -761,7 +761,7 @@ stages:
                     value: cassini-ip-svc.polar.svc.cluster.local:8080
                   - name: CASSINI_SERVER_NAME
                     value: cassini.polar.serviceaccount.cluster.local
-                image: polar-custody:latest
+                image: localhost/polar-custody:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-custody
                 restartPolicy: Always
@@ -798,7 +798,7 @@ stages:
                     value: /etc/polar-ca/ca.pem
                   - name: POLAR_CUSTODY_SOCKET
                     value: /run/polar-custody/custody.sock
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:
@@ -995,7 +995,7 @@ stages:
           name: polar-git-server
           namespace: polar
         spec:
-          image: polar-git-server:latest
+          image: localhost/polar-git-server:latest
           needs:
             - cassini
           pod:
@@ -1044,7 +1044,7 @@ stages:
                     value: cassini-ip-svc.polar.svc.cluster.local:8080
                   - name: CASSINI_SERVER_NAME
                     value: cassini.polar.serviceaccount.cluster.local
-                image: polar-custody:latest
+                image: localhost/polar-custody:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-custody
                 restartPolicy: Always
@@ -1087,7 +1087,7 @@ stages:
                     value: /etc/polar-ca/ca.pem
                   - name: POLAR_CUSTODY_SOCKET
                     value: /run/polar-custody/custody.sock
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:
@@ -1189,7 +1189,7 @@ stages:
           name: polar-scheduler
           namespace: polar
         spec:
-          image: scheduler-processor:latest
+          image: localhost/scheduler-processor:latest
           needs:
             - cassini
             - graph-write
@@ -1240,7 +1240,7 @@ stages:
                     value: cassini-ip-svc.polar.svc.cluster.local:8080
                   - name: CASSINI_SERVER_NAME
                     value: cassini.polar.serviceaccount.cluster.local
-                image: polar-custody:latest
+                image: localhost/polar-custody:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-custody
                 restartPolicy: Always
@@ -1281,7 +1281,7 @@ stages:
                     value: /etc/polar-ca/ca.pem
                   - name: POLAR_CUSTODY_SOCKET
                     value: /run/polar-custody/custody.sock
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:
@@ -1342,7 +1342,7 @@ stages:
           name: polar-scheduler-observer
           namespace: polar
         spec:
-          image: scheduler-observer:latest
+          image: localhost/scheduler-observer:latest
           needs:
             - cassini
           pod:
@@ -1400,7 +1400,7 @@ stages:
                     value: /workspace/token
                   - name: POLAR_INIT_CA_CERT
                     value: /etc/polar-ca/ca.pem
-                image: polar-init:latest
+                image: localhost/polar-init:latest
                 imagePullPolicy: IfNotPresent
                 name: polar-init
                 securityContext:

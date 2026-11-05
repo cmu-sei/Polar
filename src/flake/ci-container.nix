@@ -240,7 +240,7 @@ let
   ];
 
   image = pkgs.dockerTools.buildLayeredImage {
-    name      = "polar-ci";
+    name      = "localhost/polar-ci";
     tag       = "latest";
     contents  = ciContents;
     maxLayers = 20;

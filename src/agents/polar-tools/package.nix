@@ -98,7 +98,7 @@ let
   tools = craneStatic.buildPackage (staticArgs // { inherit cargoArtifacts; inherit (crateArgs) POLAR_SCUDO_LIB_DIR POLAR_VERSION; });
 
   image = pkgs.dockerTools.buildLayeredImage {
-    name = "polar-tools";
+    name = "localhost/polar-tools";
     tag = "latest";
     # Real files, not links into /nix/store, so that extracting the layer yields the tools.
     extraCommands = ''

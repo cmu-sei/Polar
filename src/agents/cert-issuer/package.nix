@@ -65,7 +65,7 @@ let
   '';
 
   serverImage = pkgs.dockerTools.buildLayeredImage {
-    name = "cert-issuer";
+    name = "localhost/cert-issuer";
     tag  = "latest";
 
     contents = [

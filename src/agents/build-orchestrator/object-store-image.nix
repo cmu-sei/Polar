@@ -38,7 +38,7 @@ let
   };
 in
 pkgs.dockerTools.buildLayeredImage {
-  name = "build-orchestrator-object-store";
+  name = "localhost/build-orchestrator-object-store";
   tag = "latest";
   contents = [ entrypoint pkgs.cacert ];
   config = {

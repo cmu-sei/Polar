@@ -46,7 +46,8 @@
     staticanalysis.inputs.rust-overlay.follows    = "rust-overlay";
     dotacat.url                                   = "github:daveman1010221/dotacat-fast";
     dotacat.inputs.nixpkgs.follows                = "nixpkgs";
-    nix-container-lib.url = "github:daveman1010221/nix-container-lib";
+    # On feat/rootless-session until it merges: `imageName` (each image is `localhost/<name>`) and the rootless session.
+    nix-container-lib.url = "github:daveman1010221/nix-container-lib/feat/rootless-session";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
     # Scudo, every binary's allocator (docs/architecture/broker-baseline.md, "Decided"): LLVM's source with a flake that
@@ -107,12 +108,16 @@
         versionLabels = { "org.opencontainers.image.version" = polarVersion; };
 
         # The container lib, with the version label on every image it makes (its extraConfig is merged over its own
-        # Labels, so the title and the rest stay).
+        # Labels, so the title and the rest stay), and every image named `localhost/<config name>`: an image built here
+        # and loaded by hand is in a node's own store, and says so the way podman does. Docker reads a hostless name as
+        # Docker Hub's, and the OCI resolver does too. Registry paths (images.nuon) are unaffected: images.nu pushes to
+        # `<registry>/<image>` whatever the archive calls it.
         containerLib = nix-container-lib // {
           lib = nix-container-lib.lib // {
             ${system} = nix-container-lib.lib.${system} // {
               mkContainer = args: nix-container-lib.lib.${system}.mkContainer (args // {
                 extraConfig = lib.recursiveUpdate { Labels = versionLabels; } (args.extraConfig or { });
+                imageName = args.imageName or "localhost/${(import args.configNixPath).name}";
               });
             };
           };

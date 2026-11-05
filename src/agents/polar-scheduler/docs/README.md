@@ -108,10 +108,10 @@ Run the containers locally to ensure they start correctly (you'll need to supply
 
 ```bash
 # For the processor (Neo4j must be reachable)
-docker run --rm -e GRAPH_ENDPOINT=bolt://host.docker.internal:7687 ... polar-scheduler-processor:latest
+docker run --rm -e GRAPH_ENDPOINT=bolt://host.docker.internal:7687 ... localhost/scheduler-processor:latest
 
 # For the observer (needs Git remote URL and local path)
-docker run --rm -e POLAR_SCHEDULER_REMOTE_URL=... -e POLAR_SCHEDULER_LOCAL_PATH=/data ... polar-scheduler-observer:latest
+docker run --rm -e POLAR_SCHEDULER_REMOTE_URL=... -e POLAR_SCHEDULER_LOCAL_PATH=/data ... localhost/scheduler-observer:latest
 ```
 
 All configuration is done via environment variables at runtime.

@@ -33,21 +33,21 @@ let Polar = ../../types/package.dhall
 let values
     : Polar.core.CoreValues.Type
     = { images =
-        { operator = "polar-operator:latest"
-        , certIssuer = "cert-issuer:latest"
-        , polarInit = "polar-init:latest"
-        , cassini = "cassini:latest"
-        , credentialsAgent = "credentials-agent-consumer:latest"
-        , credentialsAgentObserver = "credentials-agent-observer:latest"
+        { operator = "localhost/polar-operator:latest"
+        , certIssuer = "localhost/cert-issuer:latest"
+        , polarInit = "localhost/polar-init:latest"
+        , cassini = "localhost/cassini:latest"
+        , credentialsAgent = "localhost/credentials-agent-consumer:latest"
+        , credentialsAgentObserver = "localhost/credentials-agent-observer:latest"
         , neo4j = "neo4j:5.26.2"
-        , gitServer = "polar-git-server:latest"
-        , schedulerProcessor = "scheduler-processor:latest"
-        , schedulerObserver = "scheduler-observer:latest"
+        , gitServer = "localhost/polar-git-server:latest"
+        , schedulerProcessor = "localhost/scheduler-processor:latest"
+        , schedulerObserver = "localhost/scheduler-observer:latest"
         }
       , imagePullPolicy = Some "IfNotPresent"
       , storageClass = None Text
       -- Every pod's mTLS key is the custody daemon's; the plan makes the cluster's CA once, and the issuer loads it.
-      , custodyImage = Some "polar-custody:latest"
+      , custodyImage = Some "localhost/polar-custody:latest"
       , pinnedCa = Some "polar-ca"
       , caSecret = Some "cert-issuer-ca"
       , gitServerAdmins = [] : List Text

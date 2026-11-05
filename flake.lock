@@ -248,15 +248,16 @@
         "vigil-rs": "vigil-rs"
       },
       "locked": {
-        "lastModified": 1793372268,
-        "narHash": "sha256-AnNgAYP52jhlWY2uP8jOJEjMaARcp5P+hUwczXeTn/4=",
+        "lastModified": 1793895522,
+        "narHash": "sha256-VUILzQeZB1qBwn8lRYCfFjVCYCsgwmOnPXsV4YoyDBg=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "72f9d1063f1c8a215ade6b217999124fd216c1a1",
+        "rev": "15da41510e48252565ae0d105cfb64ba8f492fb6",
         "type": "github"
       },
       "original": {
         "owner": "daveman1010221",
+        "ref": "feat/rootless-session",
         "repo": "nix-container-lib",
         "type": "github"
       }
