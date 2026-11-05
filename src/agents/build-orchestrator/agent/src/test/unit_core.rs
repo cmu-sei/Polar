@@ -301,6 +301,55 @@ mod config_image_lookup {
         );
     }
 
+    fn request(
+        source: orchestrator_core::types::SourceRef,
+        image: Option<&str>,
+    ) -> orchestrator_core::types::BuildRequest {
+        orchestrator_core::types::BuildRequest {
+            build_id: uuid::Uuid::nil(),
+            source,
+            pipeline_image: image.map(Into::into),
+            requested_by: "test".into(),
+            requested_at: chrono::Utc::now(),
+            target_registry: String::new(),
+            metadata: Default::default(),
+            command: vec![],
+        }
+    }
+
+    #[test]
+    fn a_git_build_runs_its_mappings_image_and_never_the_requests() {
+        use crate::actors::build_job::resolve_pipeline_image;
+        use orchestrator_core::types::SourceRef;
+
+        let url = "https://gitlab.example.com/polar/myapp";
+        let mapped = format!("reg/mapped@sha256:{}", "a".repeat(64));
+        let asked = format!("reg/asked@sha256:{}", "b".repeat(64));
+        let git = || SourceRef::Git {
+            url: url.to_string(),
+            commit_sha: "c".repeat(40),
+        };
+        let config = config_with_mappings(vec![RepoMapping {
+            repo_url: url.to_string(),
+            pipeline_image: Some(mapped.clone()),
+            ..Default::default()
+        }]);
+
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), Some(&asked)), &config),
+            Some(mapped.clone())
+        );
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), None), &config),
+            Some(mapped)
+        );
+        // No mapping: nothing to run, whatever the request names.
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), Some(&asked)), &config_with_mappings(vec![])),
+            None
+        );
+    }
+
     #[test]
     fn match_is_exact_not_prefix() {
         let config = config_with_mappings(vec![RepoMapping {

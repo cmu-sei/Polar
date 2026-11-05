@@ -255,9 +255,7 @@ impl BuildJobActor {
             Ok(())
         }
     }
-    /// Entry point. Transitions to ResolvingImage and resolves the image to run:
-    /// the request's own image if it names one, otherwise the configured
-    /// pipeline image for the git repo.
+    /// Entry point. Transitions to ResolvingImage and resolves the image to run (`resolve_pipeline_image`).
     async fn handle_start(
         &self,
         myself: ActorRef<BuildJobMessage>,
@@ -267,14 +265,16 @@ impl BuildJobActor {
 
         self.transition(state, BuildState::ResolvingImage, None, None, None)?;
 
-        let pipeline_image = match (&state.request.pipeline_image, &state.request.source) {
-            (Some(image), _) => Some(image.clone()),
-            (None, SourceRef::Git { url, .. }) => {
-                state.config.pipeline_image_for(url).map(|s| s.to_string())
-            }
-            // Repo mappings only exist for git sources.
-            (None, SourceRef::RegistryArchive { .. }) => None,
-        };
+        if let (Some(asked), SourceRef::Git { .. }) =
+            (&state.request.pipeline_image, &state.request.source)
+        {
+            tracing::warn!(
+                build_id = %build_id,
+                image = %asked,
+                "ignored the image the request names: a git build runs its mapping's"
+            );
+        }
+        let pipeline_image = resolve_pipeline_image(&state.request, &state.config);
 
         match pipeline_image {
             Some(image) => {
@@ -287,7 +287,7 @@ impl BuildJobActor {
                 tracing::error!(
                     build_id = %build_id,
                     source = %state.request.source.locator(),
-                    "no pipeline image in request or config for this source"
+                    "no pipeline image for this source: its mapping names none, or the analysis request names no analyzer"
                 );
                 self.fail(
                     state,
@@ -752,4 +752,17 @@ pub(crate) fn derive_bootstrap_output_image(
     let short_sha = &commit_sha[..commit_sha.len().min(12)];
 
     format!("{}/{repo_slug}:{short_sha}", target_registry)
+}
+
+/// The image a build runs. A git build runs its repository's mapping's image and never the request's: a request can
+/// come from anyone who can publish on the broker, and the mapping is a signed document. An archive build (analysis)
+/// has no mapping and runs the analyzer the request names, which `BuildRequest::validate` holds to a digest.
+pub(crate) fn resolve_pipeline_image(
+    request: &BuildRequest,
+    config: &OrchestratorConfig,
+) -> Option<String> {
+    match &request.source {
+        SourceRef::Git { url, .. } => config.pipeline_image_for(url).map(str::to_string),
+        SourceRef::RegistryArchive { .. } => request.pipeline_image.clone(),
+    }
 }
