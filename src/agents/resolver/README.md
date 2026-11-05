@@ -62,7 +62,17 @@ For a private registry with an internal CA, or a proxy that inspects TLS, the ta
 
 ## Known Limitations
 
-**Unqualified image references** — When a pod spec contains an image reference without a registry prefix (e.g. `myimage:latest`), the Kubernetes API reports exactly that string. The resolver cannot determine the registry of origin from an unqualified reference and will skip resolution rather than guess. This is recorded in the graph as a provenance gap: the container was running an image whose origin cannot be verified. This most commonly occurs with locally loaded images in development environments. In production, all image references should be fully qualified.
+**Images in a node's own store** — The resolver reads a reference by Docker's rule (`oci_client::Reference`, a port of Docker's `normalize.go`): a name with no registry host belongs to Docker Hub, so `postgres:17.5` is `docker.io/library/postgres:17.5`, and a name whose registry is `localhost` (`localhost/blitz-portal:latest`) is in a node's own image store, as podman names what it builds and as Polar and Blitz name the images they build and load by hand. `localhost:5000/…` is a registry like any other and is resolved.
+
+A node-local image fails closed. The resolver cannot see a node's image store (it may run on another node), so it never fetches such an image and never vouches for one: it logs `not verified: … is a node-local image` and emits no event, so the container gets no `USES_IMAGE` edge. Calling an image local can only take a verification away, never give one. The gap is a query, not a node:
+
+```cypher
+MATCH (c:PodContainer)
+WHERE c.image STARTS WITH 'localhost/' AND NOT (c)-[:USES_IMAGE]->(:OCIArtifact)
+RETURN c
+```
+
+In production, every image should come from a registry.
 
 **Identity tokens** — Some credential helpers return an OAuth2 identity token rather than a username/password pair. Identity tokens are not directly usable for OCI registry API calls — they are inputs to a registry-specific token exchange flow that `oci-client` does not implement. Affected registries will fall back to anonymous access. Use username/password or token-based credentials in `DOCKER_CONFIG` for private registry authentication.
 
@@ -72,7 +82,8 @@ For a private registry with an internal CA, or a proxy that inspects TLS, the ta
 |---|---|
 | `POLAR_EGRESS_CA_CERT` | PEM CA certificates trusted beside the system's (the egress section, `polar::egress`) |
 | `POLAR_EGRESS_PROXY`, `POLAR_EGRESS_NO_PROXY` | The proxy a registry is reached through, and the hosts reached directly |
-| `DOCKER_CONFIG` | Path to Docker credential config directory (standard OCI client convention) |
+| `DOCKER_CONFIG` | Path to Docker credential config directory (standard OCI client convention); `$HOME/.docker` when unset, and anonymous access when that is not there |
+| `OCI_INSECURE_REGISTRIES` | Registries reached over plain HTTP, comma-separated (default `registry.local-registry.svc.cluster.local:5000`) |
 
 Standard Cassini broker connection variables apply as with all Polar agents.
 
@@ -84,5 +95,5 @@ docker load < resolver-image
 docker run --rm \
   -e DOCKER_CONFIG=/config \
   -v /path/to/docker-config:/config \
-  polar-oci-resolver:latest
+  localhost/oci-resolver:latest
 ```

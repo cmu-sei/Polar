@@ -40,42 +40,40 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub struct ResolverAgent;
 
+/// Where an image reference says its image lives ([`ResolverAgent::image_source`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSource {
+    /// A registry, by its name as Docker normalizes it (`docker.io` for a hostless name).
+    Registry(String),
+    /// The node's own image store (registry `localhost`): never fetched, never verified.
+    NodeLocal,
+}
+
 impl ResolverAgent {
-    pub fn registry_from_image_ref(uri: &str) -> Option<String> {
-        // Docker's rule: the first component is a registry only when a path follows it (a `/`) and it contains a dot
-        // ("ghcr.io") or a colon ("localhost:5000"), or is "localhost". With no `/`, the whole reference is a name with its tag
-        // or digest: the dots of a tag ("neo4j:5.26.2") or the colon of a digest ("app@sha256:...") are not a host, and taking
-        // them for one sent "neo4j:5.26.2" to a registry as if it were qualified while "postgres:17.5" was skipped.
-        let (first, rest) = uri.split_once('/')?;
-        let is_host = first.contains('.') || first.contains(':') || first == "localhost";
-        (is_host && !rest.is_empty()).then(|| first.to_string())
+    /// Where an image reference says its image lives, by Docker's rule (`oci_client::Reference` is a port of Docker's
+    /// normalize.go): a name with no registry host is Docker Hub's ("postgres:17.5" is docker.io/library/postgres), and one
+    /// whose registry is `localhost` is in the node's own image store, as podman names what it builds and as Polar and Blitz
+    /// name the images they build and load by hand. `localhost:5000` is a registry like any other. `None`: not a reference.
+    pub fn image_source(uri: &str) -> Option<ImageSource> {
+        let reference = Reference::from_str(uri).ok()?;
+        Some(if reference.registry() == "localhost" {
+            ImageSource::NodeLocal
+        } else {
+            ImageSource::Registry(reference.registry().to_string())
+        })
     }
 
     #[instrument(level = "debug", name = "resolver.inspect_image", skip(state))]
     async fn inspect_image(
         state: &mut ResolverAgentState,
         image_ref: &str,
-    ) -> Result<Option<(OciManifest, String)>, ActorProcessingErr> {
-        // gaurd against unnecessary network calls by looking to see if a registry prefix is present.
-        // images tagged like "polar-nu-init:latest" for instance, which are fine when using Orbstack for example, are valid
-        // and can be used in its local cluster. So when the kubernetes processsor sees this and emits an event, we get exactly that.
-        // To save ourselves the network call, this is an easy add.
-        if Self::registry_from_image_ref(image_ref).is_none() {
-            debug!(
-                "Skipping image ref \"{image_ref}\": no registry component — likely a locally loaded image"
-            );
-            return Ok(None);
-        }
-
+    ) -> Result<(OciManifest, String), ActorProcessingErr> {
         debug!("Attempting to resolve image: {image_ref}");
         let reference = Reference::from_str(image_ref)?;
         let auth =
             auth::registry_auth(state.docker_config.as_deref(), reference.resolve_registry())?;
 
-        match state.oci_client.pull_manifest(&reference, &auth).await {
-            Ok(response) => Ok(Some(response)),
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
+        Ok(state.oci_client.pull_manifest(&reference, &auth).await?)
     }
 
     fn forward_event(
@@ -125,46 +123,58 @@ impl Actor for ResolverAgent {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProvenanceEvent::OCIArtifactDiscovered { uri, source_ref } => {
-                match Self::inspect_image(state, &uri).await {
-                    Ok(Some((manifest, digest))) => {
-                        debug!("Resolved image: \n {manifest:?}");
-
-                        if let Some(hostname) = Self::registry_from_image_ref(&uri) {
-                            let manifest_data = serde_json::to_vec(&manifest)?;
-
-                            // construct new event, pass source_ref through
-                            let event = ProvenanceEvent::OCIArtifactResolved {
-                                uri: uri.clone(),
-                                digest,
-                                manifest_data,
-                                registry: hostname,
-                                source_ref: source_ref.clone(),
-                            };
-
-                            // depending on the source of the discovery, forward to appropriate parties
-                            match source_ref {
-                                DiscoverySourceRef::KubernetesPodContainer { .. } => {
-                                    //forward to a k8s consumer
-
-                                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
-
-                                    state.cassini_client.publish(PublishRequest {
-                                        topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
-                                        payload: payload.into(),
-                                        trace_ctx: WireTraceCtx::from_current_span(),
-                                        offline_behavior: OfflineBehavior::default(),
-                                        share_identity: true,
-                                    })?;
-                                }
-                                DiscoverySourceRef::OCIRepository { .. } => (),
-                            }
-
-                            Self::forward_event(state, event)?
-                        } else {
-                            warn!("Could not extract registry hostname from image ref: {uri}");
-                        }
+                let registry = match Self::image_source(&uri) {
+                    Some(ImageSource::Registry(registry)) => registry,
+                    // A node-local image fails closed. This resolver cannot see a node's image store (it may run on another
+                    // node), so it never fetches one and never vouches for one: no event, and so no USES_IMAGE edge. A claim
+                    // that an image is local can only take a verification away, never give one. The gap is in the graph as
+                    // a PodContainer whose image names the localhost registry and has no USES_IMAGE edge (README, "Images
+                    // in a node's own store").
+                    Some(ImageSource::NodeLocal) => {
+                        info!(
+                            "not verified: {uri} is a node-local image (registry localhost), which no registry can vouch for"
+                        );
+                        return Ok(());
                     }
-                    Ok(None) => {}
+                    None => {
+                        warn!("not verified: {uri} is not an image reference");
+                        return Ok(());
+                    }
+                };
+                match Self::inspect_image(state, &uri).await {
+                    Ok((manifest, digest)) => {
+                        debug!("Resolved image: \n {manifest:?}");
+                        let manifest_data = serde_json::to_vec(&manifest)?;
+
+                        // construct new event, pass source_ref through
+                        let event = ProvenanceEvent::OCIArtifactResolved {
+                            uri: uri.clone(),
+                            digest,
+                            manifest_data,
+                            registry,
+                            source_ref: source_ref.clone(),
+                        };
+
+                        // depending on the source of the discovery, forward to appropriate parties
+                        match source_ref {
+                            DiscoverySourceRef::KubernetesPodContainer { .. } => {
+                                //forward to a k8s consumer
+
+                                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
+
+                                state.cassini_client.publish(PublishRequest {
+                                    topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
+                                    payload: payload.into(),
+                                    trace_ctx: WireTraceCtx::from_current_span(),
+                                    offline_behavior: OfflineBehavior::default(),
+                                    share_identity: true,
+                                })?;
+                            }
+                            DiscoverySourceRef::OCIRepository { .. } => (),
+                        }
+
+                        Self::forward_event(state, event)?
+                    }
                     Err(e) => {
                         error!("Failed to resolve image: {uri}, {e}");
                     }
@@ -182,29 +192,32 @@ mod tests {
     use super::ResolverAgent;
 
     #[test]
-    fn an_image_with_a_registry_is_resolved_and_a_local_one_is_not() {
-        for (uri, registry) in [
-            ("ghcr.io/org/app:1", Some("ghcr.io")),
-            ("localhost:5000/repo:1", Some("localhost:5000")),
-            ("polar-nu-init:latest", None),
-            ("ubuntu", None),
-            ("localhost/repo:1", Some("localhost")),
-            ("docker.io/library/postgres:17.5", Some("docker.io")),
-            ("quay.io/keycloak/keycloak:26.2.4", Some("quay.io")),
-            // A tag's dots and a digest's colon are not a host (seen on a cluster: "neo4j:5.26.2" was sent to a registry).
-            ("neo4j:5.26.2", None),
-            ("postgres:17.5", None),
+    fn a_reference_says_where_its_image_lives_by_dockers_rule() {
+        use super::ImageSource::{NodeLocal, Registry};
+        let registry = |r: &str| Some(Registry(r.to_string()));
+        for (uri, source) in [
+            // Hostless names are Docker Hub's, tags and digests included (a tag's dots are not a host).
+            ("postgres:17.5", registry("docker.io")),
+            ("neo4j:5.26.2", registry("docker.io")),
+            ("ubuntu", registry("docker.io")),
+            ("library/postgres:17.5", registry("docker.io")),
+            ("ferronserver/ferron:3", registry("docker.io")),
             (
                 "ws-image@sha256:74be7d88879d59479314d30d331733f73cd3ec640fe575a310c9aaa149a4ae6c",
-                None,
+                registry("docker.io"),
             ),
-            ("library/postgres:17.5", None),
+            // A registry host is the first component when a path follows it.
+            ("ghcr.io/org/app:1", registry("ghcr.io")),
+            ("quay.io/keycloak/keycloak:26.2.4", registry("quay.io")),
+            ("docker.io/library/postgres:17.5", registry("docker.io")),
+            ("localhost:5000/repo:1", registry("localhost:5000")),
+            // `localhost` alone is the node's own image store.
+            ("localhost/blitz-portal:latest", Some(NodeLocal)),
+            ("localhost/polar-init:latest", Some(NodeLocal)),
+            // Not a reference at all.
+            ("UPPER/Case:bad tag", None),
         ] {
-            assert_eq!(
-                ResolverAgent::registry_from_image_ref(uri).as_deref(),
-                registry,
-                "{uri}"
-            );
+            assert_eq!(ResolverAgent::image_source(uri), source, "{uri}");
         }
     }
 }
