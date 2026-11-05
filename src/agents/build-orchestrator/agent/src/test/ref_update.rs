@@ -150,7 +150,7 @@ mod ref_update {
             ..Default::default()
         };
         let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
-        OrchestratorSupervisor::command_from_mapping(&[mapping], &default, &mut request);
+        OrchestratorSupervisor::command_from_mapping(&[mapping], &default, &mut request).unwrap();
         assert_eq!(request.command, ["sh", "-c", "mapped"]);
 
         // The mapping gives none: the configuration file's.
@@ -159,12 +159,20 @@ mod ref_update {
             ..Default::default()
         };
         let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
-        OrchestratorSupervisor::command_from_mapping(&[bare], &default, &mut request);
+        OrchestratorSupervisor::command_from_mapping(&[bare], &default, &mut request).unwrap();
         assert_eq!(request.command, default);
+    }
 
-        // A repository with no mapping has nothing but the request's.
+    #[test]
+    fn a_repository_with_no_mapping_is_not_built() {
+        let url = "https://git.example.org/a.git";
+        let other = RepoMapping {
+            repo_url: "https://git.example.org/other.git".to_string(),
+            ..Default::default()
+        };
         let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
-        OrchestratorSupervisor::command_from_mapping(&[], &default, &mut request);
-        assert_eq!(request.command, ["sh", "-c", "from the request"]);
+        let why =
+            OrchestratorSupervisor::command_from_mapping(&[other], &[], &mut request).unwrap_err();
+        assert!(why.contains(url) && why.contains("no mapping"), "{why}");
     }
 }

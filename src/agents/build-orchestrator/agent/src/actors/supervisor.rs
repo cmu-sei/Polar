@@ -543,19 +543,23 @@ impl OrchestratorSupervisor {
     }
 
     /// What a mapped repository's build runs is the mapping's, or the configuration file's, and never what the
-    /// request says: a request can come from anyone who can publish on the broker. A repository with no mapping
-    /// keeps the request's own command, as it has no other.
+    /// request says: a request can come from anyone who can publish on the broker. A repository with no mapping is
+    /// not built at all (`Err`, with why): the signed mappings are the only thing that says what may run.
     pub fn command_from_mapping(
         mappings: &[RepoMapping],
         default: &[String],
         request: &mut BuildRequest,
-    ) {
+    ) -> Result<(), String> {
         let SourceRef::Git { url, .. } = &request.source else {
-            return;
+            return Ok(());
         };
-        if let Some(mapping) = mappings.iter().find(|m| &m.repo_url == url) {
-            request.command = mapping.command.clone().unwrap_or_else(|| default.to_vec());
-        }
+        let Some(mapping) = mappings.iter().find(|m| &m.repo_url == url) else {
+            return Err(format!(
+                "{url} has no mapping, and only a mapped repository is built"
+            ));
+        };
+        request.command = mapping.command.clone().unwrap_or_else(|| default.to_vec());
+        Ok(())
     }
 
     /// The configuration as it stands now: the file's, with the repositories the latest section named.
@@ -595,7 +599,12 @@ impl OrchestratorSupervisor {
         }
 
         let mut request = request;
-        Self::command_from_mapping(&state.mappings, &state.config.backend.command, &mut request);
+        if let Err(why) =
+            Self::command_from_mapping(&state.mappings, &state.config.backend.command, &mut request)
+        {
+            tracing::warn!(build_id = %build_id, "rejected a build request: {why}");
+            return Ok(());
+        }
 
         match state.admission.request(request.clone()) {
             Admitted::Duplicate => {
