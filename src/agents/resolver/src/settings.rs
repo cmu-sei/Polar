@@ -38,6 +38,11 @@ pub static DOCKER_CONFIG: Optional<String> = Optional::text(
      without credentials the registry is asked anonymously",
 );
 
+pub static HOME: Optional<String> = Optional::text(
+    "HOME",
+    "the home directory: when DOCKER_CONFIG is unset, registry credentials are looked up in its .docker",
+);
+
 /// The registry a local cluster pulls from, over http: kept as the default so a deployment that
 /// says nothing behaves as the resolver always did.
 pub const DEFAULT_INSECURE_REGISTRIES: &str = "registry.local-registry.svc.cluster.local:5000";
@@ -49,7 +54,7 @@ pub static INSECURE_REGISTRIES: Defaulted<Vec<String>> = Defaulted::list(
     DEFAULT_INSECURE_REGISTRIES,
 );
 
-static VARIABLES: &[&dyn Described] = &[&DOCKER_CONFIG, &INSECURE_REGISTRIES];
+static VARIABLES: &[&dyn Described] = &[&DOCKER_CONFIG, &HOME, &INSECURE_REGISTRIES];
 
 /// The section the OCI resolver registers.
 pub static SECTION: Section = Section {
@@ -59,6 +64,11 @@ pub static SECTION: Section = Section {
 };
 
 pub struct ResolverSettings {
+    /// Where the credential file is looked for: `DOCKER_CONFIG`, else the home's `.docker`, as the `docker_credential` crate
+    /// would. Always a directory when either is set, so that a credential file that is not there is no credentials (anonymous
+    /// access), and one that is there and cannot be read is an error. Left to the crate's own lookup, which reads the
+    /// environment itself, a home with no `.docker/config.json` (every pod's) was "Unable to read config", and failed every
+    /// resolution.
     pub docker_config: Option<String>,
     pub insecure_registries: Vec<String>,
 }
@@ -66,7 +76,9 @@ pub struct ResolverSettings {
 impl ResolverSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
-            docker_config: config.read(&DOCKER_CONFIG)?,
+            docker_config: config
+                .read(&DOCKER_CONFIG)?
+                .or(config.read(&HOME)?.map(|home| format!("{home}/.docker"))),
             insecure_registries: config.read(&INSECURE_REGISTRIES)?,
         })
     }
@@ -99,6 +111,24 @@ mod tests {
             vec![DEFAULT_INSECURE_REGISTRIES.to_string()]
         );
         assert!(config(&[]).check().is_empty());
+    }
+
+    #[test]
+    fn without_docker_config_the_homes_docker_directory_is_used() {
+        let settings = ResolverSettings::read(&config(&[("HOME", "/home/polar")])).unwrap();
+        assert_eq!(
+            settings.docker_config.as_deref(),
+            Some("/home/polar/.docker")
+        );
+        let both = ResolverSettings::read(&config(&[
+            ("HOME", "/home/polar"),
+            ("DOCKER_CONFIG", "/etc/oci-registry-auth"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            both.docker_config.as_deref(),
+            Some("/etc/oci-registry-auth")
+        );
     }
 
     #[test]

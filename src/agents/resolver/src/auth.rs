@@ -195,6 +195,17 @@ mod tests {
         ));
     }
 
+    /// A pod's case: the home's `.docker` is not there at all. Seen on a cluster as "Unable to read config" for every image,
+    /// when the lookup was left to the crate.
+    #[test]
+    fn a_credentials_directory_that_is_not_there_is_anonymous() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            registry_auth(Some(&home.path().join(".docker")), "index.docker.io").unwrap(),
+            RegistryAuth::Anonymous
+        ));
+    }
+
     #[test]
     fn a_config_that_is_not_json_is_an_error_and_not_anonymous_access() {
         let dir = dir_with("this is not json");
