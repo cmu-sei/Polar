@@ -52,7 +52,18 @@ not marked its workload can still give a fixed set (`backend.kubernetes.accounts
 **A commit is built once.** The git observer reports every ref each time it looks, and again from nothing when it
 restarts. The orchestrator ignores a report in which the ref did not move (`old == new`), and does not build a commit it
 has already taken for a build; a build that did not succeed is forgotten, so the commit is tried again when it is next
-reported. A request on `polar.orchestrator.builds.requests` is always built (`src/observed.rs`).
+reported. A request on `polar.orchestrator.builds.requests` is built whenever its repository is mapped (`src/observed.rs`).
+
+**What a build runs is the signed `mappings`' alone.** A request can come from anyone who can publish on the broker, so:
+
+- a git build runs its mapping's `pipeline_image` and command (or the configuration file's command); an image a request
+  names is ignored (`resolve_pipeline_image` in `src/actors/build_job.rs`);
+- a request for a repository with no mapping is refused, and logged (`command_from_mapping` in `src/actors/supervisor.rs`);
+- a `mappings` section whose `pipeline_image` is not pinned by digest (`name@sha256:<64 hex digits>`) is refused when it is
+  applied (`src/mappings.rs`);
+- the clone init container's image is `backend.kubernetes.clone_image`, which must be pinned by digest or the orchestrator does
+  not start. Unset, it is the default `build-orchestrator/git-clone:latest`, with a warning: runtime attestation refuses a pod
+  whose images are not pinned in its owner, so a deployment names it.
 
 **At most `max_concurrent_builds` run at once**; the rest wait (`src/admission.rs`).
 
