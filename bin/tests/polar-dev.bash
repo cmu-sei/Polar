@@ -87,7 +87,7 @@ POD_LOG='  • Headless ......... vigild is PID 1; log in over SSH
 [52] Oct 29 14:02:11 Exit before auth from <127.0.0.1:56188>: No matching algo hostkey'
 # The clone's refusal (2026-10-29).
 CLONE="Cloning into '/workspace'...
-git@52.235.181.217: Permission denied (publickey).
+git@git.example.org: Permission denied (publickey).
 fatal: Could not read from remote repository.
 
 Please make sure you have the correct access rights
@@ -235,15 +235,15 @@ is "no pod yet says nothing" "$out" ""
 
 # ── The clone ───────────────────────────────────────────────────────────────
 
-is "the host of an scp-style remote" "$(repo_host git@52.235.181.217:SEI/ACE.git)" 52.235.181.217
+is "the host of an scp-style remote" "$(repo_host git@github.com:cmu-sei/Polar.git)" github.com
 is "the host of an ssh URL with a port" "$(repo_host ssh://git@gitlab.example.org:2222/SEI/ACE.git)" gitlab.example.org
 is "the host of an https URL" "$(repo_host https://github.com/cmu-sei/Polar.git)" github.com
 is "the host of a remote with no user" "$(repo_host example.org:SEI/ACE.git)" example.org
-hint=$(clone_hint 52.235.181.217 "$AGENT_LIST")
-has "a refused clone names the server" "$hint" "52.235.181.217"
+hint=$(clone_hint git.example.org "$AGENT_LIST")
+has "a refused clone names the server" "$hint" "git.example.org"
 has "a refused clone says the server knows none of the keys" "$hint" "knows none of the keys"
 has "a refused clone lists the agent's fingerprints" "$hint" "SHA256:AAAAexampleED25519fingerprintAAAAAAAAAAAAAA pat@mac (ED25519)"
-has "a refused clone says to add a key" "$hint" "add one of them to your account on 52.235.181.217"
+has "a refused clone says to add a key" "$hint" "add one of them to your account on git.example.org"
 has "a refused clone offers POLAR_DEV_REPO" "$hint" "POLAR_DEV_REPO"
 has "a refused clone says how to clone later" "$hint" "bin/polar-dev up"
 
