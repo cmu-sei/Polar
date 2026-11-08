@@ -281,7 +281,7 @@ def generate-static-summary [results: table, output_dir: string] {
         )
     }
     $sections | flatten | str join "\n" | save --force $summary_file
-    log-info (green $"summary written to ($summary_file)") --component $COMPONENT
+    log-info (print-green $"summary written to ($summary_file)") --component $COMPONENT
 }
 
 def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> table {

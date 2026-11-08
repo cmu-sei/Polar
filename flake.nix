@@ -197,6 +197,9 @@
 
           inherit dhallCache;
 
+          # ── The pipeline core, for other projects' pipeline images ──────────
+          corePipelineLibFiles = pkgs.callPackage ./scripts/pipeline/core/package.nix {};
+
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
           ciContainer          = ciContainer.image;
