@@ -1,10 +1,33 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 /* ============================
  * Tests
  * ============================
  */
 
+use git_agent_common::RepoObservationConfig;
 use git_repo_observer::*;
-
 use git2::{Commit, CredentialType, Oid, Repository};
 use polar::graph::nodes::git::RepoId;
 use std::collections::HashMap;
@@ -59,59 +82,7 @@ fn linear_history(repo: &Repository, ref_name: &str, count: usize) -> Vec<Oid> {
     commits
 }
 
-// --- GitHttpCredential tests ---
-
-#[test]
-fn token_credential_produces_userpass() {
-    let cred = GitHttpCredential::Token {
-        token: "token".into(),
-        username: None,
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "oauth2");
-    assert_eq!(password, "token");
-}
-
-#[test]
-fn userpass_credential_produces_userpass() {
-    let cred = GitHttpCredential::UserPass {
-        username: "alice".into(),
-        password: "secret".into(),
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "alice");
-    assert_eq!(password, "secret");
-}
-
-#[test]
-fn task_provider_resolves_userpass_credential_type() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn task_provider_rejects_unsupported_credential_type() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::SSH_KEY,
-    );
-    assert!(result.is_err());
-}
+// --- Providers ---
 
 #[test]
 fn public_repo_provider_always_errors() {
@@ -122,33 +93,6 @@ fn public_repo_provider_always_errors() {
         CredentialType::USER_PASS_PLAINTEXT,
     );
     assert!(result.is_err());
-}
-
-#[test]
-fn credential_provider_for_none_returns_public_provider() {
-    let provider = credential_provider_for(None);
-    let result = provider.credentials(
-        "https://github.com/org/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    // PublicRepoProvider always returns an error — that's correct behavior
-    assert!(result.is_err());
-}
-
-#[test]
-fn credential_provider_for_some_returns_task_provider() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = credential_provider_for(Some(cred));
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    assert!(result.is_ok());
 }
 
 // --- Walker / observer tests (unchanged from before) ---
@@ -186,8 +130,7 @@ fn walk_nonexistent_ref_errors_cleanly() {
     init_logging();
     let (_dir, repo) = bare_repo();
     let err = GitRepoWorker::walk_commits_incremental(&repo, "refs/heads/nope", None, 10, |_| {})
-        .err()
-        .expect("expected error");
+        .expect_err("expected error");
     assert!(
         err.message().contains("reference"),
         "unexpected error: {err:?}"
@@ -209,6 +152,7 @@ fn observe_updates_last_seen_per_ref_independently() {
         &repo,
         &provider,
         &obs_config,
+        None,
         &mut last_seen,
         |r, c| seen.push((r.to_string(), c.id())),
         |ref_name, old, new| {
@@ -243,6 +187,7 @@ fn multiple_refs_do_not_interfere() {
         &repo,
         &provider,
         &config,
+        None,
         &mut last_seen,
         |_r, _c| {},
         |_ref_name, _old, _new| {},
@@ -268,6 +213,7 @@ fn force_push_emits_ref_updated_with_old_and_new_tips() {
         &repo,
         &provider,
         &config,
+        None,
         &mut last_seen,
         |_, _| {},
         |_, _, _| {},
@@ -290,6 +236,7 @@ fn force_push_emits_ref_updated_with_old_and_new_tips() {
         &repo,
         &provider,
         &config,
+        None,
         &mut last_seen,
         |r, c| commits_seen.push((r.to_string(), c.id())),
         |ref_name, old, new| refs_updated.push((ref_name.to_string(), old, new)),
@@ -307,50 +254,403 @@ fn force_push_emits_ref_updated_with_old_and_new_tips() {
     assert!(new_oids.contains(&new_tip));
     assert!(!new_oids.contains(&old_tip));
 }
-#[test]
-fn token_credential_with_username_override_uses_override() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: Some("svc-polar-observer".into()),
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "svc-polar-observer");
-    assert_eq!(password, "tok");
+/// Takes every event but those of one ref past the first, as a client that has no room left would refuse them.
+struct RefusingSink {
+    refuse_on: &'static str,
+    accepted: std::sync::Mutex<Vec<String>>,
 }
 
-#[test]
-fn token_credential_without_override_defaults_to_oauth2() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "oauth2");
-    assert_eq!(password, "tok");
-}
-
-#[test]
-fn token_credential_into_git2_cred_succeeds_with_and_without_override() {
-    for username in [None, Some("svc-polar-observer".to_string())] {
-        let cred = GitHttpCredential::Token {
-            token: "tok".into(),
-            username,
+impl EventSink for RefusingSink {
+    async fn publish(&self, event: &git_agent_common::GitRepositoryMessage) -> Result<(), String> {
+        let ref_name = match event {
+            git_agent_common::GitRepositoryMessage::CommitDiscovered { ref_name, .. }
+            | git_agent_common::GitRepositoryMessage::RefUpdated { ref_name, .. } => {
+                ref_name.clone()
+            }
         };
-        assert!(cred.into_git2_cred().is_ok());
+        let mut accepted = self.accepted.lock().unwrap();
+        if ref_name == self.refuse_on && accepted.contains(&ref_name) {
+            return Err("the client's outbox and buffer are full".to_string());
+        }
+        accepted.push(ref_name);
+        Ok(())
     }
 }
 
-#[test]
-fn task_provider_resolves_with_username_override() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: Some("svc-polar-observer".into()),
+/// A ref with an event the client did not accept keeps the checkpoint it had, so its commits are walked, and
+/// published, again; a ref all of whose events were accepted moves on. Until 2026-10-30 a refused publish was logged
+/// and dropped inside the walk, and the ref moved past it: the commit was lost.
+#[tokio::test]
+async fn an_event_the_client_refused_leaves_its_ref_s_last_seen_where_it_was() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let main_commits = linear_history(&repo, "refs/heads/main", 2);
+    let dev_commits = linear_history(&repo, "refs/heads/dev", 3);
+    let repo_id = RepoId::from_url("local");
+    let sink = RefusingSink {
+        refuse_on: "refs/heads/dev",
+        accepted: Default::default(),
     };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitea.internal:3000/acme/widgets.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
+    let mut main = Checkpoint::default();
+    let mut dev = Checkpoint::default();
+    assert!(
+        publish_ref(&sink, &repo, &repo_id, "refs/heads/main", &mut main, 100, 1)
+            .await
+            .unwrap()
     );
-    assert!(result.is_ok());
+    assert!(
+        !publish_ref(&sink, &repo, &repo_id, "refs/heads/dev", &mut dev, 100, 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(main.tip.as_ref(), main_commits.last());
+    assert_eq!(
+        dev.tip,
+        None,
+        "dev's second event was refused: dev stays where it was ({:?})",
+        dev_commits.last()
+    );
+}
+
+#[test]
+fn a_ref_that_has_not_moved_is_not_reported_again() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let history = linear_history(&repo, "refs/heads/main", 2);
+    let tip = *history.last().unwrap();
+
+    let mut last_seen = HashMap::new();
+    let config = dummy_config(vec!["refs/heads/main".into()]);
+    let provider = noop_provider();
+    let pass = |last_seen: &mut HashMap<String, Oid>| {
+        let mut reported = Vec::new();
+        GitRepoWorker::observe_repository(
+            &repo,
+            &provider,
+            &config,
+            None,
+            last_seen,
+            |_, _| {},
+            |ref_name, old, new| reported.push((ref_name.to_string(), old, new)),
+        )
+        .unwrap();
+        reported
+    };
+
+    // The first pass reports the ref from nothing; a second, with the ref where it was, reports nothing.
+    assert_eq!(
+        pass(&mut last_seen),
+        vec![("refs/heads/main".to_string(), None, tip)]
+    );
+    assert!(pass(&mut last_seen).is_empty());
+    assert_eq!(last_seen["refs/heads/main"], tip);
+
+    // Once it moves, it is reported again, with the tip it moved from.
+    let next = make_commit(&repo, "next", &[&repo.find_commit(tip).unwrap()]);
+    repo.reference("refs/heads/main", next, true, "advance")
+        .unwrap();
+    assert_eq!(
+        pass(&mut last_seen),
+        vec![("refs/heads/main".to_string(), Some(tip), next)]
+    );
+}
+
+// One repository that cannot be started (an unreachable host, bad credentials) must not end the
+// supervisor of all the others: its failure is logged and the supervisor carries on.
+#[test]
+fn a_worker_that_fails_to_start_does_not_fail_the_supervisor() {
+    let repo = RepoId::new("unreachable".into());
+    let failed = ractor::SpawnErr::StartupFailed("failed to resolve address".into());
+    assert!(git_repo_observer::tolerate_spawn_failure(&repo, failed).is_ok());
+}
+
+#[test]
+fn a_worker_that_is_already_running_is_not_an_error() {
+    let repo = RepoId::new("again".into());
+    let dup = ractor::SpawnErr::ActorAlreadyRegistered("worker".into());
+    assert!(git_repo_observer::tolerate_spawn_failure(&repo, dup).is_ok());
+}
+
+/// Takes events until it has taken `room`, then refuses them: a client whose room ran out.
+struct RoomFor {
+    room: usize,
+    /// What it took: a commit's oid, or none for a ref's update.
+    taken: std::sync::Mutex<Vec<Option<String>>>,
+}
+
+impl RoomFor {
+    fn new(room: usize) -> Self {
+        Self {
+            room,
+            taken: Default::default(),
+        }
+    }
+
+    fn commits(&self) -> Vec<String> {
+        self.taken
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    fn ref_updates(&self) -> usize {
+        self.taken
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.is_none())
+            .count()
+    }
+}
+
+impl EventSink for RoomFor {
+    async fn publish(&self, event: &git_agent_common::GitRepositoryMessage) -> Result<(), String> {
+        let mut taken = self.taken.lock().unwrap();
+        if taken.len() >= self.room {
+            return Err("the client's outbox and buffer are full".to_string());
+        }
+        taken.push(match event {
+            git_agent_common::GitRepositoryMessage::CommitDiscovered { oid, .. } => {
+                Some(oid.clone())
+            }
+            git_agent_common::GitRepositoryMessage::RefUpdated { .. } => None,
+        });
+        Ok(())
+    }
+}
+
+/// Builds a history from `parents`: commit `i` has the commits `parents[i]` (all earlier) as its parents; the ref
+/// points at the last. Returns every commit.
+fn history(repo: &Repository, ref_name: &str, parents: &[Vec<usize>]) -> Vec<Oid> {
+    let mut oids: Vec<Oid> = Vec::new();
+    for (i, of) in parents.iter().enumerate() {
+        let commits: Vec<Commit> = of
+            .iter()
+            .map(|p| repo.find_commit(oids[*p]).unwrap())
+            .collect();
+        let oid = make_commit(repo, &format!("c{i}"), &commits.iter().collect::<Vec<_>>());
+        oids.push(oid);
+    }
+    repo.reference(ref_name, *oids.last().unwrap(), true, "init")
+        .unwrap();
+    oids
+}
+
+/// The commits reachable from `tip`.
+fn reachable(repo: &Repository, tip: Oid) -> std::collections::BTreeSet<String> {
+    let mut walk = repo.revwalk().unwrap();
+    walk.push(tip).unwrap();
+    walk.map(|oid| oid.unwrap().to_string()).collect()
+}
+
+/// Every commit of `order` comes after those of its parents that are in it.
+fn parents_first(repo: &Repository, order: &[String]) -> bool {
+    order.iter().enumerate().all(|(i, oid)| {
+        let commit = repo.find_commit(Oid::from_str(oid).unwrap()).unwrap();
+        commit.parent_ids().all(|parent| {
+            let parent = parent.to_string();
+            order
+                .iter()
+                .position(|o| *o == parent)
+                .is_none_or(|p| p < i)
+        })
+    })
+}
+
+/// A walk larger than one batch, cut after its first accepted batch, resumes with nothing lost and nothing
+/// published twice, merges included: commits go oldest first, and the checkpoint moves after each accepted batch
+/// (cassini-backpressure.md, the decisions reviewed with the maintainer, 17).
+#[tokio::test]
+async fn a_walk_larger_than_a_batch_cut_after_its_first_batch_resumes_with_nothing_lost_or_duplicated()
+ {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    // root; a branch of four and one of three from it, merged; three more; a merge of a branch of two.
+    let parents = vec![
+        vec![],
+        vec![0],
+        vec![1],
+        vec![2],
+        vec![3],
+        vec![0],
+        vec![5],
+        vec![6],
+        vec![4, 7],
+        vec![8],
+        vec![9],
+        vec![8],
+        vec![10, 11],
+    ];
+    let oids = history(&repo, "refs/heads/main", &parents);
+    let repo_id = RepoId::from_url("local");
+    let mut checkpoint = Checkpoint::default();
+    let first = RoomFor::new(4);
+    let done = publish_ref(
+        &first,
+        &repo,
+        &repo_id,
+        "refs/heads/main",
+        &mut checkpoint,
+        100,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(!done, "the second batch was refused");
+    assert_eq!(first.commits().len(), 4, "one batch was taken");
+    let rest = RoomFor::new(usize::MAX);
+    let done = publish_ref(
+        &rest,
+        &repo,
+        &repo_id,
+        "refs/heads/main",
+        &mut checkpoint,
+        100,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(done);
+    let mut order = first.commits();
+    order.extend(rest.commits());
+    let published: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+    assert_eq!(
+        published.len(),
+        order.len(),
+        "nothing published twice: {order:?}"
+    );
+    assert_eq!(
+        published,
+        reachable(&repo, *oids.last().unwrap()),
+        "nothing lost"
+    );
+    assert!(parents_first(&repo, &order), "oldest first");
+    assert_eq!(
+        rest.ref_updates(),
+        1,
+        "the ref's update once, after its commits"
+    );
+    assert_eq!(checkpoint.tip, oids.last().copied());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+    /// Over any history, any batch size and a cut after any number of accepted batches, the two walks together
+    /// publish every commit once, each after its parents.
+    #[test]
+    fn any_history_cut_after_any_batch_resumes_with_nothing_lost_or_duplicated(
+        shape in proptest::collection::vec((0usize..1000, 0usize..1000, proptest::bool::ANY), 1..16),
+        batch in 1usize..6,
+        batches_taken in 0usize..6,
+    ) {
+        // Commit i > 0 has one or two parents among those before it.
+        let parents: Vec<Vec<usize>> = std::iter::once(Vec::new())
+            .chain(shape.iter().enumerate().map(|(i, (a, b, two))| {
+                let i = i + 1;
+                let first = a % i;
+                let second = b % i;
+                if *two && second != first { vec![first, second] } else { vec![first] }
+            }))
+            .collect();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (_dir, repo) = bare_repo();
+        let oids = history(&repo, "refs/heads/main", &parents);
+        let repo_id = RepoId::from_url("local");
+        let mut checkpoint = Checkpoint::default();
+        let first = RoomFor::new(batch * batches_taken);
+        runtime
+            .block_on(publish_ref(&first, &repo, &repo_id, "refs/heads/main", &mut checkpoint, 1000, batch))
+            .unwrap();
+        let rest = RoomFor::new(usize::MAX);
+        let done = runtime
+            .block_on(publish_ref(&rest, &repo, &repo_id, "refs/heads/main", &mut checkpoint, 1000, batch))
+            .unwrap();
+        proptest::prop_assert!(done);
+        let mut order = first.commits();
+        order.extend(rest.commits());
+        let published: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+        proptest::prop_assert_eq!(published.len(), order.len());
+        proptest::prop_assert_eq!(published, reachable(&repo, *oids.last().unwrap()));
+        proptest::prop_assert!(parents_first(&repo, &order));
+    }
+}
+
+/// The worker's path (`publish_ref`, then `publish_ref_update`) keeps the same rule as `observe_refs`: a ref whose tip is
+/// where its checkpoint left it is not reported again, so a consumer acting on `RefUpdated` acts once per move.
+#[tokio::test]
+async fn the_worker_does_not_report_a_ref_again_until_it_moves() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let history = linear_history(&repo, "refs/heads/main", 3);
+    let tip = *history.last().unwrap();
+    let repo_id = RepoId::from_url("local");
+    let mut checkpoint = Checkpoint::default();
+
+    let first = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &first,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(first.ref_updates(), 1, "the first pass reports the ref");
+    assert_eq!(checkpoint.tip, Some(tip));
+
+    let again = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &again,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap(),
+        "nothing to publish is done, not refused"
+    );
+    assert_eq!(
+        again.ref_updates(),
+        0,
+        "an unmoved ref is not reported again"
+    );
+    assert!(again.commits().is_empty());
+    assert_eq!(
+        checkpoint.tip,
+        Some(tip),
+        "the checkpoint stays where it was"
+    );
+
+    let next = make_commit(&repo, "next", &[&repo.find_commit(tip).unwrap()]);
+    repo.reference("refs/heads/main", next, true, "advance")
+        .unwrap();
+    let moved = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &moved,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(moved.ref_updates(), 1, "once it moves it is reported again");
+    assert_eq!(moved.commits(), vec![next.to_string()]);
+    assert_eq!(checkpoint.tip, Some(next));
 }

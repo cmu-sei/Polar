@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! `polar status`: every PolarAgent, and why the ones that are not running are not.
 
 use crate::exec::explain_agent;
@@ -46,7 +69,14 @@ pub async fn status(cluster: &KubeCluster, out: &mut dyn FnMut(String)) -> Resul
         }
     }
 
-    let header = ["NAMESPACE", "AGENT", "PHASE", "INSTANCE", "STARTED", "LAST ENDING"];
+    let header = [
+        "NAMESPACE",
+        "AGENT",
+        "PHASE",
+        "INSTANCE",
+        "STARTED",
+        "LAST ENDING",
+    ];
     let mut widths = header.map(str::len);
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -54,7 +84,14 @@ pub async fn status(cluster: &KubeCluster, out: &mut dyn FnMut(String)) -> Resul
         }
     }
     let line = |cells: &[String; 6]| {
-        cells.iter().zip(&widths).map(|(c, w)| format!("{c:<w$}")).collect::<Vec<_>>().join("  ").trim_end().to_string()
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(c, w)| format!("{c:<w$}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_string()
     };
     out(line(&header.map(str::to_string)));
     for row in &rows {

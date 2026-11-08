@@ -1,0 +1,528 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! What the Jira observer reads from its configuration, declared once.
+//!
+//! These were read with `std::env::var` where they were used, so nothing could list them,
+//! check them before the agent started, or say what they were for. Declared here they are in the
+//! agent's scaffold, judged with everything else, and the catalog cannot set a Jira variable that
+//! this does not name.
+
+use crate::JiraDeployment;
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use polar_env::{Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section};
+use url::Url;
+
+// Every setting is Dynamic (the maintainer, 2026-11-01: an agent whose own non-secret settings are Static has not been
+// properly migrated to the builder): a signed update changes it while the agent runs, and the supervisor starts the
+// observers again with it (`supervisor.rs`, `settings_changed`). The egress section stays Static: it is the cluster's
+// setting, and its CA a mounted file.
+
+/// The address of the Jira site.
+pub static JIRA_URL: Required<String> = Required::text(
+    "JIRA_URL",
+    "the Jira site's address, for example https://jira.example.org (a context path such as https://host/jira is kept)",
+)
+.dynamic();
+
+/// The explicit opt-in to read the site without a credential, as the public sees it.
+pub static JIRA_ANONYMOUS: Defaulted<bool> = Defaulted::flag(
+    "JIRA_ANONYMOUS",
+    "true to read the site without a credential, only what it shows anonymous users; false reads it with the \
+     credential of the observer's signed `credentials` runtime section",
+    "false",
+)
+.dynamic();
+
+pub static JIRA_DEPLOYMENT: Optional<String> = Optional::text(
+    "JIRA_DEPLOYMENT",
+    "cloud, server or datacenter, used when the site's serverInfo does not say its deploymentType; when unset too \
+     it follows the address (an atlassian.net site is cloud). Any other value is refused at start",
+)
+.dynamic();
+
+pub static QUERY_DATE: Optional<String> = Optional::text(
+    "QUERY_DATE",
+    "a date, YYYY-MM-DD or YYYY-MM-DD HH:MM, from which the first pull asks for issues (updated > date) when the \
+     graph has none; unset pulls all of them. Any other value is refused at start",
+)
+.dynamic();
+
+static VARIABLES: &[&dyn Described] = &[&JIRA_URL, &JIRA_ANONYMOUS, &JIRA_DEPLOYMENT, &QUERY_DATE];
+
+/// Nothing holds between the variables: the credential is not a variable but the signed `credentials` runtime
+/// section (`crate::credentials`), which reading anonymously does without.
+fn relations(_env: &dyn Env) -> Vec<String> {
+    Vec::new()
+}
+
+/// Whether a change to the variables named `changed` touches what the observers are started with: the section's
+/// own, or the egress section's (Static today, so never changed while the agent runs).
+pub fn touches_the_observers(changed: &[String]) -> bool {
+    VARIABLES
+        .iter()
+        .chain(polar::egress::SECTION.vars.iter())
+        .any(|v| changed.iter().any(|name| name == v.desc().name))
+}
+
+/// The section the Jira observer registers.
+pub static SECTION: Section = Section {
+    name: "jira",
+    vars: VARIABLES,
+    relations,
+};
+
+/// The observer's settings, read from the snapshot the builder took.
+pub struct JiraSettings {
+    pub url: String,
+    /// Read without a credential (JIRA_ANONYMOUS).
+    pub anonymous: bool,
+    pub deployment: Option<String>,
+    pub query_date: Option<String>,
+}
+
+impl JiraSettings {
+    pub fn read(config: &Config) -> Result<Self, ConfigError> {
+        Ok(Self {
+            url: config.read(&JIRA_URL)?,
+            anonymous: config.read(&JIRA_ANONYMOUS)?,
+            deployment: config.read(&JIRA_DEPLOYMENT)?,
+            query_date: config.read(&QUERY_DATE)?,
+        })
+    }
+}
+
+/// The host the target templates ship in JIRA_URL until someone sets the real one.
+const PLACEHOLDER_HOST: &str = "example.atlassian.net";
+
+/// JIRA_URL as the observers use it: the site's address with no trailing slash, so that an
+/// endpoint is the address followed by its path. A context path (`https://host/jira`) is kept.
+/// Refused, with what to set instead: an address that is not http or https, one with the REST
+/// path pasted in (`/rest/api/2`), one with a query or a fragment, and the placeholder.
+pub fn normalise_jira_url(raw: &str) -> Result<String, String> {
+    const EXAMPLE: &str =
+        "for example https://jira.example.org, or https://host/jira with a context path";
+
+    let url = Url::parse(raw.trim()).map_err(|e| {
+        format!("JIRA_URL is not an address ({e}): set it to the site's https:// or http:// address, {EXAMPLE}")
+    })?;
+    if url.scheme() != "https" && url.scheme() != "http" {
+        return Err(format!(
+            "JIRA_URL must start with https:// or http://, not {}://: set it to the site's address, {EXAMPLE}",
+            url.scheme()
+        ));
+    }
+    if url
+        .path_segments()
+        .is_some_and(|mut segments| segments.any(|s| s.eq_ignore_ascii_case("rest")))
+    {
+        return Err(format!(
+            "JIRA_URL must be the site's address without the REST path: drop /rest and what follows it, {EXAMPLE}"
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "JIRA_URL must be the site's address with no query (?) or fragment (#), {EXAMPLE}"
+        ));
+    }
+    if url.host_str() == Some(PLACEHOLDER_HOST) {
+        return Err(format!(
+            "JIRA_URL is still the example placeholder https://{PLACEHOLDER_HOST}: \
+             set workloads.jira-observer.env in the target's config.nuon"
+        ));
+    }
+
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+/// What JIRA_DEPLOYMENT may say.
+const DEPLOYMENTS: &str = "cloud, server or datacenter";
+
+/// JIRA_DEPLOYMENT as the observer reads it: `cloud`, `server` or `datacenter`, in any case. Anything else is
+/// refused, with what it may be, rather than taken for the guess from the address.
+pub fn parse_deployment(raw: &str) -> Result<JiraDeployment, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cloud" => Ok(JiraDeployment::Cloud),
+        "server" | "datacenter" => Ok(JiraDeployment::ServerOrDataCenter),
+        _ => Err(format!(
+            "JIRA_DEPLOYMENT is {raw:?}, which is not a deployment: set it to {DEPLOYMENTS}, or leave it unset \
+             for the site to say (its serverInfo) and, failing that, the address"
+        )),
+    }
+}
+
+/// A date QUERY_DATE names, as JQL takes one: a day, or a day and a time to the minute. Said back
+/// (`Display`) in the one form, `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`, which is what the JQL quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryDate {
+    day: chrono::NaiveDate,
+    time: Option<chrono::NaiveTime>,
+}
+
+impl std::fmt::Display for QueryDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.day.format("%Y-%m-%d"))?;
+        if let Some(time) = self.time {
+            write!(f, " {}", time.format("%H:%M"))?;
+        }
+        Ok(())
+    }
+}
+
+/// QUERY_DATE as the observer reads it: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`, or either with `/` for `-`, the forms
+/// JQL takes, and a date that exists. Anything else is refused, with what it may be: before, it went into the JQL
+/// as it was, unquoted, and a time (or anything else) made every search a 400, retried for ever.
+pub fn parse_query_date(raw: &str) -> Result<QueryDate, String> {
+    let refused = || {
+        format!(
+            "QUERY_DATE is {raw:?}, which is not a date as JQL takes one: set it to YYYY-MM-DD or \
+             YYYY-MM-DD HH:MM (or with / for -), or leave it unset"
+        )
+    };
+    let text = raw.trim();
+    let (day, time) = match text.split_once(' ') {
+        Some((day, time)) => (day, Some(time)),
+        None => (text, None),
+    };
+    // Exactly four, two and two digits: chrono alone takes "2024-1-1" too.
+    let shaped = |s: &str, separator: u8| {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[4] == separator
+            && b[7] == separator
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    };
+    let day = if shaped(day, b'-') {
+        chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+    } else if shaped(day, b'/') {
+        chrono::NaiveDate::parse_from_str(day, "%Y/%m/%d")
+    } else {
+        return Err(refused());
+    }
+    .map_err(|_| refused())?;
+    let time = match time {
+        None => None,
+        Some(time) => {
+            let b = time.as_bytes();
+            let shaped = b.len() == 5
+                && b[2] == b':'
+                && b.iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 2 || c.is_ascii_digit());
+            if !shaped {
+                return Err(refused());
+            }
+            Some(chrono::NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| refused())?)
+        }
+    };
+    Ok(QueryDate { day, time })
+}
+
+/// True if the token looks like a base64-encoded copy of a token rather than the token itself:
+/// it decodes, as standard or URL-safe base64 with or without padding, to at least 16
+/// characters of printable ASCII with no whitespace. A Data Center personal access token is
+/// base64 too, but of binary, so it does not pass for one.
+pub fn token_looks_base64(token: &str) -> bool {
+    let token = token.trim();
+    [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD]
+        .iter()
+        .filter_map(|engine| engine.decode(token).ok())
+        .any(|decoded| decoded.len() >= 16 && decoded.iter().all(u8::is_ascii_graphic))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    #[test]
+    fn trailing_slashes_are_dropped_and_a_context_path_is_kept() {
+        let cases = [
+            ("https://jira.example.org", "https://jira.example.org"),
+            ("https://jira.example.org/", "https://jira.example.org"),
+            ("https://jira.example.org///", "https://jira.example.org"),
+            (
+                "https://host.example.org/jira",
+                "https://host.example.org/jira",
+            ),
+            (
+                "https://host.example.org/jira//",
+                "https://host.example.org/jira",
+            ),
+            (
+                "http://jira.example.org:8080/",
+                "http://jira.example.org:8080",
+            ),
+            (" https://jira.example.org/\n", "https://jira.example.org"),
+            // Only a segment that is "rest" is the REST path.
+            (
+                "https://jira.example.org/restricted",
+                "https://jira.example.org/restricted",
+            ),
+        ];
+        for (given, expected) in cases {
+            assert_eq!(
+                normalise_jira_url(given).as_deref(),
+                Ok(expected),
+                "{given:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_not_http_or_https_is_refused_with_what_to_set() {
+        for given in [
+            "jira.example.org",
+            "jira.example.org:8443",
+            "ftp://jira.example.org",
+            "file:///etc/passwd",
+        ] {
+            let error = normalise_jira_url(given).unwrap_err();
+            assert!(
+                error.contains("JIRA_URL") && error.contains("https://"),
+                "{given:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rest_path_pasted_into_the_address_is_refused() {
+        for given in [
+            "https://jira.example.org/rest/api/2",
+            "https://jira.example.org/rest/api/2/",
+            "https://jira.example.org/rest",
+            "https://host.example.org/jira/rest/api/latest/project",
+            "https://jira.example.org/REST/api/2",
+        ] {
+            let error = normalise_jira_url(given).unwrap_err();
+            assert!(
+                error.contains("JIRA_URL") && error.contains("/rest"),
+                "{given:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_or_a_fragment_is_refused() {
+        for given in [
+            "https://jira.example.org/?os_authType=basic",
+            "https://jira.example.org/#top",
+        ] {
+            assert!(normalise_jira_url(given).is_err(), "{given:?}");
+        }
+    }
+
+    #[test]
+    fn the_placeholder_is_refused_with_where_to_set_the_real_address() {
+        let expected = "JIRA_URL is still the example placeholder https://example.atlassian.net: \
+                        set workloads.jira-observer.env in the target's config.nuon";
+        for given in [
+            "https://example.atlassian.net",
+            "https://example.atlassian.net/",
+            "https://EXAMPLE.atlassian.net",
+        ] {
+            assert_eq!(
+                normalise_jira_url(given),
+                Err(expected.to_string()),
+                "{given:?}"
+            );
+        }
+        assert!(normalise_jira_url("https://mysite.atlassian.net").is_ok());
+    }
+
+    #[test]
+    fn a_base64_copy_of_a_token_is_noticed() {
+        let raw = "ATATT3xFfGF0Qm9ndXNUb2tlbkZvclRlc3Rpbmc=A1B2C3D4";
+        assert!(!token_looks_base64(raw), "the raw token itself");
+        assert!(token_looks_base64(&STANDARD.encode(raw)));
+        assert!(token_looks_base64(&URL_SAFE_NO_PAD.encode(raw)));
+        assert!(token_looks_base64(&format!("{}\n", STANDARD.encode(raw))));
+    }
+
+    #[test]
+    fn a_data_center_token_or_a_short_one_is_not_taken_for_a_copy() {
+        // A Data Center personal access token: 44 characters of base64, of an id, a colon and
+        // random bytes.
+        let mut pat = b"471706345638:".to_vec();
+        pat.extend([
+            0xb0, 0x58, 0x1f, 0x9c, 0x02, 0xe7, 0x44, 0x81, 0x3a, 0xff, 0x10, 0x6d, 0xc2, 0x99,
+            0x07, 0x5e, 0xa1, 0x30, 0x8b, 0xd4,
+        ]);
+        let pat = STANDARD.encode(&pat);
+        assert_eq!(pat.len(), 44);
+        assert!(!token_looks_base64(&pat));
+        // Too short to say: "short-token" decodes to fewer than 16 characters.
+        assert!(!token_looks_base64(&STANDARD.encode("short-token")));
+        // Whitespace in what it decodes to is not a token.
+        assert!(!token_looks_base64(
+            &STANDARD.encode("a phrase with spaces in it")
+        ));
+        assert!(!token_looks_base64("t0ken"));
+    }
+    use std::collections::HashMap;
+
+    fn config(pairs: &[(&str, &str)]) -> Config {
+        let env: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::builder(&env).register(&SECTION).build()
+    }
+
+    const MINIMUM: &[(&str, &str)] = &[("JIRA_URL", "https://jira.example.org")];
+
+    #[test]
+    fn the_section_is_sound_and_its_defaults_parse() {
+        assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_url_is_enough() {
+        let settings = JiraSettings::read(&config(MINIMUM)).unwrap();
+        assert_eq!(settings.url, "https://jira.example.org");
+        assert!(!settings.anonymous);
+        assert_eq!(settings.deployment, None);
+        assert_eq!(settings.query_date, None);
+    }
+
+    #[test]
+    fn a_missing_url_is_named_with_what_it_is_for() {
+        let error = config(&[]).check().join(" | ");
+        assert!(
+            error.contains("JIRA_URL") && error.contains("address"),
+            "{error}"
+        );
+        assert!(JiraSettings::read(&config(&[])).is_err());
+    }
+
+    /// Every setting may be changed while the agent runs (a signed update), and a change to one, and to nothing
+    /// else the observers use, starts them again.
+    #[test]
+    fn every_setting_is_dynamic_and_a_change_to_one_starts_the_observers_again() {
+        for v in VARIABLES {
+            assert_eq!(
+                v.desc().mutability,
+                polar_env::Mutability::Dynamic,
+                "{}",
+                v.desc().name
+            );
+            assert!(
+                touches_the_observers(&[v.desc().name.to_string()]),
+                "{}",
+                v.desc().name
+            );
+        }
+        assert!(!touches_the_observers(&["RUST_LOG".to_string()]));
+        assert!(!touches_the_observers(&[]));
+        assert!(touches_the_observers(&["POLAR_EGRESS_PROXY".to_string()]));
+    }
+
+    /// The token and the email are not settings any more: the credential is the signed `credentials` runtime
+    /// section. A document that still gives either is refused by name, as any variable the agent does not declare.
+    #[test]
+    fn the_token_and_the_email_are_not_settings() {
+        let names: Vec<&str> = VARIABLES.iter().map(|v| v.desc().name).collect();
+        assert!(!names.contains(&"JIRA_TOKEN"), "{names:?}");
+        assert!(!names.contains(&"JIRA_EMAIL"), "{names:?}");
+        let anonymous = [
+            ("JIRA_URL", "https://issues.apache.org/jira"),
+            ("JIRA_ANONYMOUS", "true"),
+        ];
+        let settings = JiraSettings::read(&config(&anonymous)).unwrap();
+        assert!(settings.anonymous);
+        assert_eq!(config(&anonymous).check(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_deployment_follows_what_is_said_and_otherwise_the_address() {
+        use JiraDeployment::*;
+        let url = "https://jira.example.org";
+        let said = |raw: &str| Some(parse_deployment(raw).unwrap());
+        assert!(JiraDeployment::resolve(said("cloud"), url) == Cloud);
+        assert!(JiraDeployment::resolve(said("CLOUD"), url) == Cloud);
+        assert!(
+            JiraDeployment::resolve(said("server"), "https://x.atlassian.net")
+                == ServerOrDataCenter
+        );
+        assert!(JiraDeployment::resolve(said("datacenter"), url) == ServerOrDataCenter);
+        assert!(JiraDeployment::resolve(said(" DataCenter "), url) == ServerOrDataCenter);
+        assert!(JiraDeployment::resolve(None, "https://x.atlassian.net") == Cloud);
+        assert!(JiraDeployment::resolve(None, url) == ServerOrDataCenter);
+    }
+
+    /// A value that is not one of the three is refused, with what it may be, rather than taken for the guess.
+    #[test]
+    fn a_deployment_that_is_not_known_is_refused() {
+        for raw in ["nonsense", "data center", "dc", "on-prem", ""] {
+            let error = parse_deployment(raw).unwrap_err();
+            assert!(
+                error.contains("JIRA_DEPLOYMENT") && error.contains("cloud, server or datacenter"),
+                "{raw:?}: {error}"
+            );
+        }
+    }
+
+    /// QUERY_DATE is a date, or a date and a time to the minute, as JQL takes them; written with `-` or `/`, it
+    /// is said back with `-`.
+    #[test]
+    fn query_date_is_read_as_jql_takes_a_date() {
+        for (raw, canonical) in [
+            ("2024-01-01", "2024-01-01"),
+            (" 2024/01/31 ", "2024-01-31"),
+            ("2024-02-29 23:59", "2024-02-29 23:59"),
+            ("2024/12/01 00:00", "2024-12-01 00:00"),
+        ] {
+            assert_eq!(
+                parse_query_date(raw).map(|d| d.to_string()).as_deref(),
+                Ok(canonical),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_date_that_is_not_a_date_is_refused_with_what_it_may_be() {
+        for raw in [
+            "yesterday",
+            "2024-13-01",
+            "2023-02-29",
+            "2024-01-01T10:00",
+            "2024-01-01 24:00",
+            "2024-01-01 10:00:00",
+            "2024-1-1",
+            "-1d",
+            "\"2024-01-01\"",
+            "2024-01-01 OR project = X",
+        ] {
+            let error = parse_query_date(raw).unwrap_err();
+            assert!(
+                error.contains("QUERY_DATE") && error.contains("YYYY-MM-DD"),
+                "{raw:?}: {error}"
+            );
+        }
+    }
+}

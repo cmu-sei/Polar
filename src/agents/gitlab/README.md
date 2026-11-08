@@ -1,26 +1,23 @@
-Polar (OSS)
+ACE Tool
 
-Copyright 2024 Carnegie Mellon University.
+Copyright 2026 Carnegie Mellon University.
 
-NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING
-INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON
-UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS
-TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE
-OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE
-MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND
-WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-Licensed under a MIT-style license, please see license.txt or contact
-permission@sei.cmu.edu for full terms.
+Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+for full terms.
 
-[DISTRIBUTION STATEMENT A] This material has been approved for public release
-and unlimited distribution.  Please see Copyright notice for non-US
-Government use and distribution.
+[DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+distribution.  Please see Copyright notice for non-US Government use and distribution.
 
-This Software includes and/or makes use of Third-Party Software each subject
-to its own license.
+This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-DM24-0470
+DM26-0670
 
 # Gitlab Agent
 
@@ -49,8 +46,7 @@ securely. See your team about how to retrieve this information.
 1. Create an environments file named `conf/env_setup.sh` with the following template.
 ```sh
 
-# Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh
-# script without backing up this file, first.
+# Environment configuration.
 # The service endpoint of the given neo4j instance.
 # For local development, this could be "neo4j://neo4j:7687"
 export GRAPH_ENDPOINT=""

@@ -1,127 +1,75 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Scheduler Agent – Design Overview
 
-The Scheduler Agent is responsible for managing the lifecycle of all schedules in Polar.
-It consists of a single **RootSupervisor** actor that spawns the **ScheduleInfoProcessor**.
+The scheduler is two agents. The **observer** (`polar-scheduler-observer`) keeps a checkout of the `polar-schedules`
+repository on the Polar git server and publishes each file that changes on `scheduler.in`. The **processor**
+(`polar-scheduler`) handles what it publishes: it writes each signed document to the graph and forwards it, untouched, to
+the agent it is addressed to (`agent.<agent>.configuration`), which verifies it. Neither verifies a document; the receiver
+does.
 
-## Components
+## Message flow
 
-- **RootSupervisor**  
-  - Initialises the Cassini client.  
-  - Subscribes to `scheduler.in` (Git changes), `scheduler.adhoc` (agent registrations), and `events.#` (ephemeral triggers).  
-  - Spawns the `ScheduleInfoProcessor` as a linked actor.
+- **A push to `polar-schedules`** → `polar-git-repo-changed` → the observer syncs its checkout → each changed file on
+  `scheduler.in`.
+- **A signed document** (`scheduler.in`) → the processor writes a `(:Schedule:Configuration {id})` node and, when its
+  version is new, publishes a `ConfigurationNotification` on `agent.<agent>.configuration`. A document it cannot route is
+  written and goes nowhere.
+- **A file that is not a signed document** → logged and ignored. The unsigned schedule path (`permanent`, `adhoc` and
+  `ephemeral` schedules, `scheduler.adhoc`, `agent.<id>.schedule`, `agent.type.<type>.schedule`) was removed on
+  2026-10-21 (`docs/architecture/policy-enforcement.md`, "Decisions").
+- **An agent's outcome** (`polar-configuration-outcome`) → the processor writes a `ConfigurationOutcome` node linked to
+  the document.
+- **An agent asking for a replay** (`polar-configuration-replay`) → the observer publishes the documents it holds for that
+  agent on its configuration topic.
 
-- **ScheduleInfoProcessor**  
-  - Maintains an in‑memory cache of all schedules.  
-  - Writes to / reads from the knowledge graph.  
-  - Publishes schedule updates to agent‑specific topics (`agent.<id>.schedule`, `agent.type.<type>.schedule`).  
-  - Registers event patterns and triggers ephemeral launches.
+The sequences are drawn in `docs/architecture/sequences/general/signed_configuration_delivery.mmd`, and the kinds of
+document in `docs/architecture/scheduling-kinds.md`.
 
-- **Git Watcher Observer** (separate binary)  
-  - Watches the GitOps repo and publishes file changes to `scheduler.in`.
+## Key design decisions
 
-## Message Flow
-
-- **Git change** → `scheduler.in` → `ScheduleInfoProcessor` updates graph and cache → publishes to agent topics.
-- **Ad‑hoc agent registration** → `scheduler.adhoc` → `ScheduleInfoProcessor` creates/updates type schedule node → publishes current schedule to agent type topic.
-- **Ephemeral event** → `events.#` → `ScheduleInfoProcessor` matches pattern → triggers launcher with instance config.
-
-## Key Design Decisions
-
-- The Scheduler **does not** start agents; it only provides configuration.  
-- All inter‑component communication goes through Cassini topics.  
-- The knowledge graph is the source of truth; the cache is only for performance.  
-- Dhall is used for authoring schedules; evaluated to JSON at runtime.
+- The scheduler does not start agents; it only delivers their configuration.
+- All communication between components goes through Cassini topics.
+- The knowledge graph keeps every document received, and every outcome reported.
+- Documents are authored and signed with `polar-sign` and evaluated to JSON in the repository.
 
 
 # Integration Testing
 
-The scheduler includes a set of integration tests that verify end‑to‑end functionality. The tests
-use a real Neo4j database, Jaeger for tracing, and a local Git repository for schedule storage.
-Gitea is no longer used; instead, a local Git repository (with a `file://` remote) simulates the
-remote GitOps repo.
+The scheduler is tested in a cluster, with the rest of Polar. On `local-minimal`, `nu infra/up.nu local-minimal --dev`
+deploys the observer and the processor with the Polar git server they watch, and seeds the `polar-schedules` repository
+with its first signed policy (the seed step). To try a change to either agent:
 
-## Prerequisites
+```bash
+nu infra/images.nu sync scheduler-observer scheduler-processor --target local-minimal   # build both, push them to the cluster's registry
+nu infra/up.nu local-minimal                                                           # restarts the Jobs whose image changed, and only those
+kubectl -n polar logs -l job-name=polar-scheduler-observer -f
+```
 
-- Docker or Podman (for Neo4j and Jaeger containers)
-- A working Polar development environment (`nix develop` or `direnv`)
-- A local Git repository with test Dhall schedules (see below)
-
-## Step‑by‑Step Test Procedure
-
-1. **Create a test Git repository**  
-   ```bash
-   TEST_REPO=$(mktemp -d)
-   cd "$TEST_REPO"
-   git init
-   mkdir -p permanent
-   cat > permanent/test.dhall << 'EOF'
-   ... (sample schedule content) ...
-   EOF
-   git add permanent/test.dhall
-   git commit -m "feat(test): add test schedule"
-   git remote add origin "file://$TEST_REPO"
-   ```
-   Replace the sample schedule with the one from the project’s `schedules/permanent` directory.
-
-2. **Start the infrastructure stack**  
-   ```bash
-   cd src/agents/polar-scheduler
-   export POLAR_SCHEDULER_REMOTE_URL="file://$TEST_REPO"
-   ./scripts/dev_stack.sh up
-   ```
-   This launches Neo4j, Jaeger, and the Cassini broker.
-
-3. **Run the scheduler observer** (in a separate terminal)  
-   ```bash
-   cd src/agents/polar-scheduler/observer
-   export POLAR_SCHEDULER_LOCAL_PATH="/tmp/polar-schedules-test"
-   export POLAR_SCHEDULER_REMOTE_URL="file://$TEST_REPO"
-   export POLAR_SCHEDULER_SYNC_INTERVAL="30"
-   cargo run
-   ```
-   The observer clones the repo (if needed) and starts watching for changes.
-
-4. **Run the scheduler processor** (in another terminal)  
-   ```bash
-   cd src/agents/polar-scheduler/processor
-   cargo run
-   ```
-   The processor connects to Neo4j and subscribes to `scheduler.in`.
-
-5. **Run a mock agent** (optional, to receive schedule updates)  
-   ```bash
-   cd src/agents/polar-scheduler/tests/mock-agent
-   cargo run
-   ```
-   The mock agent subscribes to `agent.test-permanent.schedule` and logs any received schedule JSON.
-
-6. **Trigger a schedule change**  
-   Modify the Dhall file in the test repo, commit, and (if using a local repo) push is not needed; the observer’s filesystem watcher detects the change directly because it watches the local working copy.
-   ```bash
-   cd "$TEST_REPO"
-   # Edit permanent/test.dhall (e.g., bump version to 2)
-   sed -i 's/version = 1/version = 2/' permanent/test.dhall
-   git commit -am "feat(test): update schedule"
-   ```
-   The observer publishes a `GitScheduleChange::Update`, the processor updates the graph, and the mock agent (if running) logs the new schedule.
-
-7. **Verify in Neo4j**  
-   Open http://localhost:7474 (credentials `neo4j`/`somepassword`) and run:
-   ```cypher
-   MATCH (s:Schedule:Permanent {agent_id: 'test-permanent'}) RETURN s.schedule
-   ```
-   The returned JSON should reflect the latest version.
-
-8. **Clean up**  
-   Stop all running processes (Ctrl+C in each terminal). Then bring down the stack:
-   ```bash
-   cd src/agents/polar-scheduler
-   ./scripts/dev_stack.sh down
-   ```
-   Optionally remove the temporary test repo:
-   ```bash
-   rm -rf "$TEST_REPO"
-   ```
+The earlier local procedure (Neo4j, Jaeger and Cassini from `scripts/dev_stack.sh`, the agents with `cargo run`, a
+`file://` schedules repository) was retired on 2026-10-20 with the dev shell's static certificates it depended on; it is
+in the history before then.
 
 ## Environment Variables Summary
 
@@ -160,10 +108,10 @@ Run the containers locally to ensure they start correctly (you'll need to supply
 
 ```bash
 # For the processor (Neo4j must be reachable)
-docker run --rm -e GRAPH_ENDPOINT=bolt://host.docker.internal:7687 ... polar-scheduler-processor:latest
+docker run --rm -e GRAPH_ENDPOINT=bolt://host.docker.internal:7687 ... localhost/scheduler-processor:latest
 
 # For the observer (needs Git remote URL and local path)
-docker run --rm -e POLAR_SCHEDULER_REMOTE_URL=... -e POLAR_SCHEDULER_LOCAL_PATH=/data ... polar-scheduler-observer:latest
+docker run --rm -e POLAR_SCHEDULER_REMOTE_URL=... -e POLAR_SCHEDULER_LOCAL_PATH=/data ... localhost/scheduler-observer:latest
 ```
 
 All configuration is done via environment variables at runtime.

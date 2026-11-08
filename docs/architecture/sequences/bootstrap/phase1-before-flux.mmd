@@ -1,0 +1,89 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Phase 1 of the sandbox-local bootstrap: everything up.nu does before Flux takes over.
+%% The code in infra/ (up.nu, plan.nu, cluster-registry.nu, images.nu, render.nu, deploy-repo.nu, flux.nu) as of 2026-10-21,
+%% run end to end from the dev pod that day. Shaded: designed, not built (policy-enforcement.md, stage 2).
+%% A target that does not set gitops: true skips steps 8 to 11 and applies its layers itself.
+sequenceDiagram
+    autonumber
+    actor Op as Operator
+    participant Up as infra/up.nu
+    participant Reg as registry in the cluster<br/>(polar-registry, NodePort 30500,<br/>forward localhost:5001)
+    participant Img as infra/images.nu
+    participant Ren as infra/render.nu
+    participant Pods as agent-pods.nu<br/>(scratch namespace)
+    participant Adm as polar-admin-grant
+    participant Sec as targets/T/secrets.nu
+    participant Dep as deploy-repo.nu
+    participant DGit as deployment git server<br/>(in the cluster, polar-deploy)
+    participant Fx as flux.nu
+    participant K as Kubernetes API
+
+    Op->>Up: nu infra/up.nu sandbox-local --import-from docker.io/ACCOUNT (or --dev) --user U --email E
+    Up->>Up: read targets/T/target.nu, build_plan prints the steps and why any is skipped
+
+    Note over Up,K: 1 preflight
+    Up->>K: the cluster answers, namespaces can be made, gpgsm on the PATH (a gitops target)
+    Up->>Up: the SOPS files decrypt (or the secrets already exist)
+
+    Note over Up,Reg: 2 the registry in the cluster
+    Up->>K: the storage chart if the class is missing, then namespace polar-registry,<br/>the registry (upstream image by digest), its claim and its NodePort
+    Up->>Reg: start the forward this machine pushes through, replace one that does not answer
+
+    Note over Up,Reg: 3 images, every one the target runs, each once, before the render
+    Up->>Ren: render.nu T --charts-into a scratch directory (no agent's scaffold needed)
+    Up->>Up: plus resolve.nu images (the catalog's workloads), so the full list is known
+    Up->>Img: --import-from: copy the published images, mirrors from upstream<br/>--dev: build each with nix and push (a build's log only if it fails)
+    Img->>Reg: skopeo copy through the forward, digest recorded in the image lock
+
+    Note over Up,K: 4 render
+    Up->>Pods: resolve.nu collect-scaffolds: each agent image asked for its scaffold as a pod<br/>(cached under its digest), the scratch namespace deleted
+    Up->>Ren: nu infra/render.nu T (Dhall imports from the pre-filled cache, nothing fetched)
+    Ren->>Ren: charts, catalog, checks, every image pinned by digest from the lock
+    rect rgb(235, 219, 178)
+    Ren->>Ren: DESIGNED: each workload's declared topics (from its scaffold) into the credentials<br/>agent's issuance floor, the bootstrap services' into cert-issuer's, every topic two-sided
+    end
+    Up->>Up: every image the render names was prepared in step 3, else stop
+
+    Note over Up,K: 5 namespaces, 6 cluster CA, 7 secrets
+    Up->>K: kubectl apply namespaces.yaml
+    Up->>Adm: bootstrap-ca (skipped if Secret cert-issuer-ca exists): Secret and ConfigMap polar-ca
+    Up->>Sec: secrets.nu: sops decrypt, upsert the target's Secrets (Flux never owns them)
+
+    Note over Up,DGit: 8 the deployment git server
+    Up->>Dep: deploy-repo.nu ensure T
+    Dep->>Dep: first time only: ~/.config/polar-deploy/T/ gets its own CA, the server's certificate,<br/>"pipeline" and "flux" client certificates (not Polar's CA, its key never leaves this machine)
+    Dep->>K: namespace polar-deploy (no layer holds it), the server, its claim, Service polar-deploy-git:9443
+    Dep->>DGit: an empty repository on a new cluster is given the history of mirror.git (the signed record outlives the cluster)
+    Dep->>DGit: through the forward localhost:9443: it answers over mTLS as "pipeline"
+
+    Note over Up,DGit: 9 publish
+    Up->>Dep: deploy-repo.nu publish T
+    Dep->>Dep: refuse an unrendered target, an image not pinned, a dirty tree (unless --allow-dirty),<br/>build layers/, flux/, provenance.json, sign with gpgsm, verify, update mirror.git
+    Dep->>DGit: push as "pipeline"
+
+    Note over Up,K: 10 install Flux
+    Up->>Fx: flux.nu install T
+    Fx->>DGit: clone as "flux" and verify the head's signature against the deployment CA,<br/>before anything is applied
+    Fx->>K: the Flux controllers (from the registry), Secret deploy-repo-auth (the flux certificate),<br/>the GitRepository (wait until fetched), the Kustomizations
+    Note over Up,K: 11 wait for Flux: phase2-flux
+    Up->>Fx: flux.nu wait T

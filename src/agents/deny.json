@@ -1,0 +1,494 @@
+{
+  "lockfile": {
+    "dependency-count": 655
+  },
+  "settings": {
+    "ignore": [],
+    "informational_warnings": [
+      "notice",
+      "unmaintained",
+      "unsound"
+    ],
+    "severity": null,
+    "target_arch": [],
+    "target_os": []
+  },
+  "vulnerabilities": [
+    {
+      "advisory": {
+        "aliases": [
+          "CVE-2023-49092",
+          "GHSA-c38w-74pg-36hr",
+          "GHSA-4grx-2x9w-596c"
+        ],
+        "categories": [
+          "crypto-failure"
+        ],
+        "collection": "crates",
+        "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "date": "2023-11-22",
+        "description": "### Impact\nDue to a non-constant-time implementation, information about the private key is leaked through timing information which is observable over the network. An attacker may be able to use that information to recover the key.\n\n### Patches\nNo patch is yet available, however work is underway to migrate to a fully constant-time implementation.\n\n### Workarounds\nThe only currently available workaround is to avoid using the `rsa` crate in settings where attackers are able to observe timing information, e.g. local use on a non-compromised computer is fine.\n\n### References\nThis vulnerability was discovered as part of the \"[Marvin Attack]\", which revealed several implementations of RSA including OpenSSL had not properly mitigated timing sidechannel attacks.\n\n[Marvin Attack]: https://people.redhat.com/~hkario/marvin/",
+        "expect-deleted": false,
+        "id": "RUSTSEC-2023-0071",
+        "informational": null,
+        "keywords": [
+          "cryptography"
+        ],
+        "license": "CC0-1.0",
+        "package": "rsa",
+        "references": [
+          "https://github.com/RustCrypto/RSA/issues/19#issuecomment-1822995643",
+          "https://people.redhat.com/~hkario/marvin/"
+        ],
+        "related": [],
+        "source": null,
+        "title": "Marvin Attack: potential key recovery through timing sidechannels",
+        "url": "https://github.com/RustCrypto/RSA/issues/626",
+        "withdrawn": null
+      },
+      "affected": null,
+      "package": {
+        "checksum": null,
+        "dependencies": [],
+        "name": "rsa",
+        "replace": null,
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.9.10"
+      },
+      "versions": {
+        "patched": [],
+        "unaffected": []
+      }
+    },
+    {
+      "advisory": {
+        "aliases": [
+          "GHSA-fp55-jw48-c537"
+        ],
+        "categories": [
+          "format-injection"
+        ],
+        "collection": "crates",
+        "cvss": null,
+        "date": "2026-04-27",
+        "description": "Versions of astral-tokio-tar prior to 0.6.1 contain a PAX header interpretation\nbug that allows manipulated entries to be made selectively visible or invisible\nduring extraction with astral-tokio-tar versus other tar implementations.\nAn attacker could use this differential to smuggle unexpected files onto a\nvictim's filesystem.",
+        "expect-deleted": false,
+        "id": "RUSTSEC-2026-0112",
+        "informational": null,
+        "keywords": [
+          "parser-differential",
+          "smuggling"
+        ],
+        "license": "CC0-1.0",
+        "package": "astral-tokio-tar",
+        "references": [],
+        "related": [],
+        "source": null,
+        "title": "PAX Header Desynchronization in astral-tokio-tar",
+        "url": "https://github.com/advisories/GHSA-fp55-jw48-c537",
+        "withdrawn": null
+      },
+      "affected": null,
+      "package": {
+        "checksum": null,
+        "dependencies": [],
+        "name": "astral-tokio-tar",
+        "replace": null,
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.6.0"
+      },
+      "versions": {
+        "patched": [
+          ">=0.6.1"
+        ],
+        "unaffected": []
+      }
+    },
+    {
+      "advisory": {
+        "aliases": [
+          "GHSA-xx64-wwv2-hcqq"
+        ],
+        "categories": [
+          "file-disclosure"
+        ],
+        "collection": "crates",
+        "cvss": null,
+        "date": "2026-04-27",
+        "description": "In versions 0.6.0 and earlier of astral-tokio-tar, the unpack_in API could\ninadvertently modify the permissions of external (i.e. non-archive) directories\noutside of the archive. An attacker could use this to contrite a tar archive\nthat maliciously changes directory permissions outside of its intended\nhierarchy. This flaw only affects directories; individual file permissions\ncannot be modified via it.\n\nSee GHSA-j4xf-2g29-59ph for the equivalent flaw in the tar crate.",
+        "expect-deleted": false,
+        "id": "RUSTSEC-2026-0113",
+        "informational": null,
+        "keywords": [
+          "tar",
+          "chmod"
+        ],
+        "license": "CC0-1.0",
+        "package": "astral-tokio-tar",
+        "references": [],
+        "related": [],
+        "source": null,
+        "title": "`unpack_in` can chmod arbitrary directories by following symlinks",
+        "url": "https://github.com/advisories/GHSA-xx64-wwv2-hcqq",
+        "withdrawn": null
+      },
+      "affected": null,
+      "package": {
+        "checksum": null,
+        "dependencies": [],
+        "name": "astral-tokio-tar",
+        "replace": null,
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.6.0"
+      },
+      "versions": {
+        "patched": [
+          ">=0.6.1"
+        ],
+        "unaffected": []
+      }
+    },
+    {
+      "advisory": {
+        "aliases": [
+          "GHSA-3cv2-h65g-fgmm"
+        ],
+        "categories": [
+          "file-disclosure"
+        ],
+        "collection": "crates",
+        "cvss": null,
+        "date": "2026-05-18",
+        "description": "Versions of astral-tokio-tar prior to 0.6.2 contain a PAX header interpretation bug that allows manipulated entries to be made selectively visible or invisible during extraction with astral-tokio-tar versus other tar implementations. An attacker could use this differential to smuggle unexpected files onto a victim's filesystem.",
+        "expect-deleted": false,
+        "id": "RUSTSEC-2026-0145",
+        "informational": null,
+        "keywords": [
+          "tar",
+          "chmod"
+        ],
+        "license": "CC0-1.0",
+        "package": "astral-tokio-tar",
+        "references": [],
+        "related": [],
+        "source": null,
+        "title": "PAX Header Desynchronization in astral-tokio-tar",
+        "url": "https://github.com/astral-sh/tokio-tar/security/advisories/GHSA-3cv2-h65g-fgmm",
+        "withdrawn": null
+      },
+      "affected": null,
+      "package": {
+        "checksum": null,
+        "dependencies": [],
+        "name": "astral-tokio-tar",
+        "replace": null,
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.6.0"
+      },
+      "versions": {
+        "patched": [
+          ">=0.6.2"
+        ],
+        "unaffected": []
+      }
+    }
+  ],
+  "warnings": {
+    "unmaintained": [
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2024-09-01",
+          "description": "This crate is no longer maintained, and the author recommends using the maintained [`web-time`] crate instead.\n\n[`web-time`]: https://crates.io/crates/web-time",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2024-0384",
+          "informational": "unmaintained",
+          "keywords": [],
+          "license": "CC0-1.0",
+          "package": "instant",
+          "references": [
+            "https://crates.io/crates/instant/0.1.13",
+            "https://github.com/sebcrozet/instant/issues/52"
+          ],
+          "related": [],
+          "source": null,
+          "title": "`instant` is unmaintained",
+          "url": null,
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unmaintained",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "instant",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.1.13"
+        },
+        "versions": {
+          "patched": [],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2025-11-28",
+          "description": "The rustls-pemfile crate is no longer maintained. The repository has been archived since August\n2025, and users are encouraged to depend directly on the underlying PEM parsing code included\nin rustls-pki-types since 1.9.0. The latest version of rustls-pemfile is in fact a thin wrapper\naround the same code used in rustls-pki-types, so migrating should be straightforward.\n\nThe new API is represented by the [`PemObject`][PemObject] trait, which provides methods for\nreading a single or multiple PEM objects from a file or byte slice.\n\n[PemObject]: https://docs.rs/rustls-pki-types/latest/rustls_pki_types/pem/trait.PemObject.html",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2025-0134",
+          "informational": "unmaintained",
+          "keywords": [],
+          "license": "CC0-1.0",
+          "package": "rustls-pemfile",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "rustls-pemfile is unmaintained",
+          "url": "https://github.com/rustls/pemfile/issues/61",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unmaintained",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "rustls-pemfile",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "2.2.0"
+        },
+        "versions": {
+          "patched": [],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2026-06-07",
+          "description": "The author of `proc-macro-error2` has [confirmed](https://github.com/GnomedDev/proc-macro-error-2/issues/17#issuecomment-4643215473) that the crate is no longer maintained and recommends that users migrate away from it.\n\n`proc-macro-error2` was originally created as a maintained fork of [`proc-macro-error`](https://crates.io/crates/proc-macro-error) (see [RUSTSEC-2024-0370](https://rustsec.org/advisories/RUSTSEC-2024-0370)). Both the original crate and this fork are now unmaintained.\n\n## Possible Alternative(s)\n\n- [manyhow](https://crates.io/crates/manyhow)\n- [proc-macro2-diagnostics](https://github.com/SergioBenitez/proc-macro2-diagnostics)",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2026-0173",
+          "informational": "unmaintained",
+          "keywords": [],
+          "license": "CC0-1.0",
+          "package": "proc-macro-error2",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "proc-macro-error2 is unmaintained",
+          "url": "https://github.com/GnomedDev/proc-macro-error-2/issues/17",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unmaintained",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "proc-macro-error2",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "2.0.1"
+        },
+        "versions": {
+          "patched": [],
+          "unaffected": []
+        }
+      }
+    ],
+    "unsound": [
+      {
+        "advisory": {
+          "aliases": [
+            "GHSA-vfvv-c25p-m7mm"
+          ],
+          "categories": [
+            "code-execution",
+            "memory-corruption"
+          ],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2026-04-23",
+          "description": "`InlineVec::clear()` and `SerVec::clear()` in `rkyv` were not panic-safe.\nBoth functions iterate over their elements and call `drop_in_place` on each,\nupdating `self.len` only *after* the loop. If an element's `Drop` implementation\npanics during the loop, `self.len` is left at its original value.\n\nA subsequent invocation of `clear()` on the same container then re-visits the\nalready-freed elements:\n\n- `InlineVec::clear()` is called again from `InlineVec`'s own `Drop`\n  implementation when the value is later dropped.\n- `SerVec::clear()` is called again by `SerVec::with_capacity()` after the\n  user closure returns.\n\n## Impact\n- **CWE-415 (Double Free):** heap corruption when the element type is one that\n  owns memory, such as `Box<T>` or `Vec<T>`\n- **CWE-416 (Use-After-Free):** memory corruption when an element is accessed\n  following a caught panic\n\nBoth types of undefined behavior can be invoked in safe Rust, but only if\nunwinding panics are enabled and `std::panic::catch_unwind` is used.",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2026-0122",
+          "informational": "unsound",
+          "keywords": [
+            "panic-safety",
+            "memory-safety",
+            "use-after-free",
+            "double-free"
+          ],
+          "license": "CC0-1.0",
+          "package": "rkyv",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "Potential use-after-free due to lack of panic safety in `InlineVec::clear` and `SerVec::clear`",
+          "url": "https://github.com/rkyv/rkyv/commit/5828cf5c27b664eb4432c4a93d4769e12e5e42fb",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unsound",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "rkyv",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.8.15"
+        },
+        "versions": {
+          "patched": [
+            ">=0.8.16"
+          ],
+          "unaffected": [
+            "<0.8.0"
+          ]
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2026-05-12",
+          "description": "When calling `Remote::list()` for a remote of a git repository, when that remote does not advertise any references, git2 passes a null pointer to the unsafe function `slice::from_raw_parts()`. Based on the safety section documentation of function, data must be non-null even for slices of length zero. Thus, the use of a null pointer leads to undefined behavior.",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2026-0183",
+          "informational": "unsound",
+          "keywords": [
+            "git2"
+          ],
+          "license": "CC0-1.0",
+          "package": "git2",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "Potential undefined behavior when calling Remote::list()",
+          "url": "https://github.com/rust-lang/git2-rs/pull/1250",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unsound",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "git2",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.20.4"
+        },
+        "versions": {
+          "patched": [
+            ">=0.21.0"
+          ],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2026-05-13",
+          "description": "When a `Blame` is created via `Blame::blame_buffer()`, and a `BlameHunk` is retrieved, the pointers to the original author, original committer, final author, and final committer may be null if unavailable. The corresponding `BlameHunk` methods then create `Signature`s based on null pointers; attempting to access the data of the `Signature`s leads to dereferencing null pointers.",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2026-0184",
+          "informational": "unsound",
+          "keywords": [
+            "git2"
+          ],
+          "license": "CC0-1.0",
+          "package": "git2",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "Potential undefined behavior with Signature from a buffer-created BlameHunk",
+          "url": "https://github.com/rust-lang/git2-rs/pull/1254",
+          "withdrawn": null
+        },
+        "affected": null,
+        "kind": "unsound",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "git2",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "0.20.4"
+        },
+        "versions": {
+          "patched": [
+            ">=0.21.0"
+          ],
+          "unaffected": []
+        }
+      },
+      {
+        "advisory": {
+          "aliases": [],
+          "categories": [
+            "memory-corruption"
+          ],
+          "collection": "crates",
+          "cvss": null,
+          "date": "2026-06-25",
+          "description": "Affected versions of this crate violate borrow rules, resulting in undefined behavior, when the user adds context to an error via `Error::context` and then later calls `Error::downcast_mut` on the returned `Error`.\n\nThe flaw was corrected in commit `6e8c000` by revising how the mutable reference is constructed, avoiding inclusion of a shared reference in the resulting borrow chain.\n\n## Example\n\n```rust\nuse anyhow::Error;\nuse std::fmt;\n\n#[derive(Debug)]\nstruct ErrorContext(&'static str);\n\nimpl fmt::Display for ErrorContext {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n        fmt::Display::fmt(&self.0, f)\n    }\n}\n\nfn main() {\n    let mut error = Error::msg(\"inner error\").context(ErrorContext(\"old context\"));\n    let context: &mut ErrorContext = error.downcast_mut().unwrap();\n    context.0 = \"new context\";\n    println!(\"{:?}\", error);\n}\n```\n\n## Miri output\n\n```\nerror: Undefined Behavior: trying to retag from <1538> for Unique permission at alloc602[0x38], but that tag only grants SharedReadOnly permission for this location\n   --> src/ptr.rs:170:18\n    |\n170 |         unsafe { &mut *self.ptr.as_ptr() }\n    |                  ^^^^^^^^^^^^^^^^^^^^^^^ this error occurs as part of retag at alloc602[0x38..0x48]\n    |\n    = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental\n    = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information\nhelp: <1538> was created by a SharedReadOnly retag at offsets [0x38..0x48]\n   --> src/ptr.rs:89:18\n    |\n 89 |             ptr: NonNull::from(ptr),\n    |                  ^^^^^^^^^^^^^^^^^^\n    = note: stack backtrace:\n            0: anyhow::ptr::Mut::<'_, ErrorContext>::deref_mut\n                at src/ptr.rs:170:18: 170:41\n            1: anyhow::error::<impl anyhow::Error>::downcast_mut::<ErrorContext>\n                at src/error.rs:560:18: 560:46\n            2: main\n                at examples/downcast_mut.rs:15:38: 15:58\n```",
+          "expect-deleted": false,
+          "id": "RUSTSEC-2026-0190",
+          "informational": "unsound",
+          "keywords": [
+            "unsound",
+            "downcast_mut"
+          ],
+          "license": "CC0-1.0",
+          "package": "anyhow",
+          "references": [],
+          "related": [],
+          "source": null,
+          "title": "Unsoundness in `Error::downcast_mut()`",
+          "url": "https://github.com/dtolnay/anyhow/issues/451",
+          "withdrawn": null
+        },
+        "affected": {
+          "arch": [],
+          "functions": {
+            "anyhow::Error::downcast_mut": [
+              "<1.0.103"
+            ]
+          },
+          "os": []
+        },
+        "kind": "unsound",
+        "package": {
+          "checksum": null,
+          "dependencies": [],
+          "name": "anyhow",
+          "replace": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "version": "1.0.102"
+        },
+        "versions": {
+          "patched": [
+            ">=1.0.103"
+          ],
+          "unaffected": []
+        }
+      }
+    ]
+  }
+}

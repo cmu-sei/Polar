@@ -1,135 +1,63 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! polar-healthcheck
 //!
-//! Kubernetes liveness probe binary for Polar agents.
+//! Kubernetes liveness probe binary for Polar agents. The logic is in
+//! `polar_health::probe`; this only reads the environment, prints the report
+//! and exits.
 //!
-//! Checks:
-//!   1. TLS cert expiry for all certs listed in POLAR_HEALTH_CERTS
-//!   2. Agent health state file freshness and status
+//! A dead-man's switch, nothing more: it checks that the agent's health actor is
+//! still writing its health file, and fails if the file is missing, unreadable or
+//! older than the threshold. It does not judge health, connections or certificates;
+//! the actor does, and acts on it in an orderly way. See `polar_health::probe`.
 //!
-//! Exit 0 = healthy, Exit 1 = unhealthy.
+//! Exit 0 = the file is fresh, Exit 1 = it is not (or the settings are malformed).
 //!
 //! Environment variables:
-//!   POLAR_HEALTH_CERTS        Comma-separated list of PEM cert paths to check
-//!   POLAR_HEALTH_EXPIRY_SECS  Fail if cert expires within N seconds (default: 60)
 //!   POLAR_HEALTH_FILE         Path to agent health state JSON (default: /tmp/polar-health.json)
 //!   POLAR_HEALTH_STALE_SECS   Fail if health file is older than N seconds (default: 90)
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use polar_health::{
-    HealthState, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
-    POLAR_HEALTH_FILE_DEFAULT, POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_STALE_SECS_ENV, 
-};
-use x509_parser::prelude::*;
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn check_certs(expiry_threshold: i64) -> bool {
-    let certs_env = std::env::var(POLAR_HEALTH_CERTS_ENV).unwrap_or_default();
-    if certs_env.is_empty() {
-        eprintln!("WARN: {POLAR_HEALTH_CERTS_ENV} not set, skipping cert checks");
-        return true;
-    }
-
-    let now = now_secs() as i64;
-    let mut all_ok = true;
-
-    for path in certs_env.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        match fs::read(path) {
-            Err(e) => {
-                eprintln!("ERROR: failed to read cert {path}: {e}");
-                all_ok = false;
-            }
-            Ok(data) => match parse_x509_pem(&data) {
-                Err(e) => {
-                    eprintln!("ERROR: failed to parse PEM {path}: {e}");
-                    all_ok = false;
-                }
-                Ok((_, pem)) => match pem.parse_x509() {
-                    Err(e) => {
-                        eprintln!("ERROR: failed to parse x509 in {path}: {e}");
-                        all_ok = false;
-                    }
-                    Ok(cert) => {
-                        let not_after = cert.validity().not_after.timestamp();
-                        let secs_remaining = not_after - now;
-                        if secs_remaining < expiry_threshold {
-                            eprintln!(
-                                "ERROR: cert {path} expires in {secs_remaining}s (threshold: {expiry_threshold}s)"
-                            );
-                            all_ok = false;
-                        } else {
-                            eprintln!("OK: cert {path} valid for {secs_remaining}s");
-                        }
-                    }
-                },
-            },
-        }
-    }
-
-    all_ok
-}
-
-fn check_health_file(stale_threshold: u64) -> bool {
-    let path = std::env::var(POLAR_HEALTH_FILE_ENV)
-        .unwrap_or_else(|_| POLAR_HEALTH_FILE_DEFAULT.to_string());
-
-    match fs::read_to_string(&path) {
-        Err(e) => {
-            eprintln!("ERROR: failed to read health file {path}: {e}");
-            false
-        }
-        Ok(contents) => match serde_json::from_str::<HealthState>(&contents) {
-            Err(e) => {
-                eprintln!("ERROR: failed to parse health file {path}: {e}");
-                false
-            }
-            Ok(state) => {
-                let age = now_secs().saturating_sub(state.timestamp);
-                if age > stale_threshold {
-                    eprintln!("ERROR: health file is {age}s old (threshold: {stale_threshold}s)");
-                    return false;
-                }
-                if state.status != polar_health::HealthStatus::Healthy {
-                    eprintln!(
-                        "ERROR: agent status is '{}' (cassini={}, graph={})",
-                        state.status, state.cassini_connected, state.graph_connected
-                    );
-                    return false;
-                }
-                eprintln!(
-                    "ERROR: agent status is '{}' (cassini={}, graph={})",
-                    state.status, state.cassini_connected, state.graph_connected
-                );
-                true
-            }
-        },
-    }
-}
+use polar_health::HealthState;
+use polar_health::probe::{self, ProbeConfig};
 
 fn main() {
-    let expiry_threshold: i64 = std::env::var(POLAR_HEALTH_EXPIRY_SECS_ENV)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
-
-    let stale_threshold: u64 = std::env::var(POLAR_HEALTH_STALE_SECS_ENV)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(90);
-
-    let certs_ok = check_certs(expiry_threshold);
-    let health_ok = check_health_file(stale_threshold);
-
-    if certs_ok && health_ok {
-        std::process::exit(0);
-    } else {
-        std::process::exit(1);
+    let config = match ProbeConfig::from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+    let report = probe::run(&config, HealthState::now());
+    for line in &report.lines {
+        eprintln!("{line}");
     }
+    std::process::exit(if report.ok { 0 } else { 1 });
 }
+
+// Every Polar binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
+#[global_allocator]
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;

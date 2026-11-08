@@ -1,7 +1,29 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 [package]
 name = "polar-scheduler-observer"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -11,13 +33,16 @@ name = "polar-scheduler-observer"
 path = "src/main.rs"
 
 [dependencies]
+polar-scudo.workspace = true
 anyhow.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
-git2.workspace = true
 notify.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
+polar-git-server-common.workspace = true
+polar-router.workspace = true
 polar-scheduler-common = { path = "../common" }
-polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_dhall.workspace = true
@@ -27,13 +52,10 @@ tracing.workspace = true
 walkdir = "2"
 
 [dev-dependencies]
+git2.workspace = true
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-
-[[test]]
-name = "config_tests"
-path = "tests/config_tests.rs"
 
 [[test]]
 name = "git_ops_tests"

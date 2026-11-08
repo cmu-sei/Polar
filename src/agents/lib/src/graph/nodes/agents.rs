@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Graph keys for agents, independent of where they are deployed.
 //!
 //! `PolarAgent` is the canonical node of an agent: what its code is, named by the name
@@ -11,8 +34,7 @@
 //! (deployment)-[:INSTANCE_ENDED]->(:AgentInstanceEnding)<-[:ENDED_WITH]-(instance)
 //! ```
 
-use crate::graph::controller::GraphNodeKey;
-use neo4rs::BoltType;
+use crate::graph::controller::{GraphNodeKey, NodeIdentity, NodeKeyVocabulary};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AgentNodeKey {
@@ -26,58 +48,55 @@ pub enum AgentNodeKey {
     },
 }
 
-fn text(name: String, value: &str) -> (String, BoltType) {
-    (name, BoltType::String(value.to_string().into()))
-}
-
 impl GraphNodeKey for AgentNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let p = |field: &str| format!("{prefix}_{field}");
+    fn identity(&self) -> NodeIdentity {
         match self {
-            AgentNodeKey::PolarAgent { name } => (
-                format!("({prefix}:PolarAgent {{ name: ${} }})", p("name")),
-                vec![text(p("name"), name)],
-            ),
+            AgentNodeKey::PolarAgent { name } => {
+                NodeIdentity::fixed(&["PolarAgent"], vec![("name", name.clone().into())])
+            }
             AgentNodeKey::InstanceEnding {
                 instance_id,
                 finished_at,
-            } => (
-                format!(
-                    "({prefix}:AgentInstanceEnding {{ instance_id: ${}, finished_at_key: ${} }})",
-                    p("instance_id"),
-                    p("finished_at")
-                ),
+            } => NodeIdentity::fixed(
+                &["AgentInstanceEnding"],
                 vec![
-                    text(p("instance_id"), instance_id),
-                    text(p("finished_at"), finished_at),
+                    ("instance_id", instance_id.clone().into()),
+                    ("finished_at_key", finished_at.clone().into()),
                 ],
             ),
         }
     }
 }
 
+impl NodeKeyVocabulary for AgentNodeKey {
+    fn every_variant() -> Vec<Self> {
+        let all = vec![
+            AgentNodeKey::PolarAgent { name: "x".into() },
+            AgentNodeKey::InstanceEnding {
+                instance_id: "x".into(),
+                finished_at: "x".into(),
+            },
+        ];
+        // A variant added to the enum does not compile until it is named here, beside the list it must join.
+        for key in &all {
+            match key {
+                AgentNodeKey::PolarAgent { .. } | AgentNodeKey::InstanceEnding { .. } => {}
+            }
+        }
+        all
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::controller::pattern_problem;
 
     #[test]
-    fn every_parameter_carries_the_prefix() {
-        let keys = [
-            AgentNodeKey::PolarAgent { name: "a".into() },
-            AgentNodeKey::InstanceEnding {
-                instance_id: "uid".into(),
-                finished_at: "1".into(),
-            },
-        ];
-        for key in keys {
-            let (pattern, params) = key.cypher_match("m");
-            assert!(pattern.starts_with("(m:"), "{pattern}");
-            for (name, _) in &params {
-                assert!(name.starts_with("m_"), "{name}");
-                assert!(
-                    pattern.contains(&format!("${name}")),
-                    "{pattern} lacks {name}"
-                );
+    fn every_key_keeps_the_pattern_rules() {
+        for key in AgentNodeKey::every_variant() {
+            for variable in ["n", "m", "n0"] {
+                assert_eq!(pattern_problem(&key, variable), None, "{key:?}");
             }
         }
     }

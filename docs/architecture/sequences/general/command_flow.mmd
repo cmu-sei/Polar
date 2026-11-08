@@ -1,0 +1,60 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    actor Admin
+    participant Sign as polar-sign
+    participant Processor as Scheduler processor
+    participant Graph as Neo4j
+    participant Cassini
+    participant Agent as Target agent
+    participant Handler as Command handler
+
+    Admin->>Sign: build and sign backup-now for the agent
+    Sign-->>Admin: signed command with an id and an expiry
+    Admin->>Processor: submit, by repository first, front door later
+    Processor->>Graph: write a Command node and its status
+    Processor->>Graph: mark it dispatched
+    Processor-)Cassini: command on agent.name.command
+    Cassini-)Agent: command
+
+    Agent->>Agent: verify signer, target, authority and time
+    Agent->>Agent: declared, arguments valid, not seen, not draining
+    alt any check fails
+        Agent-)Cassini: CommandOutcome refused and the step
+    else every check passes
+        Agent-)Cassini: CommandOutcome accepted
+        Agent->>Handler: run with the declared timeout
+        Agent-)Cassini: CommandOutcome started
+        alt it finishes
+            Handler-->>Agent: done
+            Agent-)Cassini: CommandOutcome succeeded and how long
+        else it fails or times out
+            Handler-->>Agent: error
+            Agent-)Cassini: CommandOutcome failed and why
+        end
+    end
+    Cassini-)Processor: CommandOutcome
+    Processor->>Graph: write an outcome node, linked to the command
+
+    Note over Processor,Graph: Dispatched, but no outcome by the expiry
+    Processor->>Graph: write unanswered, with no retry
+    Admin->>Sign: a new command has a new id

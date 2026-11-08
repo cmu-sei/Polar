@@ -1,3 +1,25 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
 
 # Git Agents – Developer README
 
@@ -105,13 +127,12 @@ Cache invalidation strategy is currently manual/policy-driven and not automatic.
 ### Running the Observer
 
 **Setup**
-The Git Observer is configured via a JSON file in a similar fashion to many docker-compatible tooling.
-
-Ensure one of these files exists before running the agent.
+The Git Observer is told which repositories to observe on `git.repo.config.events`. A private repository names a
+credential; the credentials themselves reach the observer in its signed `credentials` runtime section, and it uses
+each only for the hosts that credential is bound to (`docs/architecture/git-controller.md`). There is no
+credentials file and no `GIT_AGENT_CONFIG`.
 
 ```bash
-## Ensure you set the environment variable to point the agent to a json file containing necessary credentials.
-export GIT_AGENT_CONFIG="git.json"
 cargo run -p git-repo-observer
 ```
 

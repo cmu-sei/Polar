@@ -1,16 +1,38 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # src/agents/cert-issuer/package.nix
 { pkgs
 , craneLib
 , crateArgs
 , workspaceFileset
 , system
+, healthcheckDrv
 , ...
 }:
 let
   server = craneLib.buildPackage (crateArgs // {
     pname = "cert-issuer";
     cargoExtraArgs = "--bin cert-issuer --locked";
-    src = workspaceFileset ./cert-issuer/agent;
+    src = workspaceFileset ./cert-issuer/server;
     doCheck = false;
   });
 
@@ -43,11 +65,13 @@ let
   '';
 
   serverImage = pkgs.dockerTools.buildLayeredImage {
-    name = "cert-issuer";
+    name = "localhost/cert-issuer";
     tag  = "latest";
 
     contents = [
       server
+      # The liveness probe: it reads the health file the agent builder's health actor writes.
+      healthcheckDrv
       pkgs.iana-etc
       pkgs.cacert
       pkgs.busybox
@@ -76,14 +100,7 @@ let
       mkdir -p ./home/polar/ca
       chown ${polarUid}:${polarGid} ./home/polar/ca
 
-      # Config directory is read-only at runtime (ConfigMap mount
-      # in the pod spec), but must exist in the image so the
-      # process can stat the path before the mount lands.
-      mkdir -p ./etc/cert-issuer
-      chown ${polarUid}:${polarGid} ./etc/cert-issuer
     '';
-
-    enableFakechroot = true;
 
     config = {
       Entrypoint = [ "${server}/bin/cert-issuer" ];
@@ -94,67 +111,24 @@ let
       Env = [
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "RUST_LOG=info,cert_issuer=debug"
-        # Default CA paths pointing at the user-owned workspace.
-        # The Dhall config and pod spec ConfigMap override these
-        # in cluster — these defaults make local testing with
-        # cert-issuer-setup work without any extra configuration.
+        # Default CA paths pointing at the user-owned workspace, as
+        # cert-issuer's declared settings name them (settings.rs). The
+        # pod's ConfigMap sets them in cluster; these defaults make local
+        # testing with cert-issuer-setup work without any extra
+        # configuration.
         "CERT_ISSUER_CA_CERT_PATH=/home/polar/ca/ca.crt"
         "CERT_ISSUER_CA_KEY_PATH=/home/polar/ca/ca.key"
       ];
       Labels = {
         "org.opencontainers.image.title"       = "cert-issuer";
+        # The platform version (flake.nix, "The platform version"); never the commit.
+        "org.opencontainers.image.version"     = crateArgs.POLAR_VERSION;
         "org.opencontainers.image.description" = "Polar internal CA and OIDC-backed cert issuer";
-      };
-    };
-  };
-
-  # Minimal init container image for the cert-client binary.
-  # Runs once at pod startup, obtains a signed certificate from the
-  # cert-issuer, writes the bundle to a shared emptyDir volume, and exits.
-  # No shell or busybox needed — the binary is self-contained.
-  clientImage = pkgs.dockerTools.buildLayeredImage {
-    name = "polar-cert-client";
-    tag  = "latest";
-
-    contents = [
-      client
-      pkgs.iana-etc
-      pkgs.cacert
-    ];
-
-    fakeRootCommands = ''
-      # Identity files
-      mkdir -p ./etc
-      cp ${passwdFile} ./etc/passwd
-      cp ${groupFile}  ./etc/group
-
-      # cert output directory — shadowed by emptyDir mount in the pod spec
-      mkdir -p ./etc/tls/certs
-      chown ${polarUid}:${polarGid} ./etc/tls/certs
-
-      # SA token directory — shadowed by projected volume mount
-      mkdir -p ./workspace
-      chown ${polarUid}:${polarGid} ./workspace
-    '';
-
-    enableFakechroot = true;
-
-    config = {
-      Entrypoint = [ "${client}/bin/cert-client" ];
-      Cmd        = [];
-      User       = "${polarUid}:${polarGid}";
-      WorkingDir = "/home/polar";
-      Env = [
-        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-      ];
-      Labels = {
-        "org.opencontainers.image.title"       = "polar-cert-client";
-        "org.opencontainers.image.description" = "Polar mTLS certificate init container";
       };
     };
   };
 
 in
 {
-  inherit server client setupBin serverImage clientImage;
+  inherit server client setupBin serverImage;
 }

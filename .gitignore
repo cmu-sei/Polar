@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 target
 .DS_Store
 .env
@@ -10,9 +31,7 @@ env_setup.sh
 var/
 output/
 src/agents/*/result
-# don't persist "dev" folder generated as a result of cert-issuer-setup
 src/agents/dev
-dev/
 result*
 report.json
 config.json
@@ -42,6 +61,8 @@ ai_models/
 pi/
 src/deploy/local/values-active.dhall
 .sops.yaml
+# what belongs to one cluster and exists only after it does (infra/cluster-inputs.nu)
+infra/targets/*/cluster-inputs.nuon
 .user.sops.yaml
 user.sops.yaml
 
@@ -49,3 +70,25 @@ user.sops.yaml
 src/deploy/local/conf/*.json
 src/deploy/local/conf/*.yaml
 src/deploy/local/conf/*.yml
+
+# Python (src/ace)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+env/
+venv/
+*.pkl
+*.pickle
+rustc-ice-*.txt
+*.log
+desktop.ini
+env.sh
+
+# The image digests this machine last pushed (infra/lock.nu); lies over the committed infra/images.lock.nuon
+infra/images.dev.lock.nuon
+
+# bin/polar-dev renders a user's kustomization here for a moment
+infra/.dev-pod-*/

@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! polar
 //!
 //!   polar render <file.dhall>... [-o DIR]       Dhall to YAML
@@ -74,7 +97,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     // kube's TLS client cannot choose between providers on its own.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = rustls::crypto::ring::default_provider().install_default();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -90,7 +113,11 @@ fn print(line: String) {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Render { files, output, documents } => {
+        Command::Render {
+            files,
+            output,
+            documents,
+        } => {
             if files.is_empty() {
                 bail!("name at least one .dhall file");
             }
@@ -129,15 +156,37 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Up { plans, context, with, only, dry_run } => {
+        Command::Up {
+            plans,
+            context,
+            with,
+            only,
+            dry_run,
+        } => {
             let loaded = load_all(&plans)?;
             check_names(&loaded, &with, &only)?;
             let cluster = KubeCluster::connect(&context).await?;
             println!("using kube context: {context}");
-            let options = Options { with, only, dry_run, ..Options::default() };
-            exec::up_all(&cluster, &loaded, &options, &mut |n| random_bytes(n), &mut print).await
+            let options = Options {
+                with,
+                only,
+                dry_run,
+                ..Options::default()
+            };
+            exec::up_all(
+                &cluster,
+                &loaded,
+                &options,
+                &mut |n| random_bytes(n),
+                &mut print,
+            )
+            .await
         }
-        Command::Down { plans, context, core } => {
+        Command::Down {
+            plans,
+            context,
+            core,
+        } => {
             let mut loaded = load_all(&plans)?;
             let cluster = KubeCluster::connect(&context).await?;
             println!("using kube context: {context}");
@@ -159,15 +208,27 @@ fn load_all(paths: &[PathBuf]) -> Result<Vec<Plan>> {
     if paths.is_empty() {
         bail!("name at least one plan");
     }
-    paths.iter().map(|p: &PathBuf| load_plan(Path::new(p))).collect()
+    paths
+        .iter()
+        .map(|p: &PathBuf| load_plan(Path::new(p)))
+        .collect()
 }
 
 /// A stage name that no plan has is a mistake, however many plans there are.
 fn check_names(plans: &[Plan], with: &[String], only: &[String]) -> Result<()> {
     for name in with.iter().chain(only) {
-        if !plans.iter().any(|p| p.stages.iter().any(|s| &s.name == name)) {
-            let have: Vec<_> = plans.iter().flat_map(|p| p.stages.iter().map(|s| s.name.as_str())).collect();
-            bail!("no plan has a stage '{name}' (the stages are: {})", have.join(", "));
+        if !plans
+            .iter()
+            .any(|p| p.stages.iter().any(|s| &s.name == name))
+        {
+            let have: Vec<_> = plans
+                .iter()
+                .flat_map(|p| p.stages.iter().map(|s| s.name.as_str()))
+                .collect();
+            bail!(
+                "no plan has a stage '{name}' (the stages are: {})",
+                have.join(", ")
+            );
         }
     }
     Ok(())

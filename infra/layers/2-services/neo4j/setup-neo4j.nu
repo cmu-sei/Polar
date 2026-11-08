@@ -1,4 +1,26 @@
 #!/usr/bin/env nu
+
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # infra/layers/2-services/neo4j/setup-neo4j.nu
 #
 # Neo4j init container script. Runs as polar-nu-init:latest.
@@ -8,14 +30,14 @@
 #   1. Copy neo4j.conf from the ConfigMap mount to $NEO4J_HOME/conf/
 #      (Neo4j requires the config file to be writable; ConfigMap mounts
 #      are read-only in Kubernetes.)
-#   2. Write TLS certificates from the cert-client emptyDir mount into
+#   2. Write TLS certificates from the polar-init emptyDir mount into
 #      the directory structure Neo4j expects for mTLS on both HTTPS and Bolt.
 #   3. Ensure neo4j (uid/gid 7474) owns all writable directories.
 #
 # Certificate source:
-#   /etc/neo4j-tls/cert.pem  — server certificate (written by cert-client)
-#   /etc/neo4j-tls/key.pem   — server private key  (written by cert-client)
-#   /etc/neo4j-tls/ca.pem    — CA certificate       (written by cert-client)
+#   /etc/neo4j-tls/cert.pem  — server certificate (written by polar-init)
+#   /etc/neo4j-tls/key.pem   — server private key  (written by polar-init)
+#   /etc/neo4j-tls/ca.pem    — CA certificate       (written by polar-init)
 #
 # Certificate layout written by this script:
 #   $NEO4J_HOME/certificates/

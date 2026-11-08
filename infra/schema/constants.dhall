@@ -1,3 +1,24 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
 -- infra/schema/constants.dhall
 --
 -- Truly static constants: names, ports, paths, labels, selectors, volumes.
@@ -10,7 +31,7 @@
 --   secret?                   → secrets/<layer>/<chart>/
 let kubernetes =
       ./kubernetes.dhall
-        sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
+        sha256:2086df2178fdb83a08bd4ca89c951f12e4ce16d3cc1441005fcda943a028bb8c
 
 let Agents =
       ./agents.dhall
@@ -19,6 +40,7 @@ let Agents =
 let PolarNamespace = "polar"
 
 let GraphNamespace = "polar-graph"
+let AuthNamespace  = "polar-auth"
 
 let tlsPath = "/etc/tls/certs"
 
@@ -30,8 +52,12 @@ let mtls =
       , proxyCertificate = "proxy-ca-cert"
       }
 
-let certIssuerUrl =
-      "http://cert-issuer.${PolarNamespace}.svc.cluster.local:8443"
+-- The name cert-issuer's TLS certificate is issued for and the name every
+-- caller connects to. Callers verify the server against the host in their
+-- URL, so the two must be the same value.
+let certIssuerHost = "cert-issuer.${PolarNamespace}.svc.cluster.local"
+
+let certIssuerUrl = "https://${certIssuerHost}:8443"
 
 let certVolumeName = "polar-certs"
 
@@ -69,6 +95,22 @@ let neo4jClientCertVolumeName = "neo4j-client-tls"
 let neo4jClientCertPath       = "/etc/neo4j-client-tls"
 
 let neo4jClientSaTokenVolName = "neo4j-client-sa-token"
+
+-- cert-issuer's CA, as `polar-admin-grant bootstrap-ca` publishes it (a ConfigMap in each Polar namespace), and where a
+-- pod mounts it: polar-init verifies cert-issuer, and on the observer path every certificate it is issued, against it
+-- (docs/architecture/core-restarts.md, "The plan", step 1). The catalog's `pinned-ca` capability says the same.
+let polarCaConfigMap = "polar-ca"
+
+let polarCaPath = "/etc/polar-ca"
+
+let polarCaVolume =
+      kubernetes.Volume::{
+      , name = polarCaConfigMap
+      , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some polarCaConfigMap }
+      }
+
+let polarCaMount =
+      kubernetes.VolumeMount::{ name = polarCaConfigMap, mountPath = polarCaPath, readOnly = Some True }
 
 let graphSecretKeySelector =
       kubernetes.SecretKeySelector::{
@@ -171,10 +213,51 @@ let commonClientEnv =
         }
       ]
 
+-- The client's environment when its key is the custody daemon's (docs/architecture/key-custody.md, step 4): all but
+-- TLS_CLIENT_KEY. The socket comes with the rest of the pod's custody settings.
+let custodyClientEnv =
+      [ kubernetes.EnvVar::{
+        , name = "TLS_CA_CERT"
+        , value = Some mtls.caCertPath
+        }
+      , kubernetes.EnvVar::{
+        , name = "TLS_CLIENT_CERT"
+        , value = Some mtls.certPath
+        }
+      , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some cassiniAddr }
+      , kubernetes.EnvVar::{
+        , name = "CASSINI_SERVER_NAME"
+        , value = Some cassiniDNSName
+        }
+      ]
+
+-- When a Job replaces a pod. `Failed` waits until the old pod is fully gone. The default
+-- (`TerminatingOrFailed`) creates the replacement the moment the old pod starts terminating,
+-- so a deleted or evicted pod overlaps with its replacement for the whole drain. Every agent
+-- ends a pod by exiting non-zero, so a pod always finishes `Failed` and this loses nothing.
+-- See infra/INFRA.md for the one case it makes worse (a pod stuck terminating on a dead node).
+let JobPodReplacementPolicy = "Failed"
+
+-- A pod that restarts in place (docs/architecture/deployments.md, step 4): its workload container's one rule restarts the
+-- whole pod, its init containers and sidecars included, on every exit (`NotIn` nothing), so every ending runs polar-init
+-- again under the same UID.
+let RestartAllContainersOnEveryExit =
+      { action = "RestartAllContainers"
+      , exitCodes = Some
+        { operator = "NotIn", values = Some ([] : List Natural) }
+      }
+
+-- Where a container that fails leaves its last log lines: its termination message, in the pod's status, when it writes
+-- none of its own. A pod that restarts in place removes its containers and their logs (docs/architecture/deployments.md,
+-- step 4), so without it why a container failed is gone with the container.
+let TerminationMessageFromLogs = "FallbackToLogsOnError"
+
 in  { PolarNamespace
     , GraphNamespace
+    , AuthNamespace
     , tlsPath
     , mtls
+    , certIssuerHost
     , certIssuerUrl
     , certVolumeName
     , saTokenVolumeName
@@ -200,12 +283,20 @@ in  { PolarNamespace
     , OciRegistrySecret
     , DropAllCapSecurityContext
     , RejectSidecarAnnotation
+    , JobPodReplacementPolicy
+    , RestartAllContainersOnEveryExit
+    , TerminationMessageFromLogs
     , commonClientTls
     , certEmptyDirVolume
     , saTokenVolume
     , certVolumeMount
     , commonClientEnv
+    , custodyClientEnv
     , neo4jClientCertVolumeName
     , neo4jClientCertPath
     , neo4jClientSaTokenVolName
+    , polarCaConfigMap
+    , polarCaPath
+    , polarCaVolume
+    , polarCaMount
     }

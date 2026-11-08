@@ -1,0 +1,189 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
+-- infra/layers/2-services/ace/job.dhall
+--
+-- ACE Deployment and Service.
+--
+-- ACE restarts in place, as every Polar workload does (docs/architecture/deployments.md, step 4): a Deployment of one,
+-- `Recreate`, whose container's rule restarts the whole pod on every exit, so an ending runs the polar-init init container
+-- again and issues a fresh certificate, under the same pod. (It was a Job for that until 2026-10-28: a Deployment's
+-- container restarted alone does not run polar-init.) A container its liveness probe kills is restarted alone, without
+-- polar-init, and ACE is no builder agent, so nothing turns that into a whole-pod restart; with its year-long certificate
+-- it restarts on a valid one.
+--
+-- ACE requests a one-year certificate (see identityLifetimeOverrides in
+-- the target's overrides.dhall) -- day to day, this means ACE almost
+-- never needs a new cert and so almost never needs a fresh pod for that
+-- reason. But if something DOES go wrong (cert corruption, environment
+-- drift, cert-issuer config changes), a fresh pod via a Job restart is
+-- the only way ACE can recover a working certificate at all. Being a Job
+-- is what keeps that recovery path available, even though it's rarely
+-- exercised in normal operation.
+--
+-- Liveness probe / self-exit split:
+--   - The Kubernetes exec liveness probe (polar_healthcheck.py) checks
+--     ONE thing: is the heartbeat file fresh. That is the only failure
+--     class Kubernetes needs to catch -- the background health-monitor
+--     thread (utils/health.py) has stopped ticking entirely and the
+--     whole process is wedged.
+--   - Every other health judgment -- graph connectivity -- is the
+--     service's own responsibility. GraphHealthMonitor decides for
+--     itself when the graph has been unreachable long enough to warrant
+--     a fresh pod, and exits the process directly (os._exit) rather
+--     than reporting "unhealthy" and waiting for Kubernetes to notice
+--     via the probe.
+
+let kubernetes = ../../../schema/kubernetes.dhall
+let Constants  = ../../../schema/constants.dhall
+let functions  = ../../../schema/functions.dhall
+
+let render =
+      \(v :
+          { name               : Text
+          , image              : Text
+          , imagePullPolicy    : Text
+          , imagePullSecrets   : List { name : Optional Text }
+          , serviceAccountName : Text
+          , serviceType        : Text
+          , port               : Natural
+          , polarInitImage     : Text
+          , credentialsObserverUrl : Text
+          , credentialsAgentIdentity : Text
+          , saTokenAudience    : Text
+          , neo4jBoltAddr      : Text
+          }
+      ) ->
+
+        let volumes =
+              [ kubernetes.Volume::{
+                , name     = Constants.neo4jClientCertVolumeName
+                , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+                }
+              , Constants.saTokenVolume v.saTokenAudience
+              , Constants.polarCaVolume
+              , kubernetes.Volume::{
+                , name     = "polar-health"
+                , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+                }
+              ]
+
+        let env =
+              functions.makeGraphEnv
+                v.neo4jBoltAddr
+                Constants.graphConfig
+                Constants.graphSecretKeySelector
+                Constants.neo4jClientCertPath
+                (Some "/etc/neo4j-client-tls/ca.pem")
+              # [ kubernetes.EnvVar::{ name = "DASH_HOST", value = Some "0.0.0.0" }
+                , kubernetes.EnvVar::{ name = "DASH_PORT", value = Some (Natural/show v.port) }
+                , kubernetes.EnvVar::{ name = "POLAR_HEALTH_FILE",                value = Some "/var/run/polar-health/polar-health.json" }
+                , kubernetes.EnvVar::{ name = "POLAR_HEALTH_STALE_SECS",          value = Some "90" }
+                , kubernetes.EnvVar::{ name = "POLAR_HEALTH_TICK_SECS",           value = Some "30" }
+                , kubernetes.EnvVar::{ name = "POLAR_HEALTH_GRAPH_DEADLINE_SECS", value = Some "120" }
+                ]
+
+        let mounts =
+              [ kubernetes.VolumeMount::{
+                , name      = Constants.neo4jClientCertVolumeName
+                , mountPath = Constants.neo4jClientCertPath
+                , readOnly  = Some True
+                }
+              , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
+              ]
+
+        let restart = functions.restartOf (None functions.Job)
+
+        let podSpec = kubernetes.PodSpec::{
+              , serviceAccountName = Some v.serviceAccountName
+              , imagePullSecrets   = Some v.imagePullSecrets
+              , restartPolicy      = Some "Always"
+              , volumes            = Some volumes
+              , initContainers     = Some
+                [ functions.makePolarInitContainer
+                    v.polarInitImage
+                    v.imagePullPolicy
+                    Constants.saTokenVolumeName
+                    ""
+                    (functions.credentialsAgentIssuerEnv v.credentialsObserverUrl v.credentialsAgentIdentity)
+                    Constants.saTokenPath
+                    [ kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath }
+                    , Constants.polarCaMount
+                    ]
+                    ([] : List Text)
+                    [ "client:${Constants.neo4jClientCertPath}:ecdsa-p256:" ]
+                ]
+              , containers =
+                [ kubernetes.Container::{
+                  , name            = v.name
+                  , restartPolicy   = restart.restartPolicy
+                  , restartPolicyRules = restart.restartPolicyRules
+                  , image           = Some v.image
+                  , imagePullPolicy = Some v.imagePullPolicy
+                  , securityContext = Some Constants.DropAllCapSecurityContext
+                  , env             = Some env
+                  , volumeMounts    = Some mounts
+                  , ports           = Some
+                    [ kubernetes.ContainerPort::{ containerPort = v.port } ]
+                  , livenessProbe   = Some kubernetes.Probe::{
+                      , exec                = Some { command = Some [ "polar-healthcheck" ] }
+                      , initialDelaySeconds = Some 30
+                      , periodSeconds       = Some 30
+                      , failureThreshold    = Some 2
+                      , timeoutSeconds      = Some 5
+                      }
+                  }
+                ]
+              }
+
+        let workload =
+              functions.workloadOf
+                { name = v.name
+                , namespace = Constants.PolarNamespace
+                , job = None functions.Job
+                , instances = functions.Instances.one
+                , pod = podSpec
+                }
+
+        let service =
+              kubernetes.Service::{
+              , metadata = kubernetes.ObjectMeta::{
+                , name      = Some "${v.name}-svc"
+                , namespace = Some Constants.PolarNamespace
+                }
+              , spec = Some kubernetes.ServiceSpec::{
+                , selector = Some (toMap { name = v.name })
+                , type     = Some v.serviceType
+                , ports    = Some
+                  [ kubernetes.ServicePort::{
+                    , name       = Some "http"
+                    , targetPort = Some (kubernetes.NatOrString.Nat v.port)
+                    , port       = v.port
+                    }
+                  ]
+                }
+              }
+
+        in  [ workload
+            , kubernetes.Resource.Service service
+            ]
+
+in render

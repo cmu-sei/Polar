@@ -1,11 +1,34 @@
-//! Kubernetes Job manifest construction for Cyclops build and bootstrap jobs.
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! Kubernetes Job manifest construction for build-orchestrator build and bootstrap jobs.
 //!
 //! # Job anatomy
 //!
 //! Every job — whether a pipeline job or a bootstrap job — follows the same
 //! two-container structure:
 //!
-//! ```
+//! ```text
 //! initContainers:
 //!   - name: clone          ← clones source into /workspace
 //! containers:
@@ -54,6 +77,7 @@
 //!   not Kubernetes's. A failed job is a terminal event from k8s's perspective.
 
 use orchestrator_core::WORKSPACE_PATH;
+use orchestrator_core::backend::Retention;
 use std::collections::BTreeMap;
 
 use k8s_openapi::{
@@ -69,7 +93,7 @@ use k8s_openapi::{
 };
 use orchestrator_core::{
     TLS_CERT_DIR, tls_ca_cert_path, tls_client_cert_path, tls_client_key_path,
-    types::{BuildSpec, GitCredentials, RegistryCredentials, SourceRef},
+    types::{BuildSpec, RegistryCredentials, SourceRef},
 };
 use uuid::Uuid;
 
@@ -79,12 +103,9 @@ use uuid::Uuid;
 /// It is separate from both the bootstrap image and the pipeline image —
 /// its only job is to clone a repo at a specific commit into /workspace.
 ///
-/// Pinned by digest here as a compile-time constant. When this image is
-/// updated, update this constant and redeploy. In future this will be
-/// injected from config like the bootstrap image.
-///
-/// TODO: move this to OrchestratorConfig once the config schema is extended.
-const CLONE_INIT_IMAGE: &str = "cyclops/git-clone:latest";
+/// The default only, used when the configuration names no clone image (`JobOptions::clone_image`). It is a tag,
+/// not a digest, so runtime attestation refuses a pod that runs it; a deployment names the image by digest.
+pub const CLONE_INIT_IMAGE: &str = "build-orchestrator/git-clone:latest";
 
 /// Name of the emptyDir volume shared between init and main containers.
 const WORKSPACE_VOLUME: &str = "workspace";
@@ -93,26 +114,151 @@ const WORKSPACE_VOLUME: &str = "workspace";
 /// are read-only. The cassini daemon's socket and queue live here.
 const TMP_VOLUME: &str = "tmp";
 
-/// Name of the projected volume that holds git credential env var sources.
-/// The actual credential values are sourced from a k8s Secret and injected
-/// as env vars into the init container only — never into the main container.
+/// Name of the volume that holds the build's git credential, and where the clone container sees it. The
+/// credential is a Secret of the build's own, mounted as files into the clone container only — never an
+/// environment variable, and never in the pipeline container.
 const GIT_CREDS_VOLUME: &str = "git-credentials";
+pub const GIT_CREDS_DIR: &str = "/run/git-credentials";
 
 pub const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
+
+/// The Secret that holds a build's git credential: made with the job and owned by it, so it goes with it.
+pub fn git_secret_name_for_build(build_id: Uuid) -> String {
+    format!("build-{}-git", build_id)
+}
+
+/// The ServiceAccount a Job's pod runs under, if the Job has not finished: the one it holds. The accounts are a
+/// fixed set that the deployment makes (`JobOptions::accounts`); a Job holds its account until it completes or
+/// fails, and then the account is free for the next build.
+pub fn account_held_by(job: &Job) -> Option<String> {
+    let finished = job
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| {
+            cs.iter()
+                .any(|c| (c.type_ == "Complete" || c.type_ == "Failed") && c.status == "True")
+        });
+    if finished {
+        return None;
+    }
+    job.spec
+        .as_ref()?
+        .template
+        .spec
+        .as_ref()?
+        .service_account_name
+        .clone()
+}
+
+/// The first of the deployment's accounts that no unfinished Job holds. The broker allows one session per
+/// identity, so a build must not share its account with another that is running.
+pub fn free_account<'a>(accounts: &'a [String], jobs: &[Job]) -> Option<&'a String> {
+    let held: Vec<String> = jobs.iter().filter_map(account_held_by).collect();
+    accounts.iter().find(|a| !held.contains(a))
+}
+
+/// The ServiceAccount a job's pod runs under, or `None` when jobs have no certificate of their own. With a
+/// `shared_account` it is that one, however many jobs hold it. Otherwise it is the first of `accounts` no unfinished
+/// job holds, or, when there is none, `Err` with the number of accounts that are all held.
+pub fn choose_account(options: &JobOptions, jobs: &[Job]) -> Result<Option<String>, usize> {
+    if options.identity.is_none() {
+        return Ok(None);
+    }
+    if let Some(shared) = &options.shared_account {
+        return Ok(Some(shared.clone()));
+    }
+    free_account(&options.accounts, jobs)
+        .cloned()
+        .map(Some)
+        .ok_or(options.accounts.len())
+}
+
+/// How a finished Job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Succeeded,
+    Failed,
+}
+
+/// How a Job ended and when (seconds since the epoch), if it has: its Complete or Failed condition, once true. A
+/// Job that has not finished, or whose condition has no time, has no end.
+pub fn ended(job: &Job) -> Option<(Ended, i64)> {
+    job.status
+        .as_ref()?
+        .conditions
+        .as_ref()?
+        .iter()
+        .find_map(|c| {
+            let how = match c.type_.as_str() {
+                "Complete" => Ended::Succeeded,
+                "Failed" => Ended::Failed,
+                _ => return None,
+            };
+            if c.status != "True" {
+                return None;
+            }
+            Some((how, c.last_transition_time.as_ref()?.0.as_second()))
+        })
+}
+
+/// The Jobs that finished longer ago than `retention` allows for how they ended. A Job still running is never one.
+pub fn expired<'a>(jobs: &'a [Job], now: i64, retention: &Retention) -> Vec<&'a Job> {
+    jobs.iter()
+        .filter(|job| {
+            let Some((how, at)) = ended(job) else {
+                return false;
+            };
+            let keep = match how {
+                Ended::Succeeded => retention.succeeded,
+                Ended::Failed => retention.failed,
+            };
+            now.saturating_sub(at) > i64::try_from(keep.as_secs()).unwrap_or(i64::MAX)
+        })
+        .collect()
+}
+
+/// The pod additions that give each job a certificate of its own: the library's `polar-init` init container
+/// with its projected token, the volume the certificate is written to, and what the main container is told.
+/// Read from the configuration file as JSON (`serde_json`), since the file's loader lowercases the keys of a
+/// map, which Kubernetes' camelCase names cannot survive.
+///
+/// Without one, jobs share the Secret named `CLIENT_TLS_SECRET_NAME`, and builds that overlap supersede each
+/// other on the broker.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobIdentity {
+    /// Run before the clone, with the token the pod's ServiceAccount is given.
+    #[serde(default)]
+    pub init_containers: Vec<Container>,
+    #[serde(default)]
+    pub volumes: Vec<Volume>,
+    /// Where the pipeline container finds its certificate.
+    #[serde(default)]
+    pub pipeline_mounts: Vec<VolumeMount>,
+    #[serde(default)]
+    pub pipeline_env: Vec<EnvVar>,
+}
+
+impl JobIdentity {
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+}
 pub const CLIENT_TLS_VOLUME_NAME: &str = CLIENT_TLS_SECRET_NAME;
 
 /// Derives a deterministic, DNS-safe Job name from a build ID.
 /// Kubernetes names must be <= 63 chars, lowercase alphanumeric and hyphens.
-/// A UUID is 36 chars; with the prefix "cyclops-build-" (14 chars) = 50 chars total.
+/// A UUID is 36 chars; with the prefix "build-" (14 chars) = 50 chars total.
 pub fn job_name_for_build(build_id: Uuid) -> String {
-    format!("cyclops-build-{}", build_id)
+    format!("build-{}", build_id)
 }
 
 /// Same naming convention for bootstrap jobs.
 /// Distinguished from pipeline jobs so they are identifiable in the cluster
 /// without having to inspect annotations.
 pub fn job_name_for_bootstrap(build_id: Uuid) -> String {
-    format!("cyclops-bootstrap-{}", build_id)
+    format!("build-bootstrap-{}", build_id)
 }
 
 // ── Pipeline job ──────────────────────────────────────────────────────────────
@@ -131,6 +277,29 @@ pub struct JobOptions {
     /// Size limit of the workspace emptyDir, e.g. "2Gi". None means no limit,
     /// so a large repo or archive can fill the node's disk.
     pub workspace_size_limit: Option<String>,
+    /// `Always`, `IfNotPresent` or `Never` for the clone and pipeline images. Left alone, a `latest` tag is
+    /// pulled every time, which an image loaded into a node by hand cannot survive.
+    pub image_pull_policy: Option<String>,
+    /// The image of the init container that clones the source. `CLONE_INIT_IMAGE` unless the configuration names
+    /// one, which it must name by digest.
+    pub clone_image: String,
+    /// A certificate for the job, issued to the ServiceAccount its pod runs under (see `JobIdentity`).
+    pub identity: Option<JobIdentity>,
+    /// The ServiceAccounts a job may run under, made by the deployment. Each is a workload the authority model
+    /// knows, and the broker allows one session per identity, so a job takes an account no running job holds
+    /// (`free_account`). Needed with an `identity`.
+    pub accounts: Vec<String>,
+    /// The one ServiceAccount every job runs under, when its workload has many instances (the fork's authority model,
+    /// "Multi-instance workloads"): each pod has a certificate and a session of its own, so jobs never wait for it.
+    /// Exclusive with `accounts`. Needed with an `identity` when `accounts` is empty.
+    pub shared_account: Option<String>,
+    /// Keep the repository's `.git` in the workspace. The instrumented pipeline records which commit and tree it
+    /// built, so it needs it; a pipeline that only reads source does not.
+    pub keep_git: bool,
+    /// How long finished jobs are kept. The orchestrator applies it by outcome (`expired`); Kubernetes' own expiry
+    /// on each Job is set to the longest of them, so that jobs are still collected if the orchestrator is not
+    /// running to apply it.
+    pub retention: Retention,
 }
 
 impl JobOptions {
@@ -142,6 +311,13 @@ impl JobOptions {
             ca_bundle_secret: None,
             resources: PipelineResources::default(),
             workspace_size_limit: None,
+            image_pull_policy: None,
+            clone_image: CLONE_INIT_IMAGE.to_string(),
+            identity: None,
+            accounts: Vec::new(),
+            shared_account: None,
+            keep_git: false,
+            retention: Retention::default(),
         }
     }
 }
@@ -180,13 +356,25 @@ impl Default for PipelineResources {
 /// `ca_bundle_secret`, when set, names a Secret whose `ca-bundle.crt` becomes
 /// the trust store of both containers (see `trust_ca_bundle`).
 pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
+    build_job_manifest_as(spec, options, None)
+}
+
+/// The same, with the pod running under `account` (one of `JobOptions::accounts`) when the job has an identity.
+pub fn build_job_manifest_as(spec: &BuildSpec, options: &JobOptions, account: Option<&str>) -> Job {
     let namespace = options.namespace.as_str();
     let job_name = job_name_for_build(spec.build_id);
     let (labels, annotations) = standard_metadata(spec.build_id, &spec.source, "pipeline");
 
-    let mut init_container = clone_init_container(&spec.source, &spec.git_credentials);
+    let has_git_secret = spec.git_secret.is_some() && matches!(spec.source, SourceRef::Git { .. });
+    let mut init_container = clone_init_container(&spec.source, options.keep_git, has_git_secret);
+    init_container.image = Some(options.clone_image.clone());
+    init_container.image_pull_policy = options.image_pull_policy.clone();
 
-    let pipeline_env = pipeline_env_vars(spec);
+    let identity = options.identity.as_ref();
+    let mut pipeline_env = pipeline_env_vars(spec, identity.is_none());
+    if let Some(identity) = identity {
+        pipeline_env.extend(identity.pipeline_env.iter().cloned());
+    }
 
     // When entrypoint is None the image's own CMD/ENTRYPOINT runs (/bin/pipeline-runner
     // for pipeline images built from container.dhall, or the analyzer's own entrypoint).
@@ -195,21 +383,38 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
         name: "pipeline".to_string(),
         image: Some(spec.pipeline_image.clone()),
 
-        // image_pull_policy: Some("Never".into()), // TODO: make configurable
+        image_pull_policy: options.image_pull_policy.clone(),
         command: spec.entrypoint.clone(),
         env: Some(pipeline_env),
         // TODO: allow users to specify their own security context via config for git builds
         resources: Some(pipeline_resources(&options.resources)),
-        volume_mounts: Some(vec![client_tls_volume_mount(), workspace_volume_mount()]),
+        volume_mounts: Some(
+            match identity {
+                Some(identity) => identity.pipeline_mounts.clone(),
+                None => vec![client_tls_volume_mount()],
+            }
+            .into_iter()
+            // A git build's pipeline writes beside its source (its artifacts, its build directory); only
+            // an archive, which is third-party code under analysis, gets the source read-only.
+            .chain([workspace_volume_mount(matches!(
+                spec.source,
+                SourceRef::RegistryArchive { .. }
+            ))])
+            .collect(),
+        ),
         ..Default::default()
     };
 
-    let mut volumes = vec![
-        workspace_volume(options.workspace_size_limit.as_deref()),
-        client_tls_voiume(), // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
-    ];
+    let mut volumes = vec![workspace_volume(options.workspace_size_limit.as_deref())];
+    match identity {
+        Some(identity) => volumes.extend(identity.volumes.iter().cloned()),
+        None => volumes.push(client_tls_voiume()),
+    }
+    if has_git_secret {
+        volumes.push(git_secret_volume(spec.build_id));
+    }
 
-    // The init container is Cyclops's own minimal image and never needs
+    // The init container is build-orchestrator'ss own minimal image and never needs
     // root, so it is always locked down. Its scratch space is /tmp (the clone
     // script keeps its git config there), so it always gets the tmp volume.
     volumes.push(tmp_volume());
@@ -233,8 +438,17 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     // TODO: Insert these IF and only IF they're present in the configuration, skipping to test on insecure local registry
     // let image_pull_secrets = registry_pull_secrets(&spec.registry_credentials);
 
+    // The certificate is obtained before anything else runs, and before the source is fetched.
+    let init_containers: Vec<Container> = identity
+        .map(|i| i.init_containers.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain([init_container])
+        .collect();
+
     let pod_spec = PodSpec {
-        init_containers: Some(vec![init_container]),
+        init_containers: Some(init_containers),
+        service_account_name: identity.and(account).map(str::to_string),
         containers: vec![pipeline_container],
         volumes: Some(volumes),
         // the clone image runs as non-root user, so we must make sure that the emptydir we clone into is owned by git
@@ -249,7 +463,14 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
         ..Default::default()
     };
 
-    assemble_job(job_name, namespace, labels, annotations, pod_spec)
+    assemble_job(
+        job_name,
+        namespace,
+        labels,
+        annotations,
+        pod_spec,
+        options.retention.longest(),
+    )
 }
 
 // ── Init container ────────────────────────────────────────────────────────────
@@ -272,7 +493,7 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
 ///
 /// The init container mounts the workspace volume as writable (it populates it).
 /// The main container mounts the same volume as read-only.
-fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Container {
+fn clone_init_container(source: &SourceRef, keep_git: bool, git_secret: bool) -> Container {
     let mut env: Vec<EnvVar> = source
         .fetch_env()
         .into_iter()
@@ -284,14 +505,40 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Con
         })
         .collect();
 
-    // TODO: do this only if the configured repo has credentials provided
-    // Inject credential env vars sourced from the k8s Secret.
-    // The clone image reads GIT_USERNAME and GIT_PASSWORD and constructs
-    // the authenticated remote URL itself. This keeps credential handling
-    // inside the clone image, not in the orchestrator.
-    // Archive sources are public downloads and never receive git credentials.
+    // Archive sources are public downloads and never receive git credentials. A git source gets the
+    // build's own credential, when its repository's mapping names one, as files: the clone script reads
+    // them through git's askpass, so the value is in no URL, no environment and no process argument.
     if let SourceRef::Git { .. } = source {
-        env.extend(git_credential_env_vars(credentials));
+        if git_secret {
+            env.push(EnvVar {
+                name: "CYCLOPS_GIT_CREDENTIALS_DIR".to_string(),
+                value: Some(GIT_CREDS_DIR.to_string()),
+                ..Default::default()
+            });
+        }
+        if keep_git {
+            env.push(EnvVar {
+                name: "CYCLOPS_KEEP_GIT".to_string(),
+                value: Some("1".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    let mut mounts = vec![VolumeMount {
+        name: WORKSPACE_VOLUME.to_string(),
+        mount_path: WORKSPACE_PATH.to_string(),
+        // Init container writes — must be writable.
+        read_only: Some(false),
+        ..Default::default()
+    }];
+    if git_secret {
+        mounts.push(VolumeMount {
+            name: GIT_CREDS_VOLUME.to_string(),
+            mount_path: GIT_CREDS_DIR.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
     }
 
     Container {
@@ -302,13 +549,7 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Con
         // TODO: enable hardened sec context when we get a controlled clone image.
         // security_context: Some(hardened_security_context()),
         resources: Some(clone_resources()),
-        volume_mounts: Some(vec![VolumeMount {
-            name: WORKSPACE_VOLUME.to_string(),
-            mount_path: WORKSPACE_PATH.to_string(),
-            // Init container writes — must be writable.
-            read_only: Some(false),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(mounts),
         ..Default::default()
     }
 }
@@ -321,97 +562,50 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Con
 /// report results, and emit Cassini events. The pipeline runner must not
 /// need to be told anything about its own internal build steps — that is
 /// encoded in the pipeline manifest baked into the image.
-fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
-    vec![
-        EnvVar {
-            name: "POLAR_BUILD_ID".to_string(),
-            value: Some(spec.build_id.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "BUILD_WORKSPACE".to_string(),
-            value: Some(WORKSPACE_PATH.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CA_CERT".to_string(),
-            value: Some(tls_ca_cert_path()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CLIENT_CERT".to_string(),
-            value: Some(tls_client_cert_path()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CLIENT_KEY".to_string(),
-            value: Some(tls_client_key_path()),
-            ..Default::default()
-        },
-    ]
-    .into_iter()
-    // Source identity (commit SHA, or purl + archive digest).
-    .chain(
-        spec.source
-            .pipeline_env()
-            .into_iter()
-            .map(|(name, value)| EnvVar {
-                name,
-                value: Some(value),
-                ..Default::default()
-            }),
-    )
-    // Additional caller-supplied env vars. Injected last so they can
-    // override the standard vars if absolutely necessary, though that
-    // should be considered a code smell.
-    .chain(spec.env.iter().map(|(k, v)| EnvVar {
-        name: k.clone(),
-        value: Some(v.clone()),
+fn pipeline_env_vars(spec: &BuildSpec, shared_tls: bool) -> Vec<EnvVar> {
+    let var = |name: &str, value: String| EnvVar {
+        name: name.to_string(),
+        value: Some(value),
         ..Default::default()
-    }))
-    .collect()
+    };
+    let mut vars = vec![
+        var("POLAR_BUILD_ID", spec.build_id.to_string()),
+        var("BUILD_WORKSPACE", WORKSPACE_PATH.to_string()),
+    ];
+    // With a certificate of its own, where it is comes from the identity (`JobIdentity::pipeline_env`).
+    if shared_tls {
+        vars.extend([
+            var("TLS_CA_CERT", tls_ca_cert_path()),
+            var("TLS_CLIENT_CERT", tls_client_cert_path()),
+            var("TLS_CLIENT_KEY", tls_client_key_path()),
+        ]);
+    }
+    vars.into_iter()
+        // Source identity (commit SHA, or purl + archive digest).
+        .chain(
+            spec.source
+                .pipeline_env()
+                .into_iter()
+                .map(|(name, value)| EnvVar {
+                    name,
+                    value: Some(value),
+                    ..Default::default()
+                }),
+        )
+        // Additional caller-supplied env vars. Injected last so they can
+        // override the standard vars if absolutely necessary, though that
+        // should be considered a code smell.
+        .chain(spec.env.iter().map(|(k, v)| EnvVar {
+            name: k.clone(),
+            value: Some(v.clone()),
+            ..Default::default()
+        }))
+        .collect()
 }
 
-/// Constructs env vars that source git credentials from a k8s Secret.
-///
-/// Values are pulled from the Secret at pod startup by the kubelet — they
-/// are never present in the Job manifest itself, which is important for
-/// audit log hygiene. Anyone reading the Job spec sees only which secret
-/// is referenced, not what the credentials are.
-fn git_credential_env_vars(credentials: &GitCredentials) -> Vec<EnvVar> {
-    match credentials {
-        GitCredentials::HttpToken { secret_name } => vec![
-            EnvVar {
-                name: "GIT_USERNAME".to_string(),
-                // TODO: remove hardcoded test username, replace with val from secret
-                value: Some("username".to_string()),
-                // value_from: Some(EnvVarSource {
-                //     secret_key_ref: Some(SecretKeySelector {
-                //         name: secret_name.clone(),
-                //         key: "username".to_string(),
-                //         optional: Some(false),
-                //     }),
-                //     ..Default::default()
-                // }),
-                ..Default::default()
-            },
-            EnvVar {
-                name: "GIT_PASSWORD".to_string(),
-                // TODO: remove,
-                value: Some("password".to_string()),
-                // value_from: Some(EnvVarSource {
-                //     secret_key_ref: Some(SecretKeySelector {
-                //         name: secret_name.clone(),
-                //         key: "password".to_string(),
-                //         optional: Some(false),
-                //     }),
-                //     ..Default::default()
-                // }),
-                ..Default::default()
-            },
-        ],
-    }
-}
+// Env vars that source git credentials from a k8s Secret would be built here: values pulled from the Secret at pod
+// startup by the kubelet, never present in the Job manifest itself, which matters for audit log hygiene. Anyone
+// reading the Job spec sees only which secret is referenced, not what the credentials are.
 
 /// Registry push credentials for the bootstrap container.
 ///
@@ -425,6 +619,7 @@ fn git_credential_env_vars(credentials: &GitCredentials) -> Vec<EnvVar> {
 /// registry_pull_secrets) and expose the secret name as an env var for
 /// the bootstrap container to use however its registry client expects.
 /// The bootstrap image is responsible for the actual push logic.
+#[allow(dead_code)] // for the bootstrap job, which is not submitted yet
 fn registry_push_env_vars(credentials: &RegistryCredentials) -> Vec<EnvVar> {
     match credentials {
         RegistryCredentials::DockerConfigJson { secret_name } => vec![EnvVar {
@@ -473,11 +668,11 @@ fn client_tls_voiume() -> Volume {
 /// Read-only enforces this at the kernel level and is a meaningful
 /// security boundary — a compromised pipeline cannot tamper with the
 /// source it just built from.
-fn workspace_volume_mount() -> VolumeMount {
+fn workspace_volume_mount(read_only: bool) -> VolumeMount {
     VolumeMount {
         name: WORKSPACE_VOLUME.to_string(),
         mount_path: WORKSPACE_PATH.to_string(),
-        read_only: Some(true),
+        read_only: Some(read_only),
         ..Default::default()
     }
 }
@@ -492,30 +687,19 @@ fn client_tls_volume_mount() -> VolumeMount {
     }
 }
 
-/// Projects the git credential secret into a volume.
+/// The volume that holds the build's git credential, from the Secret the backend made for it.
 ///
-/// This volume is mounted into the init container only, not the main container.
-/// The main container has no business touching git credentials.
-///
-/// Note: we also inject credentials as env vars (see git_credential_env_vars).
-/// The volume exists for future SSH key support — an SSH key cannot be
-/// passed as an env var, it must be a file at a known path for the ssh client.
-/// For HTTP token auth today, the env var approach is sufficient and the
-/// volume is vestigial — but it's cheap to declare and removes a future
-/// refactor.
-fn git_credentials_volume(credentials: &GitCredentials) -> Volume {
-    let secret_name = match credentials {
-        GitCredentials::HttpToken { secret_name } => secret_name.clone(),
-    };
-
+/// It is mounted into the clone container only, not the pipeline container: the pipeline has no business
+/// touching the credential it was cloned with, and nothing here puts the value in an environment variable.
+fn git_secret_volume(build_id: Uuid) -> Volume {
     Volume {
         name: GIT_CREDS_VOLUME.to_string(),
         secret: Some(SecretVolumeSource {
-            secret_name: Some(secret_name),
-            // optional: false — if the secret doesn't exist, fail fast at
-            // pod scheduling time rather than letting the init container
-            // start and fail with a less obvious error.
+            secret_name: Some(git_secret_name_for_build(build_id)),
+            // optional: false — a pod whose Secret is not there waits, rather than start without it.
             optional: Some(false),
+            // The clone container does not run as root; only it mounts this volume.
+            default_mode: Some(0o444),
             ..Default::default()
         }),
         ..Default::default()
@@ -529,6 +713,7 @@ fn git_credentials_volume(credentials: &GitCredentials) -> Volume {
 /// clone init image and the pipeline image must both be pullable with
 /// the same secret. In practice: put both images in the same registry
 /// or ensure the dockerconfigjson covers all registries in use.
+#[allow(dead_code)] // for the bootstrap job, which is not submitted yet
 fn registry_pull_secrets(credentials: &RegistryCredentials) -> Vec<LocalObjectReference> {
     match credentials {
         RegistryCredentials::DockerConfigJson { secret_name } => {
@@ -575,7 +760,7 @@ fn harden(container: &mut Container) {
 
 /// Where the CA bundle Secret is mounted, and the file within it.
 const CA_BUNDLE_VOLUME: &str = "ca-bundle";
-const CA_BUNDLE_DIR: &str = "/etc/cyclops/ca";
+const CA_BUNDLE_DIR: &str = "/etc/build-orchestrator/ca";
 const CA_BUNDLE_KEY: &str = "ca-bundle.crt";
 
 fn ca_bundle_volume(secret_name: &str) -> Volume {
@@ -591,8 +776,9 @@ fn ca_bundle_volume(secret_name: &str) -> Volume {
 
 /// Point the container's TLS clients at the mounted bundle. Each tool reads
 /// its own variable: OpenSSL-based tools `SSL_CERT_FILE`, git
-/// `GIT_SSL_CAINFO`, curl `CURL_CA_BUNDLE`, Nix `NIX_SSL_CERT_FILE`. These
-/// override the defaults baked into Cyclops's images.
+/// `GIT_SSL_CAINFO`, curl `CURL_CA_BUNDLE`, Nix `NIX_SSL_CERT_FILE`, and cargo
+/// (its own git fetches too) `CARGO_HTTP_CAINFO`. These override the defaults
+/// baked into the images.
 fn trust_ca_bundle(container: &mut Container) {
     let bundle = format!("{CA_BUNDLE_DIR}/{CA_BUNDLE_KEY}");
     let env = container.env.get_or_insert_with(Vec::new);
@@ -601,6 +787,7 @@ fn trust_ca_bundle(container: &mut Container) {
         "GIT_SSL_CAINFO",
         "CURL_CA_BUNDLE",
         "NIX_SSL_CERT_FILE",
+        "CARGO_HTTP_CAINFO",
     ] {
         env.push(EnvVar {
             name: name.to_string(),
@@ -655,6 +842,7 @@ fn pipeline_resources(r: &PipelineResources) -> ResourceRequirements {
 /// Bootstrap jobs get more resources because nix evaluation downloads and
 /// builds a potentially large closure. A bootstrap that gets OOMKilled is
 /// a poor experience.
+#[allow(dead_code)] // for the bootstrap job, which is not submitted yet
 fn bootstrap_resources() -> ResourceRequirements {
     resource_requirements("4", "8Gi", "1", "2Gi")
 }
@@ -688,7 +876,7 @@ fn resource_requirements(
 
 // ── Assembly ──────────────────────────────────────────────────────────────────
 
-/// Standard labels and annotations applied to all Cyclops Jobs.
+/// Standard labels and annotations applied to all build-orchestrator Jobs.
 ///
 /// Labels are queryable — use them for filtering in kubectl and for
 /// network policy selectors. Annotations carry richer metadata for
@@ -701,7 +889,7 @@ fn standard_metadata(
     let mut labels = BTreeMap::new();
     labels.insert(
         "app.kubernetes.io/managed-by".to_string(),
-        "cyclops".to_string(),
+        "build-orchestrator".to_string(),
     );
     labels.insert("cyclops.build/id".to_string(), build_id.to_string());
     labels.insert("cyclops.build/type".to_string(), job_type.to_string());
@@ -736,6 +924,7 @@ fn assemble_job(
     labels: BTreeMap<String, String>,
     annotations: BTreeMap<String, String>,
     pod_spec: PodSpec,
+    keep_finished: std::time::Duration,
 ) -> Job {
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
@@ -758,9 +947,12 @@ fn assemble_job(
             // No retries — a failed job is a terminal event. The orchestrator
             // decides whether to retry at a higher level.
             backoff_limit: Some(0),
-            // Clean up completed jobs after one hour. Logs should be
-            // collected by Polar before this TTL fires.
-            ttl_seconds_after_finished: Some(3600),
+            // Kubernetes removes a finished job after the longest the retention policy keeps one. The orchestrator
+            // removes them sooner by how they ended (`expired`); this is for when it is not running. A job's
+            // logs go to the object store as it finishes, before either fires.
+            ttl_seconds_after_finished: Some(
+                i32::try_from(keep_finished.as_secs()).unwrap_or(i32::MAX),
+            ),
             ..Default::default()
         }),
         ..Default::default()
@@ -770,7 +962,7 @@ fn assemble_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::types::source_env;
+    use orchestrator_core::types::{GitCredentials, GitSecret, source_env};
 
     fn spec(source: SourceRef) -> BuildSpec {
         BuildSpec::with_pipeline_runner(
@@ -868,7 +1060,7 @@ mod tests {
             let env = c.env.unwrap();
             assert!(
                 env.iter().any(|e| e.name == "GIT_SSL_CAINFO"
-                    && e.value.as_deref() == Some("/etc/cyclops/ca/ca-bundle.crt")),
+                    && e.value.as_deref() == Some("/etc/build-orchestrator/ca/ca-bundle.crt")),
                 "{}",
                 c.name
             );
@@ -919,6 +1111,36 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_clone_image_is_the_clone_containers() {
+        let pinned = format!("reg/git-clone@sha256:{}", "e".repeat(64));
+        let clone_of = |options: &JobOptions| {
+            let job = build_job_manifest(
+                &spec(SourceRef::Git {
+                    url: "https://github.com/cmu-sei/Polar.git".into(),
+                    commit_sha: "a".repeat(40),
+                }),
+                options,
+            );
+            let pod = job.spec.unwrap().template.spec.unwrap();
+            pod.init_containers
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "clone")
+                .unwrap()
+                .image
+        };
+        let options = JobOptions {
+            clone_image: pinned.clone(),
+            ..JobOptions::new("polar-builds")
+        };
+        assert_eq!(clone_of(&options), Some(pinned));
+        assert_eq!(
+            clone_of(&JobOptions::new("polar-builds")),
+            Some(CLONE_INIT_IMAGE.to_string())
+        );
+    }
+
+    #[test]
     fn default_options_keep_ci_sized_resources_and_no_workspace_limit() {
         let job = build_job_manifest(
             &spec(SourceRef::Git {
@@ -937,6 +1159,32 @@ mod tests {
             .find(|v| v.name == WORKSPACE_VOLUME)
             .unwrap();
         assert_eq!(ws.empty_dir.unwrap().size_limit, None);
+    }
+
+    #[test]
+    fn the_clone_keeps_git_only_when_asked() {
+        let source = || SourceRef::Git {
+            url: "https://github.com/cmu-sei/Polar.git".into(),
+            commit_sha: "a".repeat(40),
+        };
+        let keeps = |options: &JobOptions| {
+            let job = build_job_manifest(&spec(source()), options);
+            let pod = job.spec.unwrap().template.spec.unwrap();
+            pod.init_containers
+                .unwrap()
+                .iter()
+                .find(|c| c.name == "clone")
+                .unwrap()
+                .env
+                .clone()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "CYCLOPS_KEEP_GIT" && e.value.as_deref() == Some("1"))
+        };
+        assert!(!keeps(&JobOptions::new("polar-builds")));
+        let mut options = JobOptions::new("polar-builds");
+        options.keep_git = true;
+        assert!(keeps(&options));
     }
 
     #[test]
@@ -1035,7 +1283,7 @@ mod tests {
         );
     }
 
-    /// Git builds: the init container (Cyclops's own image) is hardened with a
+    /// Git builds: the init container (build-orchestrator'ss own image) is hardened with a
     /// writable /tmp, as for archives; the pipeline container keeps the CI
     /// image's own context, since polar-ci runs as root.
     #[test]
@@ -1085,10 +1333,418 @@ mod tests {
         );
         let env = init_env(&job);
         assert!(env.contains(&(source_env::COMMIT_SHA.into(), Some("a".repeat(40)))));
-        assert!(env.iter().any(|(k, _)| k == "GIT_USERNAME"));
+        assert!(
+            !env.iter()
+                .any(|(k, _)| k.starts_with("GIT_USERNAME") || k.starts_with("GIT_PASSWORD")),
+            "a credential is never an environment variable"
+        );
         assert_eq!(
             job.metadata.annotations.unwrap()["cyclops.build/commit"],
             "a".repeat(40)
+        );
+    }
+
+    fn with_secret(mut spec: BuildSpec) -> BuildSpec {
+        spec.git_secret = Some(GitSecret {
+            username: "deploy".into(),
+            password: "tokentokentoken".into(),
+        });
+        spec
+    }
+
+    #[test]
+    fn a_git_credential_is_a_secret_volume_mounted_read_only_into_the_clone_container_alone() {
+        let build = with_secret(git_spec());
+        let job = build_job_manifest(&build, &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+
+        let volume = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == GIT_CREDS_VOLUME)
+            .unwrap();
+        assert_eq!(
+            volume.secret.as_ref().unwrap().secret_name.as_deref(),
+            Some(git_secret_name_for_build(build.build_id).as_str())
+        );
+
+        let clone = &pod.init_containers.as_ref().unwrap()[0];
+        let mount = clone
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == GIT_CREDS_VOLUME)
+            .unwrap();
+        assert_eq!(mount.mount_path, GIT_CREDS_DIR);
+        assert_eq!(mount.read_only, Some(true));
+        let dir = clone
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "CYCLOPS_GIT_CREDENTIALS_DIR")
+            .unwrap();
+        assert_eq!(dir.value.as_deref(), Some(GIT_CREDS_DIR));
+
+        for container in pod
+            .containers
+            .iter()
+            .chain(pod.init_containers.as_ref().unwrap().iter().skip(1))
+        {
+            assert!(
+                !container
+                    .volume_mounts
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.name == GIT_CREDS_VOLUME),
+                "only the clone container sees the credential, not {}",
+                container.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_credential_is_in_no_manifest_field() {
+        let build = with_secret(git_spec());
+        let job = build_job_manifest(&build, &JobOptions::new("polar-builds"));
+        let text = serde_json::to_string(&job).unwrap();
+        assert!(!text.contains("tokentokentoken"));
+        assert!(
+            !format!("{build:?}").contains("tokentokentoken"),
+            "its Debug must not print it"
+        );
+    }
+
+    #[test]
+    fn a_build_with_no_credential_has_no_volume_and_the_clone_is_told_nothing() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+        assert!(
+            !pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == GIT_CREDS_VOLUME)
+        );
+        let clone = &pod.init_containers.as_ref().unwrap()[0];
+        assert!(
+            !clone
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "CYCLOPS_GIT_CREDENTIALS_DIR")
+        );
+    }
+
+    const IDENTITY: &str = r#"{"initContainers":[{"name":"polar-init","image":"polar-init:latest","command":["polar-init"],"args":["--cert","client:/home/polar/certs:ecdsa-p256"],"volumeMounts":[{"name":"sa-token","mountPath":"/workspace","readOnly":true},{"name":"polar-certs","mountPath":"/home/polar/certs"}]}],"volumes":[{"name":"sa-token","projected":{"sources":[{"serviceAccountToken":{"audience":"a","expirationSeconds":3600,"path":"token"}}]}},{"name":"polar-certs","emptyDir":{}}],"pipelineMounts":[{"name":"polar-certs","mountPath":"/home/polar/certs","readOnly":true}],"pipelineEnv":[{"name":"TLS_CLIENT_CERT","value":"/home/polar/certs/cert.pem"}]}"#;
+
+    fn git_spec() -> BuildSpec {
+        spec(SourceRef::Git {
+            url: "https://github.com/cmu-sei/Polar.git".into(),
+            commit_sha: "a".repeat(40),
+        })
+    }
+
+    fn pod(job: &Job) -> &PodSpec {
+        job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn a_job_with_an_identity_runs_as_the_account_it_is_given_and_gets_its_certificate_first() {
+        let mut options = JobOptions::new("polar-builds");
+        options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        let build = git_spec();
+        let job = build_job_manifest_as(&build, &options, Some("build-job-2"));
+        let pod = pod(&job);
+
+        assert_eq!(pod.service_account_name.as_deref(), Some("build-job-2"));
+        let inits: Vec<_> = pod
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(inits.len(), 2);
+        assert_eq!(
+            inits[0], "polar-init",
+            "the certificate comes before the source"
+        );
+
+        let volumes: Vec<_> = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(
+            !volumes.contains(&CLIENT_TLS_VOLUME_NAME),
+            "no certificate is shared between builds: {volumes:?}"
+        );
+        assert!(volumes.contains(&"polar-certs") && volumes.contains(&"sa-token"));
+
+        let pipeline = &pod.containers[0];
+        let tls_cert: Vec<_> = pipeline
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|e| e.name == "TLS_CLIENT_CERT")
+            .collect();
+        assert_eq!(
+            tls_cert.len(),
+            1,
+            "where the certificate is comes from the identity alone"
+        );
+        assert_eq!(
+            tls_cert[0].value.as_deref(),
+            Some("/home/polar/certs/cert.pem")
+        );
+        let mounts = pipeline.volume_mounts.as_ref().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == "polar-certs" && m.read_only == Some(true))
+        );
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == WORKSPACE_VOLUME && m.read_only == Some(false)),
+            "a git build's pipeline writes beside its source"
+        );
+    }
+
+    fn a_job_as(account: &str, conditions: &[(&str, &str)]) -> Job {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        let mut options = JobOptions::new("polar-builds");
+        options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        let mut job = build_job_manifest_as(&git_spec(), &options, Some(account));
+        job.status = Some(JobStatus {
+            conditions: Some(
+                conditions
+                    .iter()
+                    .map(|(t, s)| JobCondition {
+                        type_: t.to_string(),
+                        status: s.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        job
+    }
+
+    fn accounts() -> Vec<String> {
+        vec!["build-job-1".into(), "build-job-2".into()]
+    }
+
+    #[test]
+    fn a_job_takes_the_first_account_no_running_job_holds() {
+        assert_eq!(
+            free_account(&accounts(), &[]).map(String::as_str),
+            Some("build-job-1")
+        );
+        let running = [a_job_as("build-job-1", &[])];
+        assert_eq!(
+            free_account(&accounts(), &running).map(String::as_str),
+            Some("build-job-2")
+        );
+        let both = [
+            a_job_as("build-job-1", &[]),
+            a_job_as("build-job-2", &[("Suspended", "False")]),
+        ];
+        assert_eq!(
+            free_account(&accounts(), &both),
+            None,
+            "two running builds leave nothing to give a third"
+        );
+    }
+
+    fn options_with(
+        identity: bool,
+        accounts: Vec<String>,
+        shared_account: Option<&str>,
+    ) -> JobOptions {
+        let mut options = JobOptions::new("polar-builds");
+        if identity {
+            options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        }
+        options.accounts = accounts;
+        options.shared_account = shared_account.map(str::to_string);
+        options
+    }
+
+    #[test]
+    fn a_shared_account_is_given_to_every_job_however_many_hold_it() {
+        let options = options_with(true, Vec::new(), Some("build-job"));
+        let running = [
+            a_job_as("build-job", &[]),
+            a_job_as("build-job", &[]),
+            a_job_as("build-job", &[]),
+        ];
+        assert_eq!(
+            choose_account(&options, &running),
+            Ok(Some("build-job".to_string())),
+            "a multi-instance workload's pods each have a certificate, so a job never waits for the account"
+        );
+    }
+
+    #[test]
+    fn exclusive_accounts_are_still_taken_one_job_at_a_time() {
+        let options = options_with(true, accounts(), None);
+        let running = [a_job_as("build-job-1", &[])];
+        assert_eq!(
+            choose_account(&options, &running),
+            Ok(Some("build-job-2".to_string()))
+        );
+        let both = [a_job_as("build-job-1", &[]), a_job_as("build-job-2", &[])];
+        assert_eq!(
+            choose_account(&options, &both),
+            Err(2),
+            "every one of the two accounts is held"
+        );
+    }
+
+    #[test]
+    fn a_job_without_a_certificate_of_its_own_runs_under_no_account_of_ours() {
+        assert_eq!(
+            choose_account(&options_with(false, accounts(), None), &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            choose_account(&options_with(false, Vec::new(), Some("build-job")), &[]),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_finished_job_gives_its_account_back() {
+        let done = [
+            a_job_as("build-job-1", &[("Complete", "True")]),
+            a_job_as("build-job-2", &[("Failed", "True")]),
+        ];
+        assert_eq!(
+            free_account(&accounts(), &done).map(String::as_str),
+            Some("build-job-1")
+        );
+        // A condition that is not true does not end the job.
+        assert!(account_held_by(&a_job_as("build-job-1", &[("Failed", "False")])).is_some());
+    }
+
+    #[test]
+    fn a_job_without_an_identity_holds_no_account() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        assert_eq!(account_held_by(&job), None);
+    }
+
+    /// A Job whose one condition became true at `at` (seconds since the epoch).
+    fn a_job_that_ended(condition: &str, at: i64) -> Job {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let mut job = a_job_as("build-job-1", &[]);
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: condition.to_string(),
+                status: "True".to_string(),
+                last_transition_time: Some(Time(
+                    k8s_openapi::jiff::Timestamp::from_second(at).unwrap(),
+                )),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        job
+    }
+
+    const HOUR: i64 = 60 * 60;
+
+    #[test]
+    fn a_job_is_kept_for_as_long_as_its_outcome_is_retained() {
+        let retention = Retention::default();
+        let now = 100 * 24 * HOUR;
+        let jobs = [
+            a_job_that_ended("Complete", now - 2 * HOUR),
+            a_job_that_ended("Complete", now - HOUR / 2),
+            a_job_that_ended("Failed", now - 2 * HOUR),
+            a_job_that_ended("Failed", now - 25 * HOUR),
+        ];
+        let gone: Vec<usize> = expired(&jobs, now, &retention)
+            .iter()
+            .map(|j| jobs.iter().position(|k| std::ptr::eq(k, *j)).unwrap())
+            .collect();
+        assert_eq!(
+            gone,
+            vec![0, 3],
+            "an old success and a very old failure; a recent one of each stays"
+        );
+    }
+
+    #[test]
+    fn a_job_that_has_not_finished_is_never_expired() {
+        let now = 100 * 24 * HOUR;
+        let running = a_job_as("build-job-1", &[]);
+        let not_true = a_job_as("build-job-1", &[("Failed", "False")]);
+        // A finished one with no time on its condition cannot be shown to be old.
+        let mut untimed = a_job_as("build-job-1", &[("Complete", "True")]);
+        untimed
+            .status
+            .as_mut()
+            .unwrap()
+            .conditions
+            .as_mut()
+            .unwrap()[0]
+            .last_transition_time = None;
+        assert!(expired(&[running, not_true, untimed], now, &Retention::default()).is_empty());
+    }
+
+    #[test]
+    fn kubernetes_keeps_a_finished_job_as_long_as_the_longest_retention() {
+        let mut options = JobOptions::new("polar-builds");
+        options.retention = Retention {
+            succeeded: std::time::Duration::from_secs(600),
+            failed: std::time::Duration::from_secs(7200),
+        };
+        let job = build_job_manifest(&git_spec(), &options);
+        assert_eq!(job.spec.unwrap().ttl_seconds_after_finished, Some(7200));
+    }
+
+    #[test]
+    fn without_an_identity_jobs_share_the_secret_as_before() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+        assert!(pod.service_account_name.is_none());
+        let volumes: Vec<_> = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(volumes.contains(&CLIENT_TLS_VOLUME_NAME));
+    }
+
+    #[test]
+    fn an_archive_build_still_reads_its_source_read_only() {
+        let job = build_job_manifest(
+            &spec(SourceRef::RegistryArchive {
+                purl: "pkg:cargo/serde@1.0.219".into(),
+                download_url: "https://static.crates.io/crates/serde/serde-1.0.219.crate".into(),
+                sha256: "b".repeat(64),
+            }),
+            &JobOptions::new("polar-builds"),
+        );
+        let mounts = pod(&job).containers[0].volume_mounts.as_ref().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == WORKSPACE_VOLUME && m.read_only == Some(true))
         );
     }
 }

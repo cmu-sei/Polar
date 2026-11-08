@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -5,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Cassini subjects the orchestrator agents are interested in
-/// Mirrors the subject constants defined in cyclops-core.
+/// Mirrors the subject constants defined in build-orchestrator-core.
 pub mod subjects {
     pub const BUILD_REQUESTS_TOPIC: &str = "polar.orchestrator.builds.requests";
 }
@@ -165,6 +188,18 @@ impl SourceRef {
         }
         env
     }
+}
+
+/// Whether an image reference is pinned by digest: a name, then `@sha256:` and 64 lower-case hex digits. A tag can
+/// move, so what a job runs is named this way; runtime attestation also refuses a container whose image is not.
+pub fn pinned_by_digest(image: &str) -> bool {
+    let Some((name, digest)) = image.rsplit_once('@') else {
+        return false;
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    !name.is_empty() && hex.len() == 64 && hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -407,12 +442,16 @@ pub struct BuildSpec {
     /// The referenced Secret must exist in the build namespace.
     pub git_credentials: GitCredentials,
 
+    /// The credential this build may clone with, when its repository's mapping names one. The backend puts it
+    /// in a Secret of the build's own and mounts that into the clone container only.
+    pub git_secret: Option<GitSecret>,
+
     /// Credentials for pulling the pipeline image from the registry.
     /// The referenced Secret must be of type kubernetes.io/dockerconfigjson.
     pub registry_credentials: RegistryCredentials,
 
     /// Additional env vars injected into the pipeline container.
-    /// Standard Cyclops vars (build ID, repo, commit, registry) are always
+    /// Standard build-orchestrator vars (build ID, repo, commit, registry) are always
     /// injected by the manifest builder and should not be duplicated here.
     pub env: HashMap<String, String>,
 }
@@ -434,6 +473,7 @@ impl BuildSpec {
             // analyzer images define their own, unlike CI pipeline images.
             entrypoint: (!command.is_empty()).then_some(command),
             git_credentials,
+            git_secret: None,
             registry_credentials,
             env: HashMap::new(),
         }
@@ -479,6 +519,21 @@ pub struct BootstrapSpec {
 }
 
 // ── Credential types ──────────────────────────────────────────────────────────
+
+/// A user name and a token for cloning one repository, as the credentials agent gave them.
+///
+/// It is in no log, no status and no event: `Debug` says only that it is there, and nothing here is `Serialize`.
+#[derive(Clone)]
+pub struct GitSecret {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for GitSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitSecret(<redacted>)")
+    }
+}
 
 /// Describes how the init container should authenticate to the git host
 /// when cloning the source repository.
@@ -646,6 +701,23 @@ mod source_ref_tests {
             request(archive(), Some("reg/analyzer@sha256:abc")).validate(),
             Ok(())
         );
+    }
+
+    #[test]
+    fn only_a_full_sha256_digest_pins_an_image() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert!(pinned_by_digest(&format!("reg/x@sha256:{hex}")));
+        assert!(pinned_by_digest(&format!("reg/x:1.0@sha256:{hex}")));
+        for image in [
+            "reg/x".to_string(),
+            "reg/x:latest".to_string(),
+            "reg/x@sha256:abc".to_string(),
+            format!("reg/x@sha256:{}", hex.to_uppercase()),
+            format!("reg/x@sha512:{hex}"),
+            format!("@sha256:{hex}"),
+        ] {
+            assert!(!pinned_by_digest(&image), "{image}");
+        }
     }
 
     #[test]

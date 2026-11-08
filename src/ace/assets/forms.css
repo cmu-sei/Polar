@@ -1,0 +1,164 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+/* ==========================================================================
+   forms.css — standard form controls for the dashboard
+   Dash loads every .css file in the app's assets/ folder automatically.
+   Targets the className values set in layout.py:
+     .form-dropdown  dcc.Dropdown
+     .form-date      dcc.DatePickerSingle
+     .form-input     dcc.Input
+     .form-button-primary, .form-disclosure  buttons
+   ========================================================================== */
+
+:root {
+  --field-height: 38px;
+  --field-border: #D1D5DB;
+  --field-border-hover: #9CA3AF;
+  --field-focus: #3B82F6;
+  --field-focus-ring: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  --field-radius: 6px;
+  --field-text: #1F2937;
+  --field-placeholder: #9CA3AF;
+  --field-bg: #FFFFFF;
+}
+
+/* ── Text / number inputs ─────────────────────────────────────────────── */
+.form-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--field-height);
+  padding: 0 10px;
+  font-size: 14px;
+  color: var(--field-text);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--field-radius);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.form-input:hover { border-color: var(--field-border-hover); }
+.form-input:focus { outline: none; border-color: var(--field-focus); box-shadow: var(--field-focus-ring); }
+
+/* ── dcc.Dropdown (react-select) ──────────────────────────────────────── */
+.form-dropdown .Select-control {
+  height: var(--field-height);
+  border: 1px solid var(--field-border);
+  border-radius: var(--field-radius);
+  background: var(--field-bg);
+  box-shadow: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.form-dropdown .Select-control:hover { border-color: var(--field-border-hover); box-shadow: none; }
+.form-dropdown .Select.is-focused > .Select-control,
+.form-dropdown .Select.is-open > .Select-control {
+  border-color: var(--field-focus);
+  box-shadow: var(--field-focus-ring);
+}
+.form-dropdown .Select-placeholder,
+.form-dropdown .Select--single > .Select-control .Select-value {
+  line-height: calc(var(--field-height) - 2px);
+  padding-left: 10px;
+  font-size: 14px;
+}
+.form-dropdown .Select-placeholder { color: var(--field-placeholder); }
+.form-dropdown .Select--single > .Select-control .Select-value .Select-value-label { color: var(--field-text) !important; }
+.form-dropdown .Select-input { height: calc(var(--field-height) - 2px); padding-left: 10px; }
+.form-dropdown .Select-input > input { padding: 9px 0; font-size: 14px; }
+.form-dropdown .Select-arrow-zone { padding-right: 8px; }
+
+/* Multi-select grows with its chips */
+.form-dropdown .Select--multi > .Select-control { height: auto; min-height: var(--field-height); }
+.form-dropdown .Select--multi .Select-value {
+  margin-top: 5px;
+  font-size: 13px;
+  color: #1E3A8A;
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  border-radius: 4px;
+}
+.form-dropdown .Select--multi .Select-value-icon { border-right-color: #BFDBFE; }
+.form-dropdown .Select--multi .Select-value-icon:hover { background: #DBEAFE; color: #1E3A8A; }
+
+.form-dropdown .Select-menu-outer {
+  margin-top: 4px;
+  border: 1px solid var(--field-border);
+  border-radius: var(--field-radius);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+  z-index: 1000;
+}
+.form-dropdown .Select-option { font-size: 14px; padding: 8px 10px; }
+.form-dropdown .Select-option.is-focused { background: #F3F4F6; }
+.form-dropdown .Select-option.is-selected { background: #EFF6FF; color: #1E3A8A; }
+
+/* ── dcc.DatePickerSingle (react-dates) ───────────────────────────────── */
+.form-date,
+.form-date .SingleDatePicker,
+.form-date .SingleDatePickerInput { display: block; width: 100%; }
+.form-date .SingleDatePickerInput {
+  box-sizing: border-box;
+  border: 1px solid var(--field-border);
+  border-radius: var(--field-radius);
+  background: var(--field-bg);
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.form-date .SingleDatePickerInput:hover { border-color: var(--field-border-hover); }
+.form-date .SingleDatePickerInput:focus-within { border-color: var(--field-focus); box-shadow: var(--field-focus-ring); }
+.form-date .DateInput { width: 100%; background: transparent; }
+.form-date .DateInput_input {
+  height: calc(var(--field-height) - 2px);
+  padding: 0 10px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: normal;
+  color: var(--field-text);
+  background: transparent;
+  border-bottom: 0;
+}
+.form-date .DateInput_input__focused { border-bottom: 0; }
+.form-date .DateInput_input::placeholder { color: var(--field-placeholder); }
+.form-date .DateInput_fang { display: none; }
+.form-date .SingleDatePicker_picker { z-index: 1000; margin-top: 4px; }
+.form-date .CalendarDay__selected,
+.form-date .CalendarDay__selected:hover { background: var(--field-focus); border-color: var(--field-focus); }
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+.form-button-primary { transition: filter 0.15s; }
+.form-button-primary:hover { filter: brightness(0.93); }
+.form-button-primary:active { filter: brightness(0.86); }
+.form-button-primary:focus-visible { outline: none; box-shadow: var(--field-focus-ring); }
+
+.form-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.form-disclosure:hover { color: #111827; }
+.form-disclosure:focus-visible { outline: none; box-shadow: var(--field-focus-ring); border-radius: 4px; }

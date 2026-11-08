@@ -1,0 +1,46 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+# infra/load-plans/slow-sink.nuon
+#
+# A sink that falls behind (docs/architecture/cassini-backpressure.md, "Tests, first"): one producer as fast as its
+# window allows, one sink spending 0, 50 or 500 microseconds on each message, at 64 KiB and 1 MiB. The broker's
+# memory is in every record (broker_usage); acceptance: its peak stays within its budget (half its container's memory
+# limit by default) plus a fixed overhead, and nothing is lost below the stall bound. 6 runs.
+#
+# Until acknowledgements are the domain's, the sink's client acknowledges a delivery when it hands it to the sink, so
+# by default (`sink_slow: "after_ack"`) a slow sink's backlog waits in the sink's mailbox, not the broker
+# (cassini-backpressure.md, "As built"). With `sink_slow: "before_ack"` the delay is spent in the sink's client's reader
+# before each delivery is handed over and acknowledged (cassini_client::hand_off), so the acknowledgements come at the
+# sink's pace and the backlog waits in the broker's delivery outbox. To measure under other bounds, add
+# `broker: { CASSINI_MEMORY_BUDGET_BYTES: [...], CASSINI_STALL_SECS: [...] }` (with Flux's polar-agents suspended).
+#
+#   nu infra/load-harness.nu run infra/load-plans/slow-sink.nuon
+{
+  name: "slow-sink"
+  defaults: { seconds: 20, max_count: 20000, max_bytes: 1073741824, warmup: 100, rate: 0 }
+  grid: {
+    size: [65536 1048576]
+    sink_delay_us: [0 50 500]
+    shape: [
+      { producers: 1, sinks: 1, lanes: 1 }
+    ]
+  }
+}

@@ -1,10 +1,32 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
 -- infra/layers/2-services/cert-issuer/configmap.dhall
 --
--- Renders the cert-issuer's JSON config into a ConfigMap.
--- The binary reads this at startup via CERT_ISSUER_CONFIG.
+-- Renders cert-issuer's configuration into a ConfigMap, one key per variable it
+-- declares (src/agents/cert-issuer/server/src/settings.rs); the Deployment gives
+-- them to it as its environment. The issuers, the floor and the lifetime
+-- overrides are each one JSON value.
 let Constants =
       ../../../schema/constants.dhall
-        sha256:83837b5e87d39846c41a7ae549d5c65b2c2c8a058c6841b28ed1b746f4c976f2
 
 let JSON =
       https://prelude.dhall-lang.org/JSON/package.dhall
@@ -14,111 +36,208 @@ let Prelude =
       https://prelude.dhall-lang.org/package.dhall
         sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
 
+-- Mirrors the Rust IdentityNormalization enum
+-- (#[serde(tag = "strategy", rename_all = "snake_case")]) exactly.
+-- A real Dhall union rather than a Text discriminator, since Dhall has
+-- no Text equality operator at all -- `merge` is the native mechanism
+-- for this kind of branching, and it's type-checked: a
+-- KubernetesServiceAccount variant simply cannot be constructed
+-- without its clusterDomain, no runtime "is this set" check needed.
+let IdentityStrategy = ../../../schema/identity-strategy.dhall
+
+let CaProvisioning = ../../../schema/ca-provisioning.dhall
+
+let IssuerCfg =
+      { issuerUrl : Text
+      , audience : List Text
+      , jwksUri : Optional Text
+      , workloadIdentityClaim : Text
+      , instanceBindingClaim : Text
+      , identityStrategy : IdentityStrategy
+      -- Only meaningful when identityStrategy is SuffixedClaim. Names
+      -- a second claim in the same token supplying the
+      -- identity-scoping value.
+      , identityScopeClaim : Optional Text
+      , allowedAlgorithms : List Text
+      , jwksCacheTtlMinSecs : Natural
+      , jwksCacheTtlMaxSecs : Natural
+      }
+
 let render =
       \ ( v
         : { name : Text
           , port : Natural
           , caCertPath : Text
           , caKeyPath : Text
-          , oidcIssuerUrl : Text
-          , oidcAudience : List Text
-          , oidcJwksUri : Optional Text
+          , issuers : List IssuerCfg
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
+          , userLifetimeSecs : Natural
+          , serviceLifetimeSecs : Natural
           , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
+          -- DNS identity cert-issuer mints into its own TLS server
+          -- certificate at startup. Must be the name callers actually
+          -- connect to. A config value, not hardcoded, so the cluster
+          -- domain stays configurable per deployment.
+          , mtlsServerIdentity : Text
+          -- Identities allowed to reach /internal/issue, matched
+          -- against the connection's verified mTLS peer SAN. Empty
+          -- means the endpoint is unreachable, which is the safe default.
+          , mtlsInternalCallers : List Text
+          -- The issuance floor: workloads that may be issued with only a
+          -- token. Written into the config only when enforced.
+          , mtlsBootstrap :
+              List
+                { workload : Text
+                , certType : Text
+                , names : List Text
+                , vouchedOnly : Bool
+                , publish : List Text
+                , subscribe : List Text
+                , groups : List Text
+                }
+          , mtlsEnforceBootstrap : Bool
+          -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
+          , caProvisioning : CaProvisioning
           }
         ) ->
-        let jwks =
-              merge
-                { Some = \(uri : Text) -> JSON.string uri, None = JSON.null }
-                v.oidcJwksUri
+        let renderIssuer =
+              \(iss : IssuerCfg) ->
+                let jwks =
+                      merge
+                        { Some = \(uri : Text) -> JSON.string uri, None = JSON.null }
+                        iss.jwksUri
 
-        let configJson =
+                let identityNormalizationJson =
+                      merge
+                        { KubernetesServiceAccount =
+                            \(cfg : { clusterDomain : Text }) ->
+                              JSON.object
+                                ( toMap
+                                    { strategy =
+                                        JSON.string "kubernetes_service_account"
+                                    , cluster_domain = JSON.string cfg.clusterDomain
+                                    }
+                                )
+                        , SuffixedClaim =
+                            JSON.object
+                              (toMap { strategy = JSON.string "suffixed_claim" })
+                        }
+                        iss.identityStrategy
+
+                let identityScopeClaimJson =
+                      merge
+                        { Some = \(c : Text) -> JSON.string c, None = JSON.null }
+                        iss.identityScopeClaim
+
+                in  JSON.object
+                      ( toMap
+                          { issuer = JSON.string iss.issuerUrl
+                          , audience =
+                              JSON.array
+                                ( Prelude.List.map
+                                    Text
+                                    JSON.Type
+                                    JSON.string
+                                    iss.audience
+                                )
+                          , jwks_uri = jwks
+                          , workload_identity_claim = JSON.string iss.workloadIdentityClaim
+                          , instance_binding_claim = JSON.string iss.instanceBindingClaim
+                          , identity_normalization = identityNormalizationJson
+                          , identity_scope_claim = identityScopeClaimJson
+                          , allowed_algorithms =
+                              JSON.array
+                                ( Prelude.List.map
+                                    Text
+                                    JSON.Type
+                                    JSON.string
+                                    iss.allowedAlgorithms
+                                )
+                          , jwks_cache_ttl_min =
+                              JSON.object
+                                ( toMap
+                                    { secs = JSON.natural iss.jwksCacheTtlMinSecs
+                                    , nanos = JSON.natural 0
+                                    }
+                                )
+                          , jwks_cache_ttl_max =
+                              JSON.object
+                                ( toMap
+                                    { secs = JSON.natural iss.jwksCacheTtlMaxSecs
+                                    , nanos = JSON.natural 0
+                                    }
+                                )
+                          }
+                      )
+
+        let BootstrapEntry =
+              { workload : Text
+              , certType : Text
+              , names : List Text
+              , vouchedOnly : Bool
+              , publish : List Text
+              , subscribe : List Text
+              , groups : List Text
+              }
+
+        let strings =
+              \(xs : List Text) ->
+                JSON.array (Prelude.List.map Text JSON.Type JSON.string xs)
+
+        let renderBootstrap =
+              \(b : BootstrapEntry) ->
+                JSON.object
+                  ( toMap
+                      { workload = JSON.string b.workload
+                      , cert_type = JSON.string b.certType
+                      , names = strings b.names
+                      , vouched_only = JSON.bool b.vouchedOnly
+                      , publish = strings b.publish
+                      , subscribe = strings b.subscribe
+                      , groups = strings b.groups
+                      }
+                  )
+
+        let issuersJson =
+              JSON.render
+                ( JSON.array
+                    (Prelude.List.map IssuerCfg JSON.Type renderIssuer v.issuers)
+                )
+
+        -- Seconds per identity, as CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES reads them.
+        let overridesJson =
               JSON.render
                 ( JSON.object
-                    ( toMap
-                        { bind_addr =
-                            JSON.string "0.0.0.0:${Natural/show v.port}"
-                        , ca =
-                            JSON.object
-                              ( toMap
-                                  { ca_cert_path = JSON.string v.caCertPath
-                                  , ca_key_path = JSON.string v.caKeyPath
-                                  , default_lifetime =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural v.defaultLifetimeSecs
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , server_lifetime =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural v.serverLifetimeSecs
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , identity_lifetime_overrides =
-                                      JSON.object
-                                        ( Prelude.List.map
-                                            { identity : Text, lifetimeSecs : Natural }
-                                            { mapKey : Text, mapValue : JSON.Type }
-                                            ( \(o : { identity : Text, lifetimeSecs : Natural }) ->
-                                                { mapKey = o.identity
-                                                , mapValue =
-                                                    JSON.object
-                                                      ( toMap
-                                                          { secs = JSON.natural o.lifetimeSecs
-                                                          , nanos = JSON.natural 0
-                                                          }
-                                                      )
-                                                }
-                                            )
-                                            v.identityLifetimeOverrides
-                                        )
-                                  }
-                              )
-                        , issuer =
-                            JSON.object
-                              ( toMap
-                                  { issuer = JSON.string v.oidcIssuerUrl
-                                  , audience =
-                                      JSON.array
-                                        ( Prelude.List.map
-                                            Text
-                                            JSON.Type
-                                            JSON.string
-                                            v.oidcAudience
-                                        )
-                                  , jwks_uri = jwks
-                                  , workload_identity_claim = JSON.string "sub"
-                                  , instance_binding_claim =
-                                      JSON.string "kubernetes.io/pod/uid"
-                                  , allowed_algorithms =
-                                      JSON.array
-                                        [ JSON.string "RS256"
-                                        , JSON.string "ES256"
-                                        , JSON.string "EdDSA"
-                                        ]
-                                  , jwks_cache_ttl_min =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural 30
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , jwks_cache_ttl_max =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural 3600
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  }
-                              )
-                        }
+                    ( Prelude.List.map
+                        { identity : Text, lifetimeSecs : Natural }
+                        { mapKey : Text, mapValue : JSON.Type }
+                        ( \(o : { identity : Text, lifetimeSecs : Natural }) ->
+                            { mapKey = o.identity
+                            , mapValue = JSON.natural o.lifetimeSecs
+                            }
+                        )
+                        v.identityLifetimeOverrides
                     )
                 )
+
+        -- The floor is written only when it is enforced: CERT_ISSUER_BOOTSTRAP unset is the open floor.
+        let floor =
+              if    v.mtlsEnforceBootstrap
+              then  [ { mapKey = "CERT_ISSUER_BOOTSTRAP"
+                      , mapValue =
+                          JSON.render
+                            ( JSON.array
+                                ( Prelude.List.map
+                                    BootstrapEntry
+                                    JSON.Type
+                                    renderBootstrap
+                                    v.mtlsBootstrap
+                                )
+                            )
+                      }
+                    ]
+              else  [] : List { mapKey : Text, mapValue : Text }
 
         in  { apiVersion = "v1"
             , kind = "ConfigMap"
@@ -126,7 +245,32 @@ let render =
               { name = "${v.name}-config"
               , namespace = Constants.PolarNamespace
               }
-            , data.`cert-issuer.json` = configJson
+            , data =
+                  toMap
+                    { CERT_ISSUER_BIND_ADDR = "0.0.0.0:${Natural/show v.port}"
+                    , CERT_ISSUER_ISSUERS = issuersJson
+                    , CERT_ISSUER_CA_CERT_PATH = v.caCertPath
+                    , CERT_ISSUER_CA_KEY_PATH = v.caKeyPath
+                    , CERT_ISSUER_CA_PROVISIONING =
+                        merge
+                          { Provisioned = "provisioned"
+                          , SelfBootstrap = "self_bootstrap"
+                          }
+                          v.caProvisioning
+                    , CERT_ISSUER_DEFAULT_LIFETIME_SECS =
+                        Natural/show v.defaultLifetimeSecs
+                    , CERT_ISSUER_SERVER_LIFETIME_SECS =
+                        Natural/show v.serverLifetimeSecs
+                    , CERT_ISSUER_USER_LIFETIME_SECS =
+                        Natural/show v.userLifetimeSecs
+                    , CERT_ISSUER_SERVICE_LIFETIME_SECS =
+                        Natural/show v.serviceLifetimeSecs
+                    , CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES = overridesJson
+                    , CERT_ISSUER_SERVER_IDENTITY = v.mtlsServerIdentity
+                    , CERT_ISSUER_INTERNAL_CALLERS =
+                        Prelude.Text.concatSep "," v.mtlsInternalCallers
+                    }
+                # floor
             }
 
 in  render

@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::project;
 use cassini_types::{ClientEvent, WireTraceCtx};
 use chrono::Utc;
@@ -9,6 +32,7 @@ use polar::{
     graph::controller::{GraphController, GraphControllerActor, GraphControllerMsg, GraphSignal},
     health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage},
 };
+use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -42,7 +66,6 @@ pub struct BuildProcessorState {
 ///
 /// ```text
 /// BuildProcessorSupervisor
-///   ├── HealthCheckActor      (rejuvenation, dependency cert checks)
 ///   ├── TcpClient             (Cassini broker connection)
 ///   └── GraphControllerActor  (serializes every Neo4j write)
 /// ```
@@ -63,11 +86,10 @@ pub struct BuildProcessorState {
 ///
 /// ## Fault tolerance
 ///
-/// An event that can't be projected is logged and dropped; it does not stop
-/// the supervisor. A broker transport error is non-fatal: the client
-/// reconnects and the healthcheck decides whether the outage warrants a
-/// restart. The healthcheck stopping starts a drain window, then exits so the
-/// orchestrator restarts the agent.
+/// Projection failures on individual events do not stop the supervisor.
+/// Child actor failures restart the affected child rather than stopping
+/// the supervisor, except for the broker client — a transport error is
+/// unrecoverable and stops the agent.
 pub struct BuildProcessorSupervisor;
 
 #[async_trait]
@@ -83,33 +105,24 @@ impl Actor for BuildProcessorSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("BuildProcessorSupervisor starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
-        // This supervisor owns a GraphControllerActor, so real
+        // This supervisor owns a GraphControllerActor directly (via
+        // BuildActor/ProvenanceLinker, both writing through it), so real
         // GraphAvailable/GraphOpFailed tracking applies here.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
             DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: true,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-                prepare_shutdown_port,
-            },
+            HealthCheckArgs::new(true, 300, dep_cert_endpoints),
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
 
         // The graph controller loads its own connection config; loading it
         // here as well fails startup fast when the graph env is missing,
@@ -142,11 +155,11 @@ impl Actor for BuildProcessorSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    info!("Cassini client registered — spawning graph controller and subscribing");
+                    info!("Cassini client registered — spawning child actors and subscribing");
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
                     // ── Graph controller ───────────────────────────────────────
-                    // Owns every Neo4j write this agent makes.
+                    // Owns Neo4j writes for execution lifecycle events.
                     // BUG FIX: signal_port was previously a throwaway
                     // OutputPort with nothing subscribed to it — every
                     // GraphSignal fired by the controller was silently
@@ -155,12 +168,12 @@ impl Actor for BuildProcessorSupervisor {
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
-                    let (controller, _) = Actor::spawn_linked(
-                        Some(format!("{BUILD_PROCESSOR_NAME}.graph.controller")),
+                    // On every registration, as after a session the broker ended: what is still running is kept,
+                    // and the topics are subscribed again on the new session.
+                    let controller = polar::spawn_linked_unless_running(
+                        &format!("{BUILD_PROCESSOR_NAME}.graph.controller"),
                         GraphControllerActor,
-                        polar::graph::controller::GraphControllerArgs {
-                            signal_port: graph_signal_port,
-                        },
+                        polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.clone().into(),
                     )
                     .await?;
@@ -172,9 +185,9 @@ impl Actor for BuildProcessorSupervisor {
                     // BUILD_EVENTS_TOPIC: canonical ProvenanceEvent stream from
                     // all agents — CI pipeline, observer agents, resolver.
                     //
-                    // PROVENANCE_LINKER_TOPIC: legacy topic. The GitLab consumer
-                    // still publishes OCIRegistryDiscovered here; retained until
-                    // it moves to BUILD_EVENTS_TOPIC.
+                    // PROVENANCE_LINKER_TOPIC: legacy topic still used by k8s
+                    // and GitLab agents for OCI discovery events. Retained until
+                    // those agents migrate to BUILD_EVENTS_TOPIC.
                     for topic in [BUILD_EVENTS_TOPIC, PROVENANCE_LINKER_TOPIC] {
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: topic.to_string(),
@@ -211,12 +224,6 @@ impl Actor for BuildProcessorSupervisor {
                 _ => {}
             },
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
@@ -228,7 +235,28 @@ impl Actor for BuildProcessorSupervisor {
                 }
             },
             SupervisorMessage::ForceExit => {
-                warn!("drain window elapsed, exiting now");
+                warn!("drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "stopping graph controller and waiting for any in-flight \
+                         write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => info!("graph controller stopped cleanly"),
+                        Err(e) => error!(
+                            "graph controller did not stop cleanly within 30s, exiting anyway: {e:?}"
+                        ),
+                    }
+                }
+
+                warn!("exiting now");
                 std::process::exit(1);
             }
         }
@@ -268,19 +296,17 @@ impl Actor for BuildProcessorSupervisor {
             SupervisionEvent::ActorFailed(cell, e) => {
                 let actor_name = cell.get_name().unwrap_or_default();
                 error!("child actor failed: {:?} error: {:?}", actor_name, e);
-                // TODO: implement selective restart — the graph controller
-                // should restart on failure; broker client failure should stop the agent.
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
-                    if !state.draining {
-                        state.draining = true;
-                        warn!("entering drain window before exit ({actor_name} failed)");
-                        let _ = myself
-                            .send_after(
-                                ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
-                                || SupervisorMessage::ForceExit,
-                            )
-                            .await;
-                    }
+                // TODO: implement selective restart — graph controller should
+                // restart on failure; broker client failure should stop the agent.
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit ({actor_name} failed)");
+                    let _ = myself
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
+                        .await;
                 }
             }
             SupervisionEvent::ProcessGroupChanged(..) => {}

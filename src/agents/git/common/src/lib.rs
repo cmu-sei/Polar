@@ -1,14 +1,34 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+pub mod proposal;
+pub mod remote;
+pub mod status;
+
 use polar::graph::nodes::git::RepoId;
 use rkyv::{Archive, Deserialize, Serialize};
 
 pub const GIT_REPO_CONFIG_EVENTS: &str = "git.repo.config.events";
-pub const GIT_REPO_EVENTS: &str = "git.repo.events";
-pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
-
-/* ============================
- * Credentials
- * ============================
- */
 
 /* ============================
  * Shared types
@@ -20,11 +40,11 @@ pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 /// This is *policy*, not state.
 /// It must be supplied externally (scheduler, config, graph).
 ///
-/// Credentials are included here so the observer never needs to load
-/// them from the environment or a static file. The scheduler is responsible
-/// for sourcing credentials at dispatch time. `None` means public repo —
-/// attempt unauthenticated access.
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+/// A repository that needs a credential names it (`credential`); it never carries one. The observer
+/// holds the credentials it was given in a signed `credentials` document, in its CryptoActor, and
+/// uses one only for the hosts that credential is bound to. `None` means a public repository:
+/// unauthenticated access.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq)]
 pub struct RepoObservationConfig {
     pub repo_id: RepoId,
     pub repo_url: String,
@@ -40,9 +60,9 @@ pub struct RepoObservationConfig {
     pub shallow_depth: Option<usize>,
     /// Frequency of observation in seconds.
     pub frequency: u64,
-    /// Credentials for authenticating to the remote.
-    /// None means public repo — attempt unauthenticated clone/fetch.
-    pub credentials: Option<GitHttpCredential>,
+    /// The name of the credential to authenticate to the remote with, as the observer's `credentials`
+    /// section names it. None means a public repository: unauthenticated clone and fetch.
+    pub credential: Option<String>,
 }
 
 impl RepoObservationConfig {
@@ -65,56 +85,29 @@ impl RepoObservationConfig {
             max_depth: 100,
             shallow_depth,
             frequency: 900,
-            credentials: None,
+            credential: None,
         }
     }
 
-    /// Construct with explicit credentials.
-    pub fn new_with_credentials(
-        repo_id: RepoId,
-        repo_url: String,
-        remotes: Vec<String>,
-        shallow_depth: Option<usize>,
-        refs: Vec<String>,
-        credentials: GitHttpCredential,
-    ) -> Self {
-        Self {
-            credentials: Some(credentials),
-            ..Self::new(repo_id, repo_url, remotes, shallow_depth, refs)
-        }
+    /// The same repository, to be reached with the credential called `name`.
+    pub fn with_credential(mut self, name: impl Into<String>) -> Self {
+        self.credential = Some(name.into());
+        self
     }
 }
 
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
-pub enum GitHttpCredential {
-    /// Traditional username + password. Both fields are meaningful.
-    UserPass { username: String, password: String },
-
-    /// Token-based auth. The token is the only secret.
-    /// The implementation supplies a conventional dummy username
-    /// (e.g. "oauth2") to satisfy the HTTP Basic Auth protocol requirement.
-    Token {
-        token: String,
-        username: Option<String>,
-    },
-}
-
-impl GitHttpCredential {
-    pub fn into_git2_cred(self) -> Result<git2::Cred, git2::Error> {
-        match self {
-            GitHttpCredential::UserPass { username, password } => {
-                git2::Cred::userpass_plaintext(&username, &password)
-            }
-            GitHttpCredential::Token { token, username } => {
-                git2::Cred::userpass_plaintext(username.as_deref().unwrap_or("oauth2"), &token)
-            }
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Archive, Debug)]
-pub struct ConfigurationEvent {
-    pub config: RepoObservationConfig,
+/// Every repository the controller wants observed, announced together on [`GIT_REPO_CONFIG_EVENTS`]. One message
+/// is all-or-nothing, so an observer that gets it knows the whole set and can stop what is not in it; a message
+/// per repository could not say that one had been dropped.
+///
+/// `complete` says whether the set may be taken as everything. The controller sends `false` while it has not had
+/// time to hear its proposers again after a start (a set sent then would drop every repository only a proposal
+/// had added, to bring them back a minute later), and an observer starts and replaces from such a set but
+/// stops nothing.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq)]
+pub struct RepositorySet {
+    pub repositories: Vec<RepoObservationConfig>,
+    pub complete: bool,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
@@ -160,4 +153,105 @@ pub enum GitRepositoryMessage {
         new: String,
         observed_at: String,
     },
+}
+
+/// Publishes an event on a topic, as every git agent does: rkyv bytes, identity shared, queued if
+/// the broker is away.
+pub fn publish_event<T>(
+    client: &polar::cassini::TcpClient,
+    topic: &str,
+    event: &T,
+) -> Result<(), String>
+where
+    T: for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    use polar::cassini::CassiniClient;
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(event)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    client
+        .publish(cassini_client::PublishRequest {
+            topic: topic.to_string(),
+            payload,
+            trace_ctx: None,
+            offline_behavior: cassini_client::OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// As [`publish_event`], waiting while the client's outbox is full (docs/architecture/cassini-backpressure.md), for a
+/// caller that can await: the broker's pressure slows it instead of failing it.
+pub async fn publish_event_when_ready<T>(
+    client: &polar::cassini::TcpClient,
+    topic: &str,
+    event: &T,
+) -> Result<(), String>
+where
+    T: for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(event)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    client
+        .publish_when_ready(cassini_client::PublishRequest {
+            topic: topic.to_string(),
+            payload,
+            trace_ctx: None,
+            offline_behavior: cassini_client::OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_set_survives_the_wire() {
+        let config = RepoObservationConfig::new(
+            RepoId::from_url("https://example.org/o/r"),
+            "https://example.org/o/r".into(),
+            vec!["origin".into()],
+            None,
+            vec![],
+        )
+        .with_credential("gh");
+        for complete in [true, false] {
+            let set = RepositorySet {
+                repositories: vec![config.clone()],
+                complete,
+            };
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&set).unwrap();
+            let back = rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(&bytes).unwrap();
+            assert_eq!(back, set);
+        }
+    }
+
+    #[test]
+    fn an_empty_set_is_a_set() {
+        let set = RepositorySet {
+            repositories: vec![],
+            complete: true,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&set).unwrap();
+        assert_eq!(
+            rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(&bytes).unwrap(),
+            set
+        );
+    }
 }

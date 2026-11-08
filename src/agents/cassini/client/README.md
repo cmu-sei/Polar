@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Cassini Client
 
 A CLI client for the Cassini message broker. Connects over mTLS, registers a session, and exposes broker operations as subcommands. Supports two transport modes: direct connect (one registration per invocation) and daemon mode (one persistent registration shared across many invocations via a Unix socket).
@@ -59,7 +82,8 @@ These must be set for both the CLI and the broker subprocess in tests.
 | `CASSINI_SERVER_NAME` | Yes | TLS SNI name for the broker |
 | `TLS_CA_CERT` | Yes | Path to CA certificate PEM |
 | `TLS_CLIENT_CERT` | Yes | Path to client certificate PEM |
-| `TLS_CLIENT_KEY` | Yes | Path to client private key PEM |
+| `TLS_CLIENT_KEY` | One of the two | Path to client private key PEM |
+| `POLAR_CUSTODY_SOCKET` | One of the two | The custody daemon's socket: the daemon signs the client's TLS 1.3 handshakes with a key the client never holds (`docs/architecture/key-custody.md`). Set this or `TLS_CLIENT_KEY`, not both |
 | `CASSINI_DAEMON_SOCK` | No | Override Unix socket path for daemon IPC |
 | `CASSINI_REGISTER_TIMEOUT_SECS` | No | Registration timeout override (default: 30) |
 | `CASSINI_LOG` | No | Log filter for the client (default: `warn`) |

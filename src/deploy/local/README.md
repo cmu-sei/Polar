@@ -1,7 +1,30 @@
-# Local Cluster Deployment (nix-usernetes + Dhall)
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
+# Local Cluster Deployment (Dhall)
 
 This directory contains the Dhall sources used to generate Kubernetes manifests
-for the local nix-usernetes development cluster. Configuration is expressed in
+for a local development cluster. Configuration is expressed in
 Dhall's type system — no template magic, no silent defaults, everything
 inspectable.
 
@@ -10,8 +33,7 @@ inspectable.
 - [Nix](https://nixos.org) with flakes enabled
 - [podman](https://podman.io)
 - [just](https://just.systems)
-- The [nix-usernetes](https://github.com/cmu-sei/nix-usernetes) repo checked out
-  alongside this one at `~/Documents/projects/nix-usernetes`
+- A Kubernetes cluster and `kubectl` access to it (see the repository `README.md`, "Installation")
 - The [nix-neo4j](https://github.com/cmu-sei/nix-neo4j) repo checked out at
   `~/Documents/projects/nix-neo4j`
 
@@ -63,73 +85,38 @@ cp src/deploy/local/conf/git.json.example src/deploy/local/conf/git.json
 See the existing file for the required fields. Stub values are fine for
 local development.
 
-### 4. Build the node image
+### 4. Build the Neo4j image
 
 ```sh
 cd ~/Documents/projects/nix-neo4j
 nix build .#neo4j-image -o result-neo4j-image
-
-cd ~/Documents/projects/nix-usernetes
-nix build .#node-image -o result-node-image
-just load-node-image
 ```
 
 ## Cluster Startup Sequence
 
-```sh
-cd ~/Documents/projects/nix-usernetes
-just reset && just up && just init && just kubeconfig
-export KUBECONFIG=$(pwd)/kubeconfig
+See "Installation" in the repository `README.md`, steps 1 to 7. It is the
+current path, and it works with any Kubernetes distribution.
 
-cd ~/Documents/projects/Polar
-just cluster-install-cert-manager
-just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply
-```
+## Other local clusters (Minikube, kind, k3d, Docker Desktop, ...)
 
-## Alternative: Minikube
+Any of them works, because Polar asks only the things listed in step 1 of
+"Installation" in the repository `README.md`. What differs between them
+is how images get to the nodes, which is the one thing to settle before running
+`nu infra/up.nu`:
 
-If using Minikube instead of nix-usernetes:
-
-```sh
-minikube start --cpus=4 --memory=8g --driver=podman
-
-# Point Minikube at the host podman installation for local images
-eval $(minikube podman-env)
-
-# Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
-
-# Render and apply
-just cluster-render
-kubectl apply -f manifests/storage.yaml
-kubectl apply -f manifests/
-```
-
-Note: `just cluster-load-all` and `just cluster-install-cert-manager` are
-specific to nix-usernetes. With Minikube, load images via `eval $(minikube
-podman-env)` before building, and install cert-manager via `kubectl apply`
-directly.
-
-## Alternative: kind
-
-If using kind:
-
-```sh
-kind create cluster --name polar
-
-# Load local images into kind
-kind load docker-image <image>:<tag> --name polar
-
-# Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
-
-# Render and apply
-just cluster-render
-kubectl apply -f manifests/
-```
-
-The `just kind-*` recipes in the Justfile handle image loading and cluster
-management for kind. See `just --list` for available recipes.
+1. Create the cluster and point `kubectl` at it.
+2. Give it a registry the nodes can pull from, and tell Polar two addresses:
+   the one this machine pushes to (`POLAR_REGISTRY`) and the one the nodes pull
+   from (`registry` in `infra/config/cluster.nuon`). Each of these tools has a
+   way to run a local registry that its nodes trust (look for the "registry"
+   add-on or the "local registry" guide in the tool's own documentation); a
+   registry on the host is usually reached from a node under a different name
+   than `localhost`.
+3. Set `POLAR_CLUSTER_RUNTIME=none`, so the image step does not try to evict a
+   node's image cache the way it does on the maintainers' dev node.
+4. Make sure the nodes meet the rest of that list (a storage class, the
+   `pkcs8_key_parser` kernel module, pod DNS), then run
+   `nu infra/up.nu local-minimal --user <name> --email <email>`.
 
 ## Required Environment Variables
 

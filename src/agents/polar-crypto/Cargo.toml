@@ -1,0 +1,65 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+[ package ]
+name = "polar-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[ dependencies ]
+ractor = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rkyv = { workspace = true }
+uuid = { workspace = true }
+polar = { workspace = true }
+polar-env = { workspace = true }
+cassini-client = { workspace = true }
+cassini-types = { workspace = true }
+credentials_agent_common = { workspace = true }
+credentials-agent-client = { workspace = true }
+# The plaintext of a retrieved secret is wiped when dropped.
+zeroize = { version = "1.9.0", features = ["aarch64"] }
+thiserror.workspace = true
+# A secret and its binding are escrowed together as JSON, so a field added later does not break an old record.
+serde = { workspace = true }
+serde_json = { workspace = true }
+cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
+# The custody daemon holds the escrow key, which the actor asks to unwrap; and a recipient's certificate is checked.
+polar-custody.workspace = true
+x509-parser.workspace = true
+polar-router.workspace = true
+
+[dev-dependencies]
+# The credentials agent's escrow key, and a recipient's, RSA in the tests.
+rsa.workspace = true
+rand.workspace = true
+# A P-256 recipient, as every agent's escrow key is now.
+p256 = { workspace = true, features = ["pem"] }
+wiremock.workspace = true
+rcgen.workspace = true
+polar-signing = { workspace = true, features = ["testing"] }
+time.workspace = true
+tempfile.workspace = true
+# The rule an HTTP credential follows, for every binding, host and secret (registry.rs).
+proptest.workspace = true

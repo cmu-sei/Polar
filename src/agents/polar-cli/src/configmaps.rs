@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Deciding what ConfigMaps to write.
 //!
 //! A ConfigMap of a plan is public: it holds a literal or a copy of one key of a Secret, such as the
@@ -16,17 +39,30 @@ pub enum Action {
     /// Already holds what the plan says.
     Unchanged { namespace: String, name: String },
     /// Make it, or bring it into line (`existed` says which).
-    Write { namespace: String, name: String, existed: bool, data: BTreeMap<String, String> },
+    Write {
+        namespace: String,
+        name: String,
+        existed: bool,
+        data: BTreeMap<String, String>,
+    },
     /// A key copies a Secret key that is not there.
-    Blocked { namespace: String, name: String, source: Source },
+    Blocked {
+        namespace: String,
+        name: String,
+        source: Source,
+    },
 }
 
 impl Action {
     pub fn name(&self) -> String {
         match self {
             Action::Unchanged { namespace, name }
-            | Action::Write { namespace, name, .. }
-            | Action::Blocked { namespace, name, .. } => format!("{namespace}/{name}"),
+            | Action::Write {
+                namespace, name, ..
+            }
+            | Action::Blocked {
+                namespace, name, ..
+            } => format!("{namespace}/{name}"),
         }
     }
 }
@@ -83,7 +119,10 @@ pub fn decide(
         let there = held.get(&(config_map.namespace.clone(), config_map.name.clone()));
         let current = there.is_some_and(|have| wanted.iter().all(|(k, v)| have.get(k) == Some(v)));
         actions.push(if current {
-            Action::Unchanged { namespace: config_map.namespace.clone(), name: config_map.name.clone() }
+            Action::Unchanged {
+                namespace: config_map.namespace.clone(),
+                name: config_map.name.clone(),
+            }
         } else {
             Action::Write {
                 namespace: config_map.namespace.clone(),
@@ -102,11 +141,13 @@ mod tests {
     use plan::Plan;
 
     fn config_maps(yaml: &str) -> Vec<plan::ConfigMap> {
-        Plan::from_yaml(&format!("name: p\nstages:\n  - name: s\n    configMaps:\n{yaml}"))
-            .unwrap()
-            .stages
-            .remove(0)
-            .config_maps
+        Plan::from_yaml(&format!(
+            "name: p\nstages:\n  - name: s\n    configMaps:\n{yaml}"
+        ))
+        .unwrap()
+        .stages
+        .remove(0)
+        .config_maps
     }
 
     const CA: &str = "
@@ -114,7 +155,11 @@ mod tests {
 ";
 
     fn source() -> Source {
-        Source { namespace: "polar".into(), name: "cert-issuer-ca".into(), key: "ca.crt".into() }
+        Source {
+            namespace: "polar".into(),
+            name: "cert-issuer-ca".into(),
+            key: "ca.crt".into(),
+        }
     }
 
     fn copies(text: &str) -> BTreeMap<Source, String> {
@@ -145,20 +190,31 @@ mod tests {
     #[test]
     fn one_that_holds_the_same_is_left_alone() {
         let actions = decide(&config_maps(CA), &held("CERT"), &copies("CERT")).unwrap();
-        assert_eq!(actions, [Action::Unchanged { namespace: "blitz".into(), name: "polar-ca".into() }]);
+        assert_eq!(
+            actions,
+            [Action::Unchanged {
+                namespace: "blitz".into(),
+                name: "polar-ca".into()
+            }]
+        );
     }
 
     #[test]
     fn one_that_holds_a_certificate_that_is_gone_is_brought_into_line() {
         // The CA was replaced on purpose; a pod that pins the old one would trust nothing the new one signs.
         let actions = decide(&config_maps(CA), &held("OLD"), &copies("NEW")).unwrap();
-        assert!(matches!(&actions[0], Action::Write { existed: true, data, .. } if data["ca.pem"] == "NEW"), "{actions:?}");
+        assert!(
+            matches!(&actions[0], Action::Write { existed: true, data, .. } if data["ca.pem"] == "NEW"),
+            "{actions:?}"
+        );
     }
 
     #[test]
     fn a_key_the_plan_does_not_name_does_not_make_it_differ() {
         let mut have = held("CERT");
-        have.get_mut(&("blitz".to_string(), "polar-ca".to_string())).unwrap().insert("extra".into(), "x".into());
+        have.get_mut(&("blitz".to_string(), "polar-ca".to_string()))
+            .unwrap()
+            .insert("extra".into(), "x".into());
         let actions = decide(&config_maps(CA), &have, &copies("CERT")).unwrap();
         assert!(matches!(&actions[0], Action::Unchanged { .. }));
     }
@@ -166,12 +222,20 @@ mod tests {
     #[test]
     fn a_source_that_is_not_there_blocks_it_and_names_the_source() {
         let actions = decide(&config_maps(CA), &BTreeMap::new(), &BTreeMap::new()).unwrap();
-        assert_eq!(actions, [Action::Blocked { namespace: "blitz".into(), name: "polar-ca".into(), source: source() }]);
+        assert_eq!(
+            actions,
+            [Action::Blocked {
+                namespace: "blitz".into(),
+                name: "polar-ca".into(),
+                source: source()
+            }]
+        );
     }
 
     #[test]
     fn a_literal_is_used_as_written() {
-        let maps = config_maps("      - { namespace: n, name: c, keys: { mode: { literal: strict } } }\n");
+        let maps =
+            config_maps("      - { namespace: n, name: c, keys: { mode: { literal: strict } } }\n");
         let actions = decide(&maps, &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert!(matches!(&actions[0], Action::Write { data, .. } if data["mode"] == "strict"));
     }

@@ -80,3 +80,39 @@ cd src/agents && cargo build --release -p polar-cli      # target/release/polar
 ```
 
 Needs `dhall-to-yaml` on the PATH only for `render` and for passing a `.dhall` file where a plan goes.
+
+## What `render` costs
+
+`polar render` does not evaluate Dhall: it runs `dhall-to-yaml` and writes what that prints, so the cost is all in
+that process and none in `polar` (about 7 MB resident). It is large. Measured once, on 2026-11-02, for Blitz's plan
+(`infra/plan.dhall` in the Blitz repository: 17 stages, 228 KB of YAML) with `dhall-to-yaml` 1.7.12 on an Apple M3 Max
+with 36 GiB, while the machine was swapping:
+
+| | |
+|---|---|
+| Wall time | about 7.5 minutes (an earlier, smaller version of the plan took about 4) |
+| CPU | 246 s user, 104 s system: about 80% of one core on average |
+| Peak resident memory | about **9 GiB** (`/usr/bin/time -l` reported 9.66 GB; sampling `ps` saw 9.2 GB) |
+
+Measured again on 2026-11-04, on the same machine, for the same plan (17 stages, 237 KB of YAML after its authority model grew) with
+the library from this repository (`src/deploy` at `d6426626`) in place of Polar's: 5.4 minutes wall (230 s user, 63 s system), and
+`/usr/bin/time -l` reported a maximum resident set of **13.1 GB** and a peak memory footprint of 28.3 GB (the footprint counts
+compressed memory the machine had swapped, so it is the larger and the less comparable figure). The first measurement's 9.7 GB
+was the resident set of a run that swapped; the two are not the same quantity under different loads, and neither says what a machine
+without swap needs: budget for more than 13 GB, not 10.
+
+A reading of 4.4 GiB taken mid-run is not the peak. The earlier version of the plan's peak was not measured, so how much
+of the growth is the plan's and how much the evaluator's is not known, and where the memory goes (the Kubernetes types the
+library imports, the library's own stages, Blitz's templates) was not profiled.
+
+Three consequences:
+
+- **Evaluate once.** `plan`, `up` and `down` accept the rendered `.yaml` and read it directly; given a `.dhall` file they
+  evaluate it again, with the same cost, every time. Render to a file and pass that. (Blitz's platform was taken down on
+  a machine that had run out of memory by giving `down` the committed `plan.yaml`.)
+- **Budget for it.** A machine or a job that cannot spare about 14 GiB cannot render a plan of this size: a job with a
+  4 Gi or 8 Gi memory limit cannot hold the evaluator.
+- **The first run needs the network.** Every remote import is pinned by hash, so a warm cache (`~/.cache/dhall`) makes a
+  later run need none; a cold one fetches the Prelude and the Kubernetes types over HTTPS, and on a network that re-signs TLS
+  fails with "certificate has unknown CA" unless `dhall-to-yaml` is given a bundle that holds the proxy's authority
+  (`SSL_CERT_FILE`).

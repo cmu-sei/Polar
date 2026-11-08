@@ -1,3 +1,25 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
 
 
 # Kubernetes Deployment State Temporal Data Model
@@ -391,6 +413,11 @@ And linking them:
 (:PodState)-[:TRANSITIONED_TO]->(:PodState)
 (:Pod)-[:CURRENT_STATE]->(:PodState)
 ```
+
+As built (2026-11-01): `UpdateState` writes `(:Pod)-[:TRANSITIONED_TO]->(:PodState)`, `(:PodState)-[:OF_TYPE]->(:State)`,
+and `(:Pod)-[:HAS_STATE]->(:State)`, the one taxonomy node, not the current instance; until 2026-11-01 the `:State`
+pattern was unbound and each transition made an empty node in its place (graph-write-path.md, "Every key binds its
+variable" and "Kept open").
 
 That decision fundamentally changed the system from “state mirroring” to “temporal modeling.”
 

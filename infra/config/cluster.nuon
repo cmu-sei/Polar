@@ -1,0 +1,77 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/config/cluster.nuon
+#
+# Facts about the cluster Polar runs in. A target may override any of these in
+# infra/targets/<target>/config.nuon under the key `cluster`.
+{
+  # DNS domain of the cluster (kubelet --cluster-domain). Every in-cluster
+  # service address is built from this, so changing it here changes them all.
+  domain: "cluster.local"
+
+  # Short names used by services.nuon, mapped to real namespaces.
+  namespaces: {
+    polar: "polar"
+    graph: "polar-graph"
+    auth: "polar-auth"
+  }
+
+  # Registry as the cluster's nodes reach it. For u7s this is the slirp4netns
+  # gateway to the host registry started by `just registry-up`.
+  registry: "10.0.2.2:5000"
+
+  # The architecture of the cluster's nodes, which decides which digest of the image lock a pinned render uses
+  # (an image has one digest per architecture): "amd64" or "arm64".
+  arch: "amd64"
+
+  # Audience of the projected ServiceAccount token presented to cert-issuer.
+  sa_token_audience: "polar-cert-issuer.local"
+
+  # Who may ask cert-issuer for a certificate with only a token. The bootstrap identities (the workloads
+  # that cannot be issued through the credentials agent, because they are what it needs to run) always may.
+  # While the floor is off, cert-issuer signs any token holder and `resolve.nu check` lists the workloads
+  # that still ask it directly as pending. Turn it on, in the last step of the rollout, only when that list
+  # is empty: it then refuses every workload that is not a bootstrap identity, and from then on the same
+  # list is an error. The cert-issuer chart's `mtlsEnforceBootstrap` is rendered from this.
+  issuance: { floor_enforced: false }
+
+  # The custody daemon (docs/architecture/key-custody.md): in every pod whose kind and workload allow it, a native
+  # sidecar holds the pod's keys and signs its TLS 1.3 handshakes, so no key is ever a file in the pod. A target that
+  # cannot run it (our image, our neo4rs, a Neo4j that offers TLS 1.3) sets it off and runs on key files, as before
+  # custody: the key then lies in the pod's volume, where a compromised workload can copy it ("Degraded operation").
+  custody: { enabled: true }
+
+  # Persistent volume claims a workload's capabilities ask for: the storage class the cluster
+  # provides and how much each claim asks for.
+  storage: { class: "managed-csi", size: "1Gi" }
+
+  # The way out of the cluster (docs/architecture/egress.md), for a target whose calls outside must go through a
+  # proxy or trust a CA of its own. There is no default: a target that sets none of it renders as before. Every key
+  # is optional, and only the agents whose code declares the egress section (polar::egress) are given it.
+  #
+  #   egress: {
+  #     proxy: "http://proxy.corp.example:3128"       # http:// or https://, a host and a port, no user or password
+  #     no_proxy: [".corp.example", "10.20.0.0/16"]   # reached directly; localhost, 127.0.0.1, ::1, .svc and
+  #                                                   # .<domain> always are
+  #     ca_file: "trust/corp-root-ca.pem"             # PEM CA certificates, a path inside infra/targets/<target>/
+  #   }
+}

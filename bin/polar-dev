@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# bin/polar-dev: your dev container, as a pod in whatever cluster kubectl points at, local or not. Your machine needs kubectl,
+# ssh and git; everything else (Nix, the tools, the builds, up.nu) runs in the pod. You reach it over SSH with your agent
+# forwarded, so git there uses your own key and none is kept in the cluster.
+#
+#   bin/polar-dev up        make or update the pod, clone the sources into it if they are not there, and log in
+#   bin/polar-dev attach    log in again
+#   bin/polar-dev cert [u]  copy your Polar certificate out and import it into Librewolf here (infra/user-cert-install.sh)
+#   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687) and ACE (8050)
+#   bin/polar-dev sops      copy your personal sops files (infra/targets/*/user.sops.yaml, gitignored) into the pod's checkout;
+#                           `up` does this too, and what the pod has of its own stays
+#   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
+#   bin/polar-dev down      sync, then stop the pod (its volumes stay); --purge removes the namespace and the volumes too
+#   bin/polar-dev build-image [tag] [target]
+#                           build the dev image from this checkout's current commit, in the pod, and push it to the target's
+#                           registry in the cluster (tag: the short commit; target: POLAR_TARGET, else local-minimal); it
+#                           prints the `up` that runs it
+#
+# Settings (environment): POLAR_DEV_IMAGE, POLAR_DEV_ARCH (amd64 or arm64; default: the cluster's nodes'),
+# POLAR_DEV_STORAGE_CLASS (default: the cluster's), POLAR_DEV_SSH_KEY (the public key to log in with; default: the first
+# your agent holds), POLAR_DEV_SOPS_KEY (the private key sops decrypts with; default:
+# SOPS_AGE_SSH_PRIVATE_KEY_FILE, else ~/.ssh/id_ed25519), POLAR_DEV_REPO and POLAR_DEV_BRANCH (what is cloned),
+# POLAR_DEV_PORT (local end of the SSH forward, 2222).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+U=$(id -un | tr '[:upper:]_.' '[:lower:]--')
+NS=polar-dev-$U
+DEPLOY=polar-dev-$U
+REPO=${POLAR_DEV_REPO:-git@52.235.181.217:SEI/ACE.git}
+BRANCH=${POLAR_DEV_BRANCH:-main}
+PORT=${POLAR_DEV_PORT:-2222}
+SOPS_KEY=${POLAR_DEV_SOPS_KEY:-${SOPS_AGE_SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/id_ed25519}}
+REMOTE_HOME=/home/$(id -un)
+# The pod's host keys are kept on its state volume, so they stay the same while the namespace does; a new namespace (a new
+# cluster, or after down --purge) is a new pod with new keys. So the keys ssh trusts are kept per namespace, by its uid.
+ssh_opts() {
+    local uid; uid=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
+    SSH_OPTS=(-A -p "$PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/polar-dev_known_hosts.${uid:0:8}")
+}
+
+die() { echo "polar-dev: $*" >&2; exit 1; }
+k() { kubectl -n "$NS" "$@"; }
+say() { echo "polar-dev: $*"; }
+
+# The architecture the pod runs on: its nodes', not this machine's (a Mac against an amd64 cluster, a laptop against an
+# arm64 one). A cluster whose nodes are of both is asked which, through POLAR_DEV_ARCH.
+cluster_arch() {
+    if [ -n "${POLAR_DEV_ARCH:-}" ]; then echo "$POLAR_DEV_ARCH"; return; fi
+    local arches
+    arches=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.architecture}{"\n"}{end}' 2>/dev/null | grep . | sort -u) \
+        || die "cannot read the cluster's nodes for their architecture (set POLAR_DEV_ARCH to amd64 or arm64)"
+    [ "$(printf '%s\n' "$arches" | grep -c .)" -eq 1 ] \
+        || die "the cluster's nodes are $(printf '%s\n' "$arches" | paste -s -d, -): set POLAR_DEV_ARCH to the one the pod should run on"
+    echo "$arches"
+}
+
+# The newest of the dev pods (one being replaced may still be there).
+pod() { k get pod -l app=polar-dev --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null; }
+
+# Waits for the rollout, saying what the pod is doing as it happens: its status, each event (scheduled, pulling the image,
+# pulled, started), and while the init container copies the image's Nix store to its volume, how much is copied.
+wait_ready() {
+    local p="" seen_status="" seen_events="" last_copy=0
+    for _ in $(seq 1 720); do
+        if k rollout status "deploy/$DEPLOY" --timeout=1s >/dev/null 2>&1; then say "the pod is ready"; return; fi
+        p=$(pod)
+        if [ -n "$p" ]; then
+            local status; status=$(k get pod "$p" --no-headers 2>/dev/null | awk '{print $3}')
+            [ "$status" != "$seen_status" ] && { say "pod $p: $status"; seen_status=$status; }
+            local events; events=$(k get events --field-selector "involvedObject.name=$p" --sort-by=.lastTimestamp -o custom-columns=R:.reason,M:.message --no-headers 2>/dev/null)
+            if [ "$events" != "$seen_events" ]; then
+                comm -13 <(printf '%s\n' "$seen_events" | sort) <(printf '%s\n' "$events" | sort) | sed 's/^/  /'
+                seen_events=$events
+            fi
+            if [ "$status" = "Init:0/1" ] && [ $((SECONDS - last_copy)) -ge 30 ]; then
+                local copied; copied=$(k exec "$p" -c seed -- nu -c 'if ("/seed/store" | path exists) { du /seed | get 0.physical | into string } else { "nothing yet" }' 2>/dev/null) || true
+                [ -n "$copied" ] && say "  seeding the Nix store from the image: $copied copied so far"
+                last_copy=$SECONDS
+            fi
+        fi
+        sleep 5
+    done
+    die "the pod did not become ready in an hour (kubectl -n $NS describe pod $p)"
+}
+
+
+# The pod's git (the clone into /workspace, and every fetch and push after) uses your key through the forwarded agent, so
+# the agent has to hold one, whatever key POLAR_DEV_SSH_KEY logs in with.
+agent_has_key() { ssh-add -l >/dev/null 2>&1; }
+
+pubkey() {
+    if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then cat "$POLAR_DEV_SSH_KEY"; return; fi
+    # All of the listing first, then its first line: `| head -1` would close the pipe on ssh-add, which pipefail counts as a failure.
+    local keys; keys=$(ssh-add -L 2>/dev/null) || true
+    [ -n "$keys" ] && [[ "$keys" != "The agent has no identities."* ]] || die "no key in your ssh agent (ssh-add one, or set POLAR_DEV_SSH_KEY to a public key file)"
+    printf '%s\n' "${keys%%$'\n'*}"
+}
+
+# The kustomization this user's pod is made from: the base in infra/dev-pod, and what is theirs.
+render() {
+    [ -r "$SOPS_KEY" ] || die "no key for sops at $SOPS_KEY (set POLAR_DEV_SOPS_KEY)"
+    # Beside the base, since kustomize takes a base only by a relative path; removed when done.
+    local d="$HERE/infra/.dev-pod-$U"; rm -rf "$d"; mkdir -p "$d"; trap 'rm -rf "$d"' RETURN
+    local uid gid key class; uid=$(id -u); gid=$(id -g)
+    key=$(pubkey) || exit 1
+    # A claim's class cannot change once it is bound. Without POLAR_DEV_STORAGE_CLASS, the claims that exist keep theirs:
+    # left out of the manifest, it would be cleared, and the apply of every claim fails (made with the variable set, then
+    # applied without it).
+    class=${POLAR_DEV_STORAGE_CLASS:-$(kubectl -n "$NS" get pvc "polar-dev-nix-$U" -o jsonpath='{.spec.storageClassName}' 2>/dev/null)}
+    printf 'apiVersion: v1\nkind: Namespace\nmetadata: { name: %s }\n' "$NS" > "$d/namespace.yaml"
+    cat > "$d/kustomization.yaml" <<K
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $NS
+nameSuffix: -$U
+resources: [namespace.yaml, ../dev-pod]
+images: [{ name: polar-dev, newName: ${IMAGE%:*}, newTag: ${IMAGE##*:} }]
+secretGenerator:
+  - { name: polar-dev-ssh, literals: ["authorized_keys_b64=$(printf '%s\n' "$key" | base64 | tr -d '\n')"] }
+  - { name: polar-dev-sops, files: ["key=$SOPS_KEY"] }
+patches:
+  - target: { kind: ClusterRoleBinding }
+    patch: '[{"op": "replace", "path": "/subjects/0", "value": {"kind": "ServiceAccount", "name": "polar-dev-$U", "namespace": "$NS"}}]'
+  - target: { kind: PersistentVolumeClaim }
+    patch: '[{"op": "add", "path": "/spec/storageClassName", "value": "$class"}]'
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: polar-dev }
+      spec:
+        template:
+          spec:
+            nodeSelector: { kubernetes.io/arch: $ARCH }
+            securityContext: { fsGroup: $gid }
+            initContainers:
+              - name: seed
+                env: [{ name: CREATE_UID, value: "$uid" }, { name: CREATE_GID, value: "$gid" }]
+            containers:
+              - name: dev
+                env: [{ name: CREATE_USER, value: "$(id -un)" }, { name: CREATE_UID, value: "$uid" }, { name: CREATE_GID, value: "$gid" }]
+                volumeMounts:
+                  - { name: state, mountPath: $REMOTE_HOME/.local/share/atuin, subPath: atuin }
+                  - { name: state, mountPath: $REMOTE_HOME/.config/polar-admin, subPath: polar-admin }
+                  - { name: state, mountPath: $REMOTE_HOME/.config/polar-deploy, subPath: polar-deploy }
+                  - { name: state, mountPath: $REMOTE_HOME/.cache, subPath: cache }
+                  # The pod's SSH host keys live here, so they are the same after a restart and ssh keeps trusting them.
+                  - { name: state, mountPath: $REMOTE_HOME/.ssh, subPath: ssh }
+K
+    [ -n "$class" ] || sed -i.bak '/PersistentVolumeClaim/,+1d' "$d/kustomization.yaml"
+    kubectl kustomize --load-restrictor LoadRestrictionsNone "$d"
+}
+
+ssh_answers() { ssh_opts; ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$(id -un)@127.0.0.1" true 2>/dev/null; }
+
+# ── Why a login or a clone is refused ────────────────────────────────────────
+# The functions down to clone_hint only read text (what ssh -v, ssh -G, ssh-add, dropbear and git said) and print; their
+# tests are bin/tests/polar-dev.bash. They keep to what macOS has: bash 3.2, BSD awk and sed.
+
+# The cause of the last refusal in what ssh (or git through it, or the pod's dropbear) said: hostkey, cipher, kex or mac
+# (the two ends share no algorithm of that kind), publickey (the key was denied), refused (nothing listens at the port),
+# closed (something listens and hangs up: a forward whose pod end does not answer), timeout, ok (it logged in), or unknown.
+ssh_cause() {
+    awk '
+        /no matching host key type found|No matching algo hostkey/ { c = "hostkey" }
+        /no matching cipher found|No matching algo enc/ { c = "cipher" }
+        /no matching key exchange method found|No matching algo kex/ { c = "kex" }
+        /no matching MAC found|No matching algo mac/ { c = "mac" }
+        /Permission denied \(publickey/ { c = "publickey" }
+        /Connection refused/ { c = "refused" }
+        /kex_exchange_identification|Connection closed by|Connection reset by/ { c = "closed" }
+        /[Tt]imed out/ { c = "timeout" }
+        /Authenticated to / { c = "ok" }
+        END { print (c == "" ? "unknown" : c) }'
+}
+
+# The line that says it, as ssh said it (without its debug1: prefix); nothing when it did not refuse.
+ssh_reason() {
+    awk '/no matching .* found|Permission denied|Connection refused|kex_exchange_identification|Connection closed by|Connection reset by|[Tt]imed out/ {
+        sub(/^debug[0-9]: /, ""); r = $0 } END { print r }'
+}
+
+# What the pod offered, from ssh's "Unable to negotiate ... Their offer: ..." line.
+ssh_offer() { awk '/Their offer: / { o = $0; sub(/.*Their offer: /, "", o) } END { print o }'; }
+
+# The configuration files ssh read (ssh -v says each), in order, each once: the policy a managed machine imposes is in
+# one of them (/etc/ssh/ssh_config.d/... on a Mac).
+ssh_config_files() {
+    awk '/Reading configuration data / { f = $0; sub(/.*Reading configuration data /, "", f); if (!(f in seen)) { seen[f] = 1; print f } }'
+}
+
+# One setting from ssh -G's output; an OpenSSH older than 8.5 calls pubkeyacceptedalgorithms pubkeyacceptedkeytypes.
+ssh_g_field() {
+    awk -v f="$1" '!done && ($1 == f || (f == "pubkeyacceptedalgorithms" && $1 == "pubkeyacceptedkeytypes")) { print $2; done = 1 }'
+}
+
+# The ssh -G setting that lists the algorithms of a negotiation cause.
+ssh_g_name() { case "$1" in hostkey) echo hostkeyalgorithms ;; cipher) echo ciphers ;; kex) echo kexalgorithms ;; mac) echo macs ;; esac; }
+
+# The key types ssh left out because its own policy does not accept them (ssh -v: "Skipping <type> key ... not in
+# PubkeyAcceptedAlgorithms"), each once.
+skipped_key_types() {
+    awk '/Skipping .* key .* - corresponding algorithm not in PubkeyAccepted/ { sub(/^debug[0-9]: /, ""); if (!seen[$2]++) print $2 }'
+}
+
+# The last few refusals in the pod's log: dropbear's (an algorithm it shares with no client, a login it ended before
+# authentication, a key it refused, a user it does not have) and start.nu's when it was given no key to let in.
+dropbear_refusals() {
+    awk '/No matching algo|Exit before auth|nonexistent user|[Pp]ubkey auth (attempt|bad)|Max auth tries|must be owned by|AUTHORIZED_KEYS_B64 not set/ {
+        l[n++ % 5] = $0 } END { for (i = (n > 5 ? n - 5 : 0); i < n; i++) print l[i % 5] }'
+}
+
+# The key types in ssh-add -L's listing.
+agent_key_types() { awk '/^The agent has no identities/ { next } NF { print $1 }'; }
+
+# Which of the key types (one per line) a policy's accepted algorithms (comma-separated, as ssh -G prints them) let ssh
+# offer. An RSA key is offered through rsa-sha2-256 or -512 (ssh-rsa itself is SHA-1, which most policies refuse), and so
+# is an RSA certificate through their -cert-v01 forms.
+usable_key_types() {
+    printf '%s\n' "$1" | awk -v accepted="$2" '
+        BEGIN { n = split(accepted, a, ","); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+        NF == 0 { next }
+        { t = $1; use = (t in ok) }
+        t == "ssh-rsa" && (("rsa-sha2-256" in ok) || ("rsa-sha2-512" in ok)) { use = 1 }
+        t == "ssh-rsa-cert-v01@openssh.com" && (("rsa-sha2-256-cert-v01@openssh.com" in ok) || ("rsa-sha2-512-cert-v01@openssh.com" in ok)) { use = 1 }
+        use && !seen[t]++ { print t }'
+}
+
+# The hint for a negotiation refused by your ssh: what it refused, what the pod offered and what your ssh accepts, where
+# that policy is written, and that the pod's image may be older than the fixes for a FIPS policy.
+negotiation_hint() {
+    local what
+    case "$1" in hostkey) what="host key type" ;; cipher) what=cipher ;; kex) what="key exchange method" ;; *) what=MAC ;; esac
+    say "your ssh accepts no $what the pod offers. The pod offers: ${2:-(ssh did not say)}"
+    say "your ssh accepts: ${3:-(ssh -G does not say)}"
+    say "that is your ssh's policy, from ${4:-its configuration} (the files ssh -G reads). A FIPS policy refuses ed25519, chacha20 and the ctr ciphers, and the pod's image may predate the fixes for it (an ECDSA host key and AES-GCM in dropbear): build one from this checkout with bin/polar-dev build-image, or set POLAR_DEV_IMAGE to a newer image, then bin/polar-dev up again"
+}
+
+# The hint for a key the pod denied: the key the pod was given (a fingerprint, and where bin/polar-dev took it from), the
+# keys the agent holds (ssh-add -l), and which of three it is: the policy kept ssh from offering the agent's key types,
+# the pod's key is not in the agent, or the agent holds it and the pod has another (or dropbear refused it).
+publickey_hint() {
+    local fp; fp=$(printf '%s\n' "$1" | awk '{ print $2 }')
+    say "the pod refused your key. It lets in: ${1:-(a key bin/polar-dev cannot read)} ($2)"
+    say "your agent holds:"; printf '%s\n' "${3:-(no key)}" | sed 's/^/  /'
+    if [ -n "$4" ]; then
+        say "your ssh did not offer your $(printf '%s\n' "$4" | paste -s -d, -) keys: its policy's PubkeyAcceptedAlgorithms leaves those types out. ssh-add a key of a type it accepts (an ECDSA key: ssh-keygen -t ecdsa), set POLAR_DEV_SSH_KEY to its .pub unless it is the agent's first, and bin/polar-dev up again"
+    elif [ -n "$fp" ] && printf '%s\n' "$3" | awk -v fp="$fp" '$2 == fp { found = 1 } END { exit !found }'; then
+        say "your agent holds it, so the pod was given another key, or its dropbear refused this one (its log, above): bin/polar-dev up again gives the pod this key"
+    else
+        say "that key is not in your agent: ssh-add it, or set POLAR_DEV_SSH_KEY to the public half of one that is, and bin/polar-dev up again"
+    fi
+}
+
+# The hint when nothing refused the login but nothing let it in either: the port-forward (stopped, or running with nothing
+# behind it), with the last line of its log.
+forward_hint() {
+    if [ "$1" = dead ]; then
+        say "the port-forward has stopped${2:+ (its log ends: $2)}: the pod may have been stopped or replaced (kubectl -n $NS get pods); bin/polar-dev attach starts it again"
+    elif [ "$3" = refused ]; then
+        say "the port-forward runs, but nothing answers at 127.0.0.1:$PORT: another program may hold that port; set POLAR_DEV_PORT to a free one"
+    else
+        say "the port-forward runs, but the pod's end does not answer${2:+ (its log ends: $2)}: dropbear may not be running in the pod (kubectl -n $NS logs deploy/$DEPLOY -c dev)"
+    fi
+}
+
+# The host of a git remote: scp-style (git@host:path), or a URL (ssh://, https://).
+repo_host() { printf '%s\n' "$1" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##; s#^[^@/]*@##; s#[:/].*$##'; }
+
+# The hint for a clone the git server refused: it knows none of the agent's keys (listed by fingerprint, never the keys).
+clone_hint() {
+    say "the git server at $1 knows none of the keys your agent holds:"
+    printf '%s\n' "${2:-(no key)}" | sed 's/^/  /'
+    say "add one of them to your account on $1, or set POLAR_DEV_REPO to a remote you can reach. /workspace stays empty until then: once the key is added, bin/polar-dev up again clones it"
+}
+
+# The files ssh -G reads, as one line.
+policy_files() { ssh -v -G -p "$PORT" 127.0.0.1 2>&1 >/dev/null | ssh_config_files | paste -s -d' ' -; }
+
+# Whether your ssh's policy lets it offer any key the agent holds: one that accepts none of their types (a FIPS policy and
+# an ed25519 key) has the login to the pod refused, however the pod is made (git in the pod goes through the pod's own
+# ssh). A warning, said before anything is applied: ssh also offers keys in ~/.ssh that the agent does not hold.
+check_key_types() {
+    local types accepted files
+    types=$(ssh-add -L 2>/dev/null | agent_key_types) || true
+    [ -n "$types" ] || return 0
+    accepted=$(ssh -G -p "$PORT" 127.0.0.1 2>/dev/null | ssh_g_field pubkeyacceptedalgorithms) || true
+    [ -n "$accepted" ] && [ -z "$(usable_key_types "$types" "$accepted")" ] || return 0
+    files=$(policy_files) || true
+    say "warning: your ssh's policy accepts none of the key types your agent holds ($(printf '%s\n' "$types" | paste -s -d, -)); it accepts $accepted (ssh -G${files:+, from $files}). The login to the pod will be refused: ssh-add a key of a type it accepts (an ECDSA key: ssh-keygen -t ecdsa)"
+}
+
+# One login that says why it fails (ssh -v), and dropbear's refusals in the pod's log; CAUSE is ssh's cause, else
+# dropbear's last. It trusts any host key and records none (UserKnownHostsFile=/dev/null), so a host key the pod has
+# changed does not hide what else is wrong.
+probe_ssh() {
+    PROBE=$(ssh -v -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+        -p "$PORT" "$(id -un)@127.0.0.1" true 2>&1) || true
+    REFUSALS=$(k logs "deploy/$DEPLOY" -c dev --tail=2000 2>/dev/null | dropbear_refusals) || true
+    CAUSE=$(printf '%s\n' "$PROBE" | ssh_cause)
+    if [ "$CAUSE" = unknown ] && [ -n "$REFUSALS" ]; then CAUSE=$(printf '%s\n' "$REFUSALS" | tail -n 1 | ssh_cause); fi
+}
+
+# Says why the pod's SSH does not let you in, from what probe_ssh found: the port-forward, ssh's refusal, dropbear's, and
+# the hint for the cause.
+diagnose_ssh() {
+    local fwd=dead last reason key from
+    if { [ -n "${PF_PID:-}" ] && kill -0 "$PF_PID" 2>/dev/null; } || pgrep -f "port-forward deploy/$DEPLOY $PORT:2223" >/dev/null 2>&1; then fwd=alive; fi
+    last=$(tail -n 1 "$PF_LOG" 2>/dev/null) || true
+    if [ "$fwd" = alive ]; then say "the port-forward to the pod runs${last:+; its log ($PF_LOG) ends: $last}"
+    else say "the port-forward to the pod has stopped${last:+; its log ($PF_LOG) ends: $last}"; fi
+    reason=$(printf '%s\n' "$PROBE" | ssh_reason)
+    say "ssh -v says: ${reason:-$(printf '%s\n' "$PROBE" | tail -n 1)}"
+    if [ -n "$REFUSALS" ]; then say "the pod's log says:"; printf '%s\n' "$REFUSALS" | sed 's/^/  /'; fi
+    case "$CAUSE" in
+        hostkey|cipher|kex|mac)
+            negotiation_hint "$CAUSE" "$(printf '%s\n' "$PROBE" | ssh_offer)" \
+                "$(ssh -G -p "$PORT" 127.0.0.1 2>/dev/null | ssh_g_field "$(ssh_g_name "$CAUSE")")" \
+                "$(printf '%s\n' "$PROBE" | ssh_config_files | paste -s -d' ' -)" ;;
+        publickey)
+            if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then
+                key=$(ssh-keygen -lf "$POLAR_DEV_SSH_KEY" 2>/dev/null) || key=""; from="POLAR_DEV_SSH_KEY=$POLAR_DEV_SSH_KEY"
+            else
+                key=$(ssh-add -l 2>/dev/null) || key=""; key=${key%%$'\n'*}; from="your agent's first key"
+            fi
+            publickey_hint "$key" "$from" "$(ssh-add -l 2>/dev/null || true)" "$(printf '%s\n' "$PROBE" | skipped_key_types)" ;;
+        ok) say "a login that trusts any host key works: the pod's host key is not the one $HOME/.ssh/polar-dev_known_hosts.* holds for it (ssh -p $PORT $(id -un)@127.0.0.1 says more)" ;;
+        *) forward_hint "$fwd" "$last" "$CAUSE" ;;
+    esac
+}
+
+PF_LOG=/tmp/polar-dev-$U-ssh.log
+
+# Starts the forward to the pod's SSH and waits until a login works. A forward left from before that does not reach the pod
+# (it was made for a pod that has since been replaced) is replaced. A refusal that waiting does not change (no algorithm
+# the two ends share, a key the pod does not take) is said after a few tries; anything else, when it gives up.
+forward_ssh() {
+    ssh_answers && return
+    pkill -f "port-forward deploy/$DEPLOY $PORT:2223" 2>/dev/null || true
+    k port-forward "deploy/$DEPLOY" "$PORT:2223" >"$PF_LOG" 2>&1 &
+    PF_PID=$!
+    local n
+    for n in $(seq 1 60); do
+        ssh_answers && return
+        if [ "$n" -eq 5 ]; then
+            probe_ssh
+            case "$CAUSE" in hostkey|cipher|kex|mac|publickey) diagnose_ssh; die "the pod's SSH refuses this login (above)" ;; esac
+        fi
+        sleep 2
+    done
+    probe_ssh
+    diagnose_ssh
+    die "the pod's SSH does not answer at 127.0.0.1:$PORT (kubectl -n $NS logs deploy/$DEPLOY -c dev; $PF_LOG)"
+}
+
+login() { forward_ssh; exec ssh "${SSH_OPTS[@]}" -t "$(id -un)@127.0.0.1" "$@"; }
+
+# tar over kubectl exec, so a directory keeps its modes; owned by the user in the pod.
+copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - "$1" | k exec -i "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" --no-same-owner -xf -; k exec "deploy/$DEPLOY" -c dev -- chown -R "$(id -u):$(id -g)" "$REMOTE_HOME/.config/$1"; }
+# A socket there (gpg-agent's, in a deployment PKI's GnuPG home) cannot be copied; tar leaves it out, and is told not to say so.
+copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar --warning=no-file-ignored -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
+
+# ── Your personal sops files ─────────────────────────────────────────────────
+# Gitignored, so the pod's clone has none, and without one a token in it is simply not there: up.nu carries on, and says only
+# that the target has no such secret. They are encrypted, and the key the pod is given opens them.
+
+# Each target's user.sops.yaml, and the .user.sops.yaml that says who it is encrypted to, under the checkout $1, one per line.
+user_sops_files() {
+    local f
+    ( cd "$1" || exit 0
+      for f in infra/targets/*/user.sops.yaml infra/targets/*/.user.sops.yaml; do
+          if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+      done )
+}
+
+# Copies them into the pod's checkout, unless the pod has its own already (it keeps what it made), as ~/.config goes in.
+copy_user_sops() {
+    local files
+    files=$(user_sops_files "$HERE")
+    if [ -z "$files" ]; then
+        say "no user.sops.yaml under $HERE/infra/targets: nothing personal to copy into the pod"
+        return 0
+    fi
+    say "your personal sops files go into the pod's checkout, unless it has its own:"
+    printf '%s\n' "$files" | sed 's/^/  /'
+    # shellcheck disable=SC2086 # one path per line, and a target's name has no spaces. COPYFILE_DISABLE: see build_image.
+    COPYFILE_DISABLE=1 tar -C "$HERE" -cf - $files | k exec -i "deploy/$DEPLOY" -c dev -- tar -C /workspace --no-same-owner --skip-old-files -xf - \
+        || die "copying your personal sops files into the pod failed (above)"
+    # shellcheck disable=SC2046
+    k exec "deploy/$DEPLOY" -c dev -- chown "$(id -u):$(id -g)" $(printf '%s\n' "$files" | sed 's|^|/workspace/|') \
+        || die "giving you your personal sops files in the pod failed (above)"
+}
+
+# ── build-image, and the image `up` applies ──────────────────────────────────
+# image_warning, oci_arch and image_tag_ok only read their arguments; their tests are bin/tests/polar-dev.bash.
+
+# Says when `up` is about to change the pod's image (the current, the new): a change re-seeds the Nix store. Returns 0 when
+# the change was not asked for (the third, POLAR_DEV_IMAGE, is empty), so `up` asks first: a later `up` without
+# POLAR_DEV_IMAGE would otherwise put a pod on an image built for it back on the published one, unsaid.
+image_warning() {
+    [ -n "$1" ] && [ "$1" != "$2" ] || return 1
+    if [ -n "$3" ]; then
+        say "the pod runs $1; this applies $2 (POLAR_DEV_IMAGE): a changed image re-seeds the Nix store (several minutes)"
+        return 1
+    fi
+    say "the pod runs $1; this applies $2 (set POLAR_DEV_IMAGE=$1 to keep it)"
+    say "a changed image re-seeds the Nix store (several minutes)"
+}
+
+# The image architecture of a machine (uname -m).
+oci_arch() { case "$1" in x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) return 1 ;; esac; }
+
+# Whether it can be an image's tag: letters, digits, _ . and -, not starting with . or -, at most 128.
+image_tag_ok() { local re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; [[ $1 =~ $re ]]; }
+
+# What build_image runs in the pod, as root, after its settings (scratch, machine, arch, target, tag). Root's own HOME and
+# cache: an image older than nix-container-lib's fix has /run/container-env.fish give root the session user's XDG
+# directories, and Nix's git fetcher refuses a cache root does not own.
+build_in_pod() {
+    cat <<'BUILD'
+set -euo pipefail
+say() { echo "polar-dev (in the pod): $*"; }
+die() { echo "polar-dev (in the pod): $*" >&2; exit 1; }
+# The clone, the bundle and the link to the image go however the build ends (the image stays in the store until collected).
+trap 'cd /; rm -rf "$scratch"' EXIT
+export HOME=/root XDG_CACHE_HOME=/root/.cache
+unset XDG_CONFIG_HOME XDG_DATA_HOME
+mkdir -p "$XDG_CACHE_HOME"
+git clone -q "$scratch/polar.bundle" "$scratch/src" || die "cloning the bundle failed"
+cd "$scratch/src"
+say "nix build .#packages.$machine-linux.devContainer"
+nix build -L -o "$scratch/image" ".#packages.$machine-linux.devContainer" || die "nix build failed (above)"
+say "nu infra/cluster-registry.nu up $target: the registry in the cluster, made if it is not there"
+nu infra/cluster-registry.nu up "$target" || die "the target's registry in the cluster is not up (above)"
+dest=registry.polar-registry.svc:5000/polar-dev:$tag
+say "pushing the image to $dest"
+skopeo --insecure-policy copy --dest-tls-verify=false "docker-archive:$scratch/image" "docker://$dest" || die "skopeo could not push to $dest (above)"
+got=$(skopeo inspect --tls-verify=false --format '{{.Architecture}}' "docker://$dest") || die "skopeo could not read $dest back (above)"
+[ "$got" = "$arch" ] || die "$dest is an image for $got, not for $arch"
+say "$dest is for $arch"
+BUILD
+}
+
+# Builds the dev image from this checkout's current commit in the pod (its Nix and its store), and pushes it to the
+# target's registry in the cluster: a machine with no Nix and no container runtime (a Mac) gets an image with a fix the
+# published one lacks. The commit goes in as a git bundle, so what is built is what is committed. It prints the `up` that
+# puts the pod on it.
+build_image() {
+    local tag=${1:-} target=${2:-${POLAR_TARGET:-local-minimal}} scratch=/tmp/polar-dev-build-image
+    local commit branch p machine arch node_port
+    git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1 || die "$HERE is not a git checkout: build-image bundles its current commit"
+    commit=$(git -C "$HERE" rev-parse --short HEAD) || die "cannot read the current commit of $HERE"
+    tag=${tag:-$commit}
+    image_tag_ok "$tag" || die "$tag cannot be an image's tag (letters, digits, _ . and -, not first; at most 128)"
+    [ -d "$HERE/infra/targets/$target" ] || die "there is no target $target in infra/targets: name one, or set POLAR_TARGET"
+    p=$(pod)
+    { [ -n "$p" ] && k rollout status "deploy/$DEPLOY" --timeout=5s >/dev/null 2>&1; } || die "no dev pod is ready in $NS: bin/polar-dev up first"
+    machine=$(k exec "$p" -c dev -- uname -m) || die "cannot ask the pod $p what it runs on"
+    arch=$(oci_arch "$machine") || die "the pod runs on $machine; build-image knows x86_64 and aarch64"
+    [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || say "uncommitted changes are left out: the image is built from $commit"
+    branch=$(git -C "$HERE" symbolic-ref --quiet --short HEAD) || branch=""
+    BUILD_TMP=$(mktemp -d) || die "cannot make a temporary directory"
+    trap 'rm -rf "$BUILD_TMP"' EXIT
+    say "bundling $commit${branch:+ ($branch)} from $HERE"
+    git -C "$HERE" bundle create "$BUILD_TMP/polar.bundle" HEAD ${branch:+"$branch"} || die "git bundle create failed in $HERE"
+    { printf 'scratch=%q machine=%q arch=%q target=%q tag=%q\n' "$scratch" "$machine" "$arch" "$target" "$tag"
+      build_in_pod; } > "$BUILD_TMP/build.bash"
+    say "copying it into $p ($scratch)"
+    { k exec "$p" -c dev -- rm -rf "$scratch" && k exec "$p" -c dev -- mkdir -p "$scratch"; } || die "cannot make $scratch in $p"
+    # COPYFILE_DISABLE: macOS's tar would add an ._ file of extended attributes beside each.
+    COPYFILE_DISABLE=1 tar -C "$BUILD_TMP" -cf - polar.bundle build.bash | k exec -i "$p" -c dev -- tar -C "$scratch" -xf - \
+        || die "copying the bundle into $p failed"
+    say "building the dev image for $machine-linux in $p, then pushing it to $target's registry in the cluster (a first build fetches and builds a lot: many minutes)"
+    # With the environment an SSH session gets (PATH and the rest), as kubectl exec gives only the image's own.
+    k exec "$p" -c dev -- fish -c "test -r /run/container-env.fish; and source /run/container-env.fish; exec bash $scratch/build.bash" \
+        || die "building or pushing the image in $p failed (above)"
+    node_port=$(kubectl -n polar-registry get svc registry -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null) || node_port=""
+    say "pushed polar-dev:$tag ($arch) to the registry in the cluster. Put the pod on it with:"
+    echo "  POLAR_DEV_IMAGE=localhost:${node_port:-30500}/polar-dev:$tag bin/polar-dev up"
+}
+
+# Sourced (bin/tests/polar-dev.bash), the script defines its functions and stops here.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+# Every command but the help talks to the cluster: say so plainly when kubectl cannot reach it, before anything is half done.
+case "${1:-}" in
+    up|attach|cert|forward|sops|sync|down|build-image)
+        kubectl version --request-timeout=5s >/dev/null 2>&1 || die "the cluster does not answer (KUBECONFIG is ${KUBECONFIG:-not set}): point kubectl at it, then run this again" ;;
+esac
+
+case "${1:-}" in
+    up)
+        agent_has_key || die "your ssh agent holds no key: ssh-add yours (on a Mac, ssh-add --apple-use-keychain ~/.ssh/id_ed25519), then run this again. The pod's git uses it through the forwarded agent, so POLAR_DEV_SSH_KEY alone is not enough"
+        check_key_types
+        ARCH=$(cluster_arch) || exit 1
+        IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
+        # The pod's image as it runs now; a change not asked for is confirmed at a terminal (a script is not asked).
+        current=$(k get deploy "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[?(@.name=="dev")].image}' 2>/dev/null) || current=""
+        if image_warning "$current" "$IMAGE" "${POLAR_DEV_IMAGE:-}" && [ -t 0 ]; then
+            printf 'polar-dev: replace it? [y/N] '
+            read -r answer || answer=""
+            case "$answer" in [yY]|[yY][eE][sS]) ;; *) die "nothing applied: the pod stays on $current" ;; esac
+        fi
+        say "applying $NS (image $IMAGE, on $ARCH nodes)"
+        manifests=$(render) || exit 1
+        printf '%s\n' "$manifests" | kubectl apply -f - | sed 's/^/  /'
+        say "waiting for the pod (a first start pulls the image and copies its Nix store to a volume: several minutes)"
+        wait_ready
+        # The state that lives on this machine goes in, unless the pod has its own already (it keeps what it made).
+        for d in polar-deploy polar-admin; do
+            if [ -n "$(k exec "deploy/$DEPLOY" -c dev -- ls -A "$REMOTE_HOME/.config/$d" 2>/dev/null)" ]; then
+                say "~/.config/$d: the pod has its own, left as it is"
+            elif [ -d "$HOME/.config/$d" ]; then
+                say "copying ~/.config/$d into the pod"; copy_in "$d"
+            fi
+        done
+        say "forwarding 127.0.0.1:$PORT to the pod's SSH"
+        forward_ssh
+        if ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git"; then
+            say "/workspace already has a checkout"
+        else
+            say "cloning $REPO ($BRANCH) into /workspace, with your forwarded agent"
+            # A clone that fails still logs you in (to an empty /workspace), saying why; a refused key, with what to do.
+            clone_out=$(mktemp)
+            if ! ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace" 2>&1 | tee "$clone_out"; then
+                if [ "$(ssh_cause < "$clone_out")" = publickey ]; then clone_hint "$(repo_host "$REPO")" "$(ssh-add -l 2>/dev/null || true)"
+                else say "the clone failed (above): /workspace stays empty; bin/polar-dev up again clones it"; fi
+            fi
+            rm -f "$clone_out"
+        fi
+        # Not into a /workspace the clone left empty: git will not clone into one that has something in it.
+        if ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git"; then copy_user_sops; fi
+        say "logging in (bin/polar-dev attach to come back)"
+        login ;;
+    attach) login ;;
+    cert)
+        u=${2:-$(id -un)}
+        copy_out polar-admin
+        script=$(mktemp); k exec "deploy/$DEPLOY" -c dev -- cat /workspace/infra/user-cert-install.sh > "$script"
+        POLAR_CERT_NEXT="bin/polar-dev forward" bash "$script" "$u"; rm -f "$script" ;;
+    forward)
+        kubectl -n polar-graph port-forward svc/polar-db-svc 7473:7473 7687:7687 >/tmp/polar-dev-$U-neo4j.log 2>&1 &
+        kubectl -n polar port-forward svc/ace-svc 8050:8050 >/tmp/polar-dev-$U-ace.log 2>&1 &
+        echo "polar-dev: Neo4j at https://localhost:7473, ACE at http://localhost:8050 (logs in /tmp/polar-dev-$U-*.log)" ;;
+    sops) copy_user_sops ;;
+    sync) copy_out polar-deploy; copy_out polar-admin; echo "polar-dev: copied polar-deploy and polar-admin to ~/.config" ;;
+    down)
+        "$0" sync
+        if [ "${2:-}" = "--purge" ]; then kubectl delete namespace "$NS"; kubectl delete clusterrolebinding "polar-dev-$U" --ignore-not-found
+        else k scale "deploy/$DEPLOY" --replicas=0; fi ;;
+    build-image) build_image "${2:-}" "${3:-}" ;;
+    *) sed -n '/^# bin\/polar-dev/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1 ;;
+esac

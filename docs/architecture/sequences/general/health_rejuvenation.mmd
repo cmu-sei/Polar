@@ -1,0 +1,76 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Built (health-and-shutdown.md); the authority branch is designed (policy-enforcement.md, stage 6), not built.
+sequenceDiagram
+    participant Kubelet
+    participant Probe as polar-healthcheck
+    participant File as liveness file
+    participant Health as HealthCheckActor
+    participant Infra as InfrastructureSupervisor
+
+    autonumber
+    Note over Health: Normal phase, tick every 30s
+    loop every tick, in every phase
+        Health->>Health: evaluate Cassini, graph, certs
+        Health->>File: write status, timestamp, phase
+    end
+
+    loop every 30s after 150s initial delay
+        Kubelet->>Probe: exec
+        Probe->>File: read
+        Note over Probe: freshness only:<br/>file parses and is younger than 90s
+        Probe-->>Kubelet: exit 0
+    end
+
+    Note over Health: own cert TTL below 300s
+    Health->>Health: phase = WaitingForDeps
+    Health->>File: write (WaitingForDeps)
+    Note over Health: dependency certs healthy
+    Health->>Health: phase = Jittering, random delay in 180s window
+    Health->>File: write (Jittering), file stays fresh
+    Health->>Infra: HealthVerdict::Rejuvenate
+    Note over Infra: begin_shutdown, see shutdown_pipeline
+    loop every tick during the drain
+        Health->>File: write (shutting_down), probe keeps passing
+    end
+
+    alt hard deadline
+        Note over Health: own cert below 60s, graph or Cassini deadline
+        Health->>Infra: HealthVerdict::Unhealthy(reason)
+        Note over Infra: begin_shutdown, same orderly path
+    end
+
+    rect rgb(235, 219, 178)
+    alt DESIGNED (policy-enforcement.md, stage 6): the authority aged out
+        Note over Health: no verified message from the credentials agent for POLAR_AUTHORITY_MAX_AGE_SECS (90 min),<br/>after the degraded window in which the cached policy kept applying
+        Health->>Infra: HealthVerdict::Unhealthy("no authority update heard for 90 minutes")
+        Note over Infra: begin_shutdown, exit 1: the Job's new pod waits in init for the credentials agent
+    end
+    end
+
+    alt process wedged
+        Note over Health,File: nothing in-process runs, file goes stale
+        Kubelet->>Probe: exec
+        Probe->>File: read
+        Probe-->>Kubelet: exit 1 (stale)
+        Note over Kubelet: after 2 failures: SIGTERM,<br/>then SIGKILL after the grace period
+    end

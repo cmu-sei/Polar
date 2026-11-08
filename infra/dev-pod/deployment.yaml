@@ -1,0 +1,119 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# The dev container (nix-container-lib's start.nu) with no terminal attached: CONTAINER_HEADLESS=1 keeps it running with its
+# services (the Nix daemon, dropbear on 2223) and a shell starts for each SSH login, with the container's environment.
+# bin/polar-dev sets the user (CREATE_USER/UID/GID), the image, and the state mounts under the user's home.
+#
+# The Nix store is a volume, seeded from the image's own store by the init container: once, and again when the image is
+# another one (its store holds other paths), since its /bin and /etc point at store paths only its own store has (a rebuilt image starts from its store again;
+# what was built since is fetched or rebuilt).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polar-dev
+  labels: { app: polar-dev }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: polar-dev }
+  template:
+    metadata:
+      labels: { app: polar-dev }
+    spec:
+      serviceAccountName: polar-dev
+      terminationGracePeriodSeconds: 10
+      # The pod runs as root (start.nu makes the user and drops to them for each login); the volumes' group is the user's, so
+      # the mounted key is readable to them.
+      securityContext: { fsGroup: 1000 }
+      initContainers:
+        - name: seed
+          image: polar-dev
+          imagePullPolicy: Always
+          command: ["/bin/nu", "-c"]
+          args:
+            - |
+              # Which image this is: its store's paths, so an image that differs in any package is another one.
+              let image = (ls /nix/store | get name | sort | str join (char nl) | hash sha256)
+              let seeded = (if ("/seed/.polar-dev-image" | path exists) { open --raw /seed/.polar-dev-image | str trim } else { "" })
+              if $seeded != $image {
+                  print $"seeding the Nix store from this image \(was: (if $seeded == '' { 'none' } else { $seeded })\)"
+                  ls -a /seed | where {|e| ($e.name | path basename) not-in ["." ".."] } | each {|e| rm -rf $e.name } | ignore
+                  ^cp -a /nix/. /seed/
+                  $image | save --force /seed/.polar-dev-image
+              }
+              # The checkout and the user's state are the user's.
+              ^chown $"($env.CREATE_UID):($env.CREATE_GID)" /workspace
+              for d in [atuin polar-admin polar-deploy cache ssh] { mkdir $"/state/($d)"; ^chown $"($env.CREATE_UID):($env.CREATE_GID)" $"/state/($d)" }
+              ^chmod 700 /state/ssh
+          env:
+            - { name: CREATE_UID, value: "1000" }
+            - { name: CREATE_GID, value: "1000" }
+          volumeMounts:
+            - { name: nix, mountPath: /seed }
+            - { name: workspace, mountPath: /workspace }
+            - { name: state, mountPath: /state }
+      containers:
+        - name: dev
+          image: polar-dev
+          # The tag (latest-<arch>) moves when the image is published again, and is not `latest`, so it would not be pulled again.
+          imagePullPolicy: Always
+          ports:
+            - { name: ssh, containerPort: 2223 }
+          env:
+            - { name: CREATE_USER, value: dev }
+            - { name: CREATE_UID, value: "1000" }
+            - { name: CREATE_GID, value: "1000" }
+            - { name: CONTAINER_HEADLESS, value: "1" }
+            - { name: DROPBEAR_ENABLE, value: "1" }
+            - name: AUTHORIZED_KEYS_B64
+              valueFrom: { secretKeyRef: { name: polar-dev-ssh, key: authorized_keys_b64 } }
+            # Polar's scripts: in the cluster (up.nu's browser step leaves the import to bin/polar-dev cert), the kubeconfig
+            # of this pod's own account, and the key sops decrypts the targets' secrets with.
+            - { name: POLAR_DEV_POD, value: "1" }
+            - { name: KUBECONFIG, value: /etc/polar-dev/kubeconfig }
+            - { name: DIRENV_CONFIG, value: /etc/polar-dev }
+            - { name: SOPS_AGE_SSH_PRIVATE_KEY_FILE, value: /run/sops-key/key }
+            - { name: ATUIN_SESSION_NAME, value: polar-dev }
+            # skopeo, and others, stage large files in /var/tmp, which the user cannot write here; /tmp is open to all
+            # (start.nu makes it 1777), and TMPDIR is what they take instead. Every SSH session gets it too.
+            - { name: TMPDIR, value: /tmp }
+          # What the scheduler sets aside for it; no limits, so it can use all of a node's CPUs and memory, as a machine of
+          # your own would (a nix build wants both). On a cluster shared with others, add limits here.
+          resources:
+            requests: { cpu: "2", memory: 8Gi }
+          volumeMounts:
+            - { name: nix, mountPath: /nix }
+            - { name: workspace, mountPath: /workspace }
+            - { name: kubeconfig, mountPath: /etc/polar-dev, readOnly: true }
+            - { name: sops-key, mountPath: /run/sops-key, readOnly: true }
+      volumes:
+        - name: nix
+          persistentVolumeClaim: { claimName: polar-dev-nix }
+        - name: workspace
+          persistentVolumeClaim: { claimName: polar-dev-workspace }
+        - name: state
+          persistentVolumeClaim: { claimName: polar-dev-state }
+        - name: kubeconfig
+          configMap: { name: polar-dev-kubeconfig, items: [{ key: kubeconfig, path: kubeconfig }, { key: direnv.toml, path: direnv.toml }] }
+        - name: sops-key
+          secret: { secretName: polar-dev-sops, defaultMode: 0440 }

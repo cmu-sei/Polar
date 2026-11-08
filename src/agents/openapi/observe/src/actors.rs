@@ -1,8 +1,32 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::BROKER_CLIENT_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use cassini_types::WireTraceCtx;
+use openapi_common::AppData;
 use polar::SupervisorMessage;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::Actor;
@@ -13,12 +37,9 @@ use ractor::SupervisionEvent;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use reqwest::Client;
-use std::sync::Arc;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::warn;
-use openapi_common::AppData;
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
@@ -50,30 +71,19 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // --- NEW: healthcheck wiring ---
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: false,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-                prepare_shutdown_port,
-            },
+            HealthCheckArgs::new(false, 300, dep_cert_endpoints),
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
         // --- end NEW ---
 
         let state = ObserverSupervisorState {
@@ -96,8 +106,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
+                delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+                answers: None,
             },
             myself.clone().into(),
         )
@@ -125,13 +135,6 @@ impl Actor for ObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            // --- NEW ---
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(_) => {}
             SupervisorMessage::ForceExit => {
                 warn!("drain window elapsed, exiting now");
@@ -147,8 +150,9 @@ impl Actor for ObserverSupervisor {
                         let args = ApiObserverArgs {
                             openapi_endpoint: state.openapi_endpoint.clone(),
                         };
-                        if let Err(e) = Actor::spawn_linked(
-                            Some("polar.web.observer".to_string()),
+                        // On every registration, as after a session the broker ended: one still running is kept.
+                        if let Err(e) = polar::spawn_linked_unless_running(
+                            "polar.web.observer",
                             ApiObserver,
                             args,
                             myself.get_cell(),
@@ -161,7 +165,9 @@ impl Actor for ObserverSupervisor {
                     ClientEvent::TransportError { reason } => {
                         warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
                         // --- NEW ---
-                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                        let _ = state
+                            .healthcheck
+                            .cast(HealthCheckMessage::CassiniDisconnected);
                         // --- end NEW ---
                     }
                     _ => (),
@@ -192,9 +198,10 @@ impl Actor for ObserverSupervisor {
                     state.draining = true;
                     info!("entering drain window before exiting for rejuvenation");
                     let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
                         .await;
                 }
                 // --- end NEW ---
@@ -213,9 +220,10 @@ impl Actor for ObserverSupervisor {
                     state.draining = true;
                     warn!("entering drain window before exit");
                     let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
                         .await;
                 }
             }
@@ -305,11 +313,11 @@ impl Actor for ApiObserver {
                         let client = where_is(BROKER_CLIENT_NAME.to_owned())
                             .expect("Expected to find TCP client");
 
-                        client.send_message(TcpClientMessage::Publish {
-                            topic: "polar.web.consumer".to_string(),
-                            payload: payload.to_vec(),
-                            trace_ctx: WireTraceCtx::from_current_span(),
-                        })?;
+                        client.send_message(TcpClientMessage::publish(
+                            "polar.web.consumer".to_string(),
+                            payload.to_vec(),
+                            WireTraceCtx::from_current_span(),
+                        ))?;
                     }
                     // BUG FIX: was `Err(_) => todo!()` -- a live panic on
                     // any malformed OpenAPI response. Now returns an error

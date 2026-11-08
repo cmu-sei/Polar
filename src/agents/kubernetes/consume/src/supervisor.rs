@@ -1,33 +1,54 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::BROKER_CLIENT_NAME;
 use crate::GraphOperable;
-use cassini_client::OfflineBehavior;
-use cassini_client::PublishRequest;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
-use kube_common::KUBERNETES_DISCOVERY_QUERY;
-use kube_common::RawKubeEvent;
 use kube_common::{
     KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_DISCOVERY_ANNOUNCE,
-    RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    KUBERNETES_DISCOVERY_QUERY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
     flux::{kustomization::Kustomization, oci_repositories::OciRepository},
 };
+use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
 use polar::DiscoverySourceRef;
 use polar::ProvenanceEvent;
 use polar::RkyvError;
-use polar::SupervisorMessage;
 use polar::cassini::CassiniClient;
-use polar::cassini::SubscribeRequest;
-use polar::cassini::TcpClient;
+use polar::cassini::{OfflineBehavior, PublishRequest, TcpClient};
 use polar::graph::controller::{
     GraphController, GraphControllerActor, GraphControllerArgs, GraphControllerMsg, GraphOp,
     GraphSignal, IntoGraphKey,
 };
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
+use polar_agent_builder::{
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
+};
 use polar_operator_common::PolarAgent;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -37,16 +58,40 @@ use ractor::concurrency::Duration;
 use ractor::{Actor, OutputPort};
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
+
+/// How long the infrastructure supervisor gives this agent to drain: the drain
+/// window and the graph controller's stop (up to 30 s), plus a margin. If it is
+/// not done by then the process exits 1 regardless.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_WINDOW_SECS + 30 + 10);
+
+/// This supervisor's own message type. The shared `polar::SupervisorMessage`
+/// cannot carry the two infrastructure signals (respawn, prepare-shutdown)
+/// without `polar-agent-builder` depending back on `polar`, so, like
+/// kube-observer and jira-processor, the consumer defines exactly the
+/// messages it handles.
+pub enum ConsumerSupervisorMessage {
+    ClientEvent {
+        event: ClientEvent,
+    },
+    GraphSignal(GraphSignal),
+    /// HealthCheckActor, a child of the InfrastructureSupervisor, terminated
+    /// cleanly for rejuvenation. The infrastructure now waits for this
+    /// supervisor to finish its own shutdown and answer with
+    /// `InfrastructureSupervisorMessage::ProceedWithShutdown`.
+    PrepareShutdown,
+    /// The drain window has elapsed. After a hard failure this exits the
+    /// process; after `PrepareShutdown` it flushes the graph controller and
+    /// completes the handshake.
+    DrainElapsed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
@@ -154,43 +199,36 @@ impl ProjectionCache {
     }
 }
 
-enum InboundTopic {
-    KubeEvents { cluster_uid: String },
-    ResolutionEvents,
-    DiscoveryAnnounce,
-    Unknown,
-}
-
-fn classify_topic(topic: &str) -> InboundTopic {
-    if topic == KUBERNETES_RESOLUTION_EVENTS {
-        return InboundTopic::ResolutionEvents;
-    }
-    if topic == KUBERNETES_DISCOVERY_ANNOUNCE {
-        return InboundTopic::DiscoveryAnnounce;
-    }
-    if let Some(cluster_uid) = topic
-        .strip_prefix("polar.kubernetes.")
-        .and_then(|rest| rest.strip_suffix(".events"))
-    {
-        return InboundTopic::KubeEvents {
-            cluster_uid: cluster_uid.to_string(),
-        };
-    }
-    InboundTopic::Unknown
-}
 pub struct ClusterConsumerSupervisor;
 
 pub struct ClusterConsumerSupervisorState {
     broker_client: TcpClient,
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
-    healthcheck: ActorRef<HealthCheckMessage>,
+    /// Clusters whose observers have announced themselves (or whose events have arrived).
     known_cluster_uids: HashSet<String>,
-    /// Set true once a fatal failure has triggered the bounded drain window.
-    /// While true, incoming messages are logged instead of processed, since
-    /// whatever failed (likely the graph controller) can't be trusted, and
-    /// we're exiting shortly regardless.
+    healthcheck: HealthHandle,
+    /// The real, first, genuine CryptoActor user -- shares this
+    /// supervisor's own, already-established Cassini connection and
+    /// RouterActor rather than opening a second connection. Not yet
+    /// consumed by anything in this file's own, real projection
+    /// logic; the real, upcoming, plaintext-Kubernetes-secret
+    /// encryption work (see this crate's own, real design
+    /// discussion) is the actual, first real caller.
+    /// The InfrastructureSupervisor (HealthCheckActor, RouterActor,
+    /// TcpClientActor, CryptoActor) this supervisor's builder spawned. Its
+    /// termination means the shutdown handshake is complete (or that
+    /// infrastructure died), and either way this process must exit.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    /// Set true once a drain window has begun, either after a fatal failure
+    /// or for rejuvenation. While true, incoming messages are logged instead
+    /// of processed, since whatever failed (likely the graph controller)
+    /// can't be trusted, and we're exiting shortly regardless.
     draining: bool,
+    /// Set true when the drain was started by `PrepareShutdown`, so the end
+    /// of the drain completes the handshake with the infrastructure instead
+    /// of exiting directly.
+    rejuvenating: bool,
 }
 
 impl ClusterConsumerSupervisor {
@@ -199,27 +237,24 @@ impl ClusterConsumerSupervisor {
         cache: &mut ProjectionCache,
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
-        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr>
     where
         T: DeserializeOwned + GraphOperable,
     {
-        // mismatch check is cheap and worth having because ev.cluster_uid and the cluster derived from the subscribed topic name should always agree by construction
-        // the observer stamps both from the same local value
-        if ev.cluster_uid != cluster_uid {
-            warn!(
-                "cluster_uid mismatch: message arrived on the topic for cluster {cluster_uid} \
-                 but its own payload claims {} -- trusting the topic, not the payload",
-                ev.cluster_uid
-            );
-        }
         debug!("Handling event for resource {}", ev.kind);
+        // Every event carries the identity of the cluster it was seen in, stamped by its observer.
+        let cluster_uid = ev.cluster_uid;
         let obj = from_value::<T>(ev.object)?;
+
         match ev.action.as_str() {
             RESOURCE_APPLIED_ACTION => {
-                obj.project_into_graph(graph_controller, tcp_client, cluster_uid, cache)?
+                debug!("handling RESOURCE_APPLIED_ACTION.");
+                obj.project_into_graph(graph_controller, tcp_client, &cluster_uid, cache)?
             }
-            RESOURCE_DELETED_ACTION => obj.project_delete(graph_controller, cluster_uid, cache)?,
+            RESOURCE_DELETED_ACTION => {
+                debug!("handling RESOURCE_DELETED_ACTION.");
+                obj.project_delete(graph_controller, &cluster_uid, cache)?;
+            }
             _ => warn!("Unexpected action received!! {}", ev.action),
         }
         Ok(())
@@ -233,198 +268,287 @@ impl ClusterConsumerSupervisor {
         tcp_client: &TcpClient,
         known_cluster_uids: &mut HashSet<String>,
     ) -> Result<(), ActorProcessingErr> {
-        match classify_topic(&topic) {
-            InboundTopic::KubeEvents { cluster_uid } => {
+        // determine the topic the mesasge came from, we could've gotten notified of a new resource, or been notified that
+        // some resource we saw was resolved from an external source (like a container image)
+        match topic.as_str() {
+            KUBERNETES_CONSUMER => {
+                // 1) Parse the raw message into your RawKubeEvent
                 let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
+
+                // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
                 match ev.kind.as_str() {
-                    "Namespace" => Self::handle_event::<Namespace>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
-                    "Node" => Self::handle_event::<Node>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
-                    "Pod" => Self::handle_event::<Pod>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
-                    "Deployment" => Self::handle_event::<Deployment>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
-                    "ReplicaSet" => Self::handle_event::<ReplicaSet>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
-                    "Job" => Self::handle_event::<Job>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
+                    "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
+                    "Deployment" => {
+                        Self::handle_event::<Deployment>(ev, cache, graph_controller, tcp_client)?
+                    }
+                    "ReplicaSet" => {
+                        Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
+                    }
+                    "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
+                    "Namespace" => {
+                        Self::handle_event::<Namespace>(ev, cache, graph_controller, tcp_client)?
+                    }
+                    "Node" => Self::handle_event::<Node>(ev, cache, graph_controller, tcp_client)?,
                     KIND_OCI_REPOSITORY => Self::handle_event::<OciRepository>(
                         ev,
                         cache,
                         graph_controller,
                         tcp_client,
-                        &cluster_uid,
                     )?,
                     KIND_KUSTOMIZATION => Self::handle_event::<Kustomization>(
                         ev,
                         cache,
                         graph_controller,
                         tcp_client,
-                        &cluster_uid,
                     )?,
-                    polar_operator_common::KIND => Self::handle_event::<PolarAgent>(
-                        ev,
-                        cache,
-                        graph_controller,
-                        tcp_client,
-                        &cluster_uid,
-                    )?,
+                    polar_operator_common::KIND => {
+                        Self::handle_event::<PolarAgent>(ev, cache, graph_controller, tcp_client)?
+                    }
                     _ => warn!("Unexpected resource type {}", ev.kind),
                 }
             }
-            InboundTopic::ResolutionEvents => {
+            KUBERNETES_RESOLUTION_EVENTS => {
                 let ev = rkyv::from_bytes::<ProvenanceEvent, RkyvError>(&payload)?;
+                // Only a pod container's resolution is projected; every other event is ignored.
                 if let ProvenanceEvent::OCIArtifactResolved {
-                    digest, source_ref, ..
+                    digest,
+                    source_ref:
+                        DiscoverySourceRef::KubernetesPodContainer {
+                            pod_uid,
+                            container_name,
+                            cluster_uid,
+                            ..
+                        },
+                    ..
                 } = ev
                 {
-                    if let DiscoverySourceRef::KubernetesPodContainer {
+                    debug!(
+                        "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
+                    );
+                    let container_k = KubeNodeKey::PodContainer {
                         pod_uid,
-                        container_name,
+                        name: container_name,
                         cluster_uid,
-                        ..
-                    } = source_ref
-                    {
-                        debug!(
-                            "pod {pod_uid} container {container_name} resolved with digest {digest}, updating graph"
-                        );
-                        let container_k = KubeNodeKey::PodContainer {
-                            pod_uid,
-                            name: container_name,
-                            cluster_uid,
-                        };
-                        let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
-                        let op = GraphOp::EnsureEdge {
-                            from: container_k.into_key(),
-                            to: artifact_k.into_key(),
-                            rel_type: "USES_IMAGE".to_string(),
-                            props: vec![],
-                        };
-                        graph_controller.send_message(GraphControllerMsg::Op(op))?;
-                    }
+                    };
+                    let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
+                    let op = GraphOp::EnsureEdge {
+                        from: container_k.into_key(),
+                        to: artifact_k.into_key(),
+                        rel_type: "USES_IMAGE".to_string(),
+                        props: vec![],
+                    };
+                    graph_controller.send_message(GraphControllerMsg::Op(op))?;
                 }
             }
-            InboundTopic::DiscoveryAnnounce => {
+            KUBERNETES_DISCOVERY_ANNOUNCE => {
                 let announced_uid = String::from_utf8(payload).map_err(|e| {
                     ActorProcessingErr::from(format!("non-utf8 discovery.announce payload: {e}"))
                 })?;
                 if known_cluster_uids.insert(announced_uid.clone()) {
-                    info!("Discovered cluster {announced_uid}, subscribing to its events topic");
-                    tcp_client.subscribe(SubscribeRequest {
-                        topic: kube_common::kube_events_topic(&announced_uid),
-                        trace_ctx: None,
-                    })?;
+                    info!("Discovered cluster {announced_uid}");
+                    graph_controller.send_message(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: Box::new(KubeNodeKey::Cluster { uid: announced_uid }),
+                        props: vec![],
+                    }))?;
                 } else {
                     debug!("Redundant announcement for known cluster {announced_uid}, no-op");
                 }
             }
-            InboundTopic::Unknown => warn!("Unexpected topic received: {topic}"),
+            _ => (), //ignore unhandled topics for now, we shouldn't see anything else
         }
         Ok(())
+    }
+
+    /// Builds this agent's own two, real, genuinely-owned
+    /// Subscriptions (KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS)
+    /// -- each one's own, real deliver closure reconstructs the exact
+    /// same ClientEvent::MessagePublished this agent's own, existing,
+    /// unchanged handle()/deserialize_and_dispatch logic already
+    /// expects, and forwards it to `supervisor` as the same, existing
+    /// ConsumerSupervisorMessage::ClientEvent it already handles.
+    ///
+    /// Extracted into its own, real, standalone function -- not left
+    /// inlined inside pre_start -- specifically so a real test can
+    /// exercise these two, real, exact closures directly, without
+    /// needing the real network connection pre_start itself,
+    /// separately, attempts. Mirrors this file's own, previous,
+    /// established register_kube_topics's own, real testability
+    /// design exactly; only how the results get registered with
+    /// RouterActor changed (AgentBuilder's own, real
+    /// .with_subscription(...) now owns that part).
+    fn kube_subscriptions(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Vec<Subscription> {
+        let supervisor_for_consumer = supervisor.clone();
+        let supervisor_for_resolution = supervisor.clone();
+        let supervisor_for_discovery = supervisor.clone();
+        vec![
+            Subscription::new(KUBERNETES_CONSUMER, move |incoming| {
+                let event = ClientEvent::MessagePublished {
+                    topic: incoming.topic,
+                    payload: incoming.payload,
+                    trace_ctx: incoming.trace_ctx,
+                    published_by: incoming.published_by,
+                    published_instance: incoming.published_instance,
+                };
+                if let Err(e) = supervisor_for_consumer
+                    .send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                {
+                    warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                }
+            }),
+            Subscription::new(KUBERNETES_RESOLUTION_EVENTS, move |incoming| {
+                let event = ClientEvent::MessagePublished {
+                    topic: incoming.topic,
+                    payload: incoming.payload,
+                    trace_ctx: incoming.trace_ctx,
+                    published_by: incoming.published_by,
+                    published_instance: incoming.published_instance,
+                };
+                if let Err(e) = supervisor_for_resolution
+                    .send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                {
+                    warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                }
+            }),
+            Subscription::new(KUBERNETES_DISCOVERY_ANNOUNCE, move |incoming| {
+                let event = ClientEvent::MessagePublished {
+                    topic: incoming.topic,
+                    payload: incoming.payload,
+                    trace_ctx: incoming.trace_ctx,
+                    published_by: incoming.published_by,
+                    published_instance: incoming.published_instance,
+                };
+                if let Err(e) = supervisor_for_discovery
+                    .send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                {
+                    warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                }
+            }),
+        ]
+    }
+
+    /// Schedules `DrainElapsed` after the drain window. Not awaited: the
+    /// timer runs detached, so this supervisor keeps handling (and logging)
+    /// messages while the window is open.
+    fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
+        drop(
+            myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                ConsumerSupervisorMessage::DrainElapsed
+            }),
+        );
+    }
+
+    /// Tells the broker this agent is going dark, so it stops routing
+    /// messages here. Failures are logged and do not stop the shutdown.
+    fn unsubscribe_from_topics(client: &TcpClient) {
+        for topic in [
+            KUBERNETES_CONSUMER,
+            KUBERNETES_RESOLUTION_EVENTS,
+            KUBERNETES_DISCOVERY_ANNOUNCE,
+        ] {
+            if let Err(e) = client.unsubscribe(polar::cassini::UnsubscribeRequest {
+                topic: topic.to_string(),
+                trace_ctx: None,
+            }) {
+                warn!("CONSUMER_SUPERVISOR: unsubscribe from '{topic}' failed (continuing): {e}");
+            }
+        }
     }
 }
 
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ConsumerSupervisorMessage;
     type State = ClusterConsumerSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged: the builder is made from it, so what the agent declared
+    /// (its capabilities, its budget, the self-test) is what the infrastructure is built to.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         info!("Read neo configuration successfully.");
 
-        // Build the OutputPort that HealthCheckActor fires when it wants
-        // the supervisor to prepare for shutdown. We subscribe here so
-        // that the message arrives as a SupervisorMessage::PrepareShutdown.
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
+        // The real, entire, formerly hand-rolled sequence --
+        // HealthCheckActor, RouterActor, this agent's own two,
+        // genuinely-owned topics (each bound to the real, wire-level
+        // Subscribe AgentBuilder itself now, automatically fires on
+        // ClientEvent::Registered -- see polar-agent-builder's own
+        // Subscription for the complete, real reasoning), TcpClient,
+        // and CryptoActor -- collapsed into one, real, composed call.
+        // What the graph controller makes at start for the labels this agent owns; read before the builder takes
+        // the configuration.
+        let key_indexes = configured.graph_key_indexes();
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
 
-        // Build the OutputPort that GraphControllerActor fires on every
-        // real op's outcome (canary at spawn, and every subsequent write).
+        for subscription in Self::kube_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let resources = builder
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
+            .build()
+            .await?;
+
+        // The "infrastructure -> domain" half of the respawn/shutdown
+        // protocol. Without this subscription the InfrastructureSupervisor
+        // would wait forever for a ProceedWithShutdown after rejuvenation.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ConsumerSupervisorMessage::PrepareShutdown)
+                }
+            });
+
+        // Eager graph controller spawn -- this agent's own health
+        // never genuinely needs to wait on Cassini registration
+        // first; a real Neo4j connection is entirely independent of
+        // it (the same, real reasoning credentials-agent's own
+        // supervisor already established). GraphControllerActor::pre_start
+        // only builds real pool config; it doesn't handshake, so
+        // HealthCheckMessage::GraphAvailable (not GraphConnected
+        // alone) is still what genuinely proves real connectivity.
         let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
         graph_signal_port.subscribe(myself.clone(), |signal| {
-            Some(SupervisorMessage::GraphSignal(signal))
+            Some(ConsumerSupervisorMessage::GraphSignal(signal))
         });
-
-        // Parse dep cert endpoints for this agent:
-        // kube-consumer depends on Cassini and Neo4j.
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-        ];
-
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: true,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-                prepare_shutdown_port,
-            },
+        let (graph_controller, _) = GraphControllerActor::spawn_linked(
+            Some("kubernetes.cluster.graph.controller".to_string()),
+            GraphControllerActor,
+            // The settings come from the builder's snapshot, which already judged them.
+            GraphControllerArgs::new(graph_signal_port)
+                .with_settings(
+                    polar::graph::environment::GraphSettings::from_env(&*resources.config)
+                        .map_err(ActorProcessingErr::from)?,
+                )
+                .with_key_indexes(key_indexes)
+                // The empty state-type nodes its transitions made before the fix (graph-write-path.md).
+                .with_repairs(vec![polar::graph::repair::EMPTY_STATE_TYPE_NODES]),
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
 
-        match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
-            Some(SupervisorMessage::ClientEvent { event })
+        // The encryption capability must have produced the crypto actor; nothing here uses it.
+        resources.crypto.as_ref().ok_or_else(|| {
+            ActorProcessingErr::from(
+                "with_encryption() was called but the builder returned no CryptoHandle",
+            )
+        })?;
+
+        Ok(ClusterConsumerSupervisorState {
+            broker_client: resources.tcp_client,
+            graph_controller: Some(graph_controller),
+            projection_cache: ProjectionCache::default(),
+            known_cluster_uids: HashSet::new(),
+            healthcheck: resources.healthcheck,
+            infrastructure: resources.infrastructure,
+            draining: false,
+            rejuvenating: false,
         })
-        .await
-        {
-            Ok(broker_client) => Ok(ClusterConsumerSupervisorState {
-                broker_client,
-                graph_controller: None,
-                projection_cache: ProjectionCache {
-                    entries: HashMap::new(),
-                    node_uids_by_name: HashMap::new(),
-                },
-                healthcheck,
-                draining: false,
-                known_cluster_uids: HashSet::new(),
-            }),
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
     }
 
     async fn handle(
@@ -434,124 +558,104 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::PrepareShutdown => {
-                info!("CONSUMER_SUPERVISOR: PrepareShutdown received, unsubscribing from Cassini");
-
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
-                }
-
-                // PrepareShutdown:
-                if let Err(e) =
-                    state
-                        .broker_client
-                        .unsubscribe(polar::cassini::UnsubscribeRequest {
-                            topic: KUBERNETES_DISCOVERY_ANNOUNCE.to_string(),
-                            trace_ctx: None,
-                        })
-                {
-                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
-                }
-                // Registered subscribes to this alongside discovery.announce
-                // (see below); it was previously the only one of the three
-                // subscriptions made there with no matching teardown here.
-                if let Err(e) =
-                    state
-                        .broker_client
-                        .unsubscribe(polar::cassini::UnsubscribeRequest {
-                            topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
-                            trace_ctx: None,
-                        })
-                {
-                    warn!(
-                        "CONSUMER_SUPERVISOR: unsubscribe from resolution events failed (continuing): {e}"
-                    );
-                }
-                for cluster_uid in &state.known_cluster_uids {
-                    if let Err(e) =
-                        state
-                            .broker_client
-                            .unsubscribe(polar::cassini::UnsubscribeRequest {
-                                topic: kube_common::kube_events_topic(cluster_uid),
-                                trace_ctx: None,
-                            })
-                    {
-                        warn!(
-                            "CONSUMER_SUPERVISOR: unsubscribe failed for cluster {cluster_uid} (continuing): {e}"
-                        );
-                    }
-                }
-            }
-
-            SupervisorMessage::GraphSignal(signal) => match signal {
+            ConsumerSupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                    let _ = state.healthcheck.graph_available();
                 }
                 GraphSignal::OpFailed(reason) => {
-                    let _ = state
-                        .healthcheck
-                        .cast(HealthCheckMessage::GraphOpFailed(reason));
+                    let _ = state.healthcheck.graph_op_failed(reason);
                 }
             },
 
-            SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
-                std::process::exit(1);
+            ConsumerSupervisorMessage::PrepareShutdown => {
+                if state.draining {
+                    // A hard failure already started a drain that ends in
+                    // exit(1); the handshake is moot.
+                    warn!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received while already draining; \
+                         the pending exit will end the process"
+                    );
+                } else {
+                    state.draining = true;
+                    state.rejuvenating = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
+                         unsubscribing from Cassini and entering drain window"
+                    );
+                    Self::unsubscribe_from_topics(&state.broker_client);
+                    Self::schedule_drain_end(&myself);
+                }
             }
 
-            SupervisorMessage::ClientEvent { event } => {
+            ConsumerSupervisorMessage::DrainElapsed => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: stopping graph controller and waiting for any \
+                         in-flight write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly");
+                        }
+                        Err(e) => {
+                            error!(
+                                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
+                                 within 30s, exiting anyway: {e:?}"
+                            );
+                        }
+                    }
+                }
+
+                if state.rejuvenating {
+                    // Our own children are down; let the infrastructure stop.
+                    // Its termination (handled in handle_supervisor_evt)
+                    // exits the process with a non-zero status.
+                    info!(
+                        "CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure"
+                    );
+                    if let Err(e) = state
+                        .infrastructure
+                        .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+                    {
+                        error!(
+                            "CONSUMER_SUPERVISOR: could not tell infrastructure to proceed ({e}); \
+                             exiting now"
+                        );
+                        std::process::exit(1);
+                    }
+                } else {
+                    warn!("CONSUMER_SUPERVISOR: exiting now");
+                    std::process::exit(1);
+                }
+            }
+
+            ConsumerSupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
-                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                        // AgentBuilder's own, internal lifecycle
+                        // wiring already, automatically fired the
+                        // real, wire-level Subscribe for both of
+                        // this agent's own topics the moment this
+                        // event genuinely fired -- see Subscription's
+                        // own, real doc comment. The graph controller
+                        // is spawned eagerly in pre_start now, not
+                        // here, so there is no real, conditional
+                        // spawn-on-Registered logic left at all --
+                        // only these two, real, simple health
+                        // signals remain.
+                        let _ = state.healthcheck.cassini_connected();
+                        let _ = state.healthcheck.graph_connected();
 
-                        if state.graph_controller.is_none() {
-                            let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-                            graph_signal_port.subscribe(myself.clone(), |signal| {
-                                Some(SupervisorMessage::GraphSignal(signal))
-                            });
-
-                            match GraphControllerActor::spawn_linked(
-                                Some("kubernetes.cluster.graph.controller".to_string()),
-                                GraphControllerActor,
-                                GraphControllerArgs {
-                                    signal_port: graph_signal_port,
-                                },
-                                myself.get_cell(),
-                            )
-                            .await
-                            {
-                                Ok((graph_controller, _)) => {
-                                    state.graph_controller = Some(graph_controller);
-                                    let _ =
-                                        state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-                                }
-                                Err(e) => {
-                                    error!("Error initializing graph controller! {e}");
-                                    return Err(ActorProcessingErr::from(e));
-                                }
-                            }
-                        } else {
-                            let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-                        }
-
-                        info!("Subscribing to topics...");
-
-                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
-                            topic: KUBERNETES_DISCOVERY_ANNOUNCE.into(),
-                            trace_ctx: None,
-                        }) {
-                            error!("{e}");
-                            return Err(ActorProcessingErr::from(e.to_string()));
-                        }
-
-                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
-                            topic: KUBERNETES_RESOLUTION_EVENTS.into(),
-                            trace_ctx: None,
-                        }) {
-                            error!("{e}");
-                            return Err(ActorProcessingErr::from(e.to_string()));
-                        }
-
+                        // An observer that was already running when this consumer registered announced itself
+                        // to no one: ask every observer to say again which cluster it watches.
                         info!(
                             "Requesting re-announcement from any already-running kube-observers..."
                         );
@@ -560,9 +664,11 @@ impl Actor for ClusterConsumerSupervisor {
                             trace_ctx: None,
                             payload: Vec::new(),
                             offline_behavior: OfflineBehavior::default(),
+                            share_identity: true,
                         }) {
-                            error!("{e}");
-                            return Err(ActorProcessingErr::from(e.to_string()));
+                            warn!(
+                                "CONSUMER_SUPERVISOR: discovery.query publish failed (continuing): {e}"
+                            );
                         }
                     }
 
@@ -592,16 +698,12 @@ impl Actor for ClusterConsumerSupervisor {
 
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
-                        let _ = state
-                            .healthcheck
-                            .cast(HealthCheckMessage::CassiniDisconnected);
+                        let _ = state.healthcheck.cassini_disconnected();
                     }
 
                     _ => (),
                 }
             }
-
-            SupervisorMessage::Heartbeat => {}
         }
         Ok(())
     }
@@ -627,21 +729,19 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-                // Clean termination of the healthcheck actor means the
-                // rejuvenation sequence completed -- begin the same bounded
-                // drain window as a hard failure, rather than exiting
-                // immediately, so any messages still arriving get logged.
-                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
-                    state.draining = true;
+                // The InfrastructureSupervisor is this supervisor's direct
+                // child (the builder spawned it linked); the health check
+                // is its child, not ours, so rejuvenation reaches us as
+                // PrepareShutdown, not as a termination event. Infrastructure
+                // terminating is the end of the handshake -- or infrastructure
+                // dying on its own -- and in both cases the process exits so
+                // the Job starts a new pod with fresh certs. Matched by id,
+                // since the actor is spawned unnamed.
+                if actor_cell.get_id() == state.infrastructure.get_id() {
                     info!(
-                        "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
-                         entering drain window before exiting for rejuvenation"
+                        "CONSUMER_SUPERVISOR: infrastructure terminated, exiting so the Job restarts the pod"
                     );
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
+                    std::process::exit(1);
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
@@ -654,23 +754,156 @@ impl Actor for ClusterConsumerSupervisor {
                 // Any child actor failure is fatal, but don't exit
                 // immediately -- give the mailbox loop a bounded window to
                 // keep logging any in-flight messages (handle() branches on
-                // state.draining above) before ForceExit actually exits.
+                // state.draining above) before DrainElapsed actually exits.
                 if !state.draining {
                     state.draining = true;
                     warn!(
                         "CONSUMER_SUPERVISOR: entering drain window before exit; \
                          any messages that arrive will be logged, not processed"
                     );
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
+                    Self::schedule_drain_end(&myself);
                 }
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => {}
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A minimal, real stand-in for ClusterConsumerSupervisor itself
+    /// -- genuinely receives ConsumerSupervisorMessage, just records what it
+    /// got, since this test's own, real purpose is proving
+    /// kube_subscriptions's own, two, real deliver closures
+    /// correctly reconstruct and forward ClientEvent::MessagePublished,
+    /// not re-testing this crate's own, separate, unchanged
+    /// handle()/deserialize_and_dispatch logic.
+    struct FakeSupervisor {
+        received: Arc<Mutex<Vec<ClientEvent>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeSupervisor {
+        type Msg = ConsumerSupervisorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let ConsumerSupervisorMessage::ClientEvent { event } = message {
+                self.received.lock().unwrap().push(event);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn kube_subscriptions_returns_exactly_this_agents_own_three_real_topics() {
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: Arc::new(Mutex::new(Vec::new())),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let subscriptions = ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor);
+
+        assert_eq!(subscriptions.len(), 3);
+        let topics: Vec<&str> = subscriptions.iter().map(|s| s.topic.as_str()).collect();
+        assert!(topics.contains(&KUBERNETES_CONSUMER));
+        assert!(topics.contains(&KUBERNETES_RESOLUTION_EVENTS));
+        assert!(topics.contains(&KUBERNETES_DISCOVERY_ANNOUNCE));
+    }
+
+    #[tokio::test]
+    async fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: Arc::new(Mutex::new(Vec::new())),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let set = polar_agent_builder::agent::topic_set::<crate::agent::KubeConsumer>();
+        for subscription in ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor) {
+            assert!(
+                set.allows(&subscription.topic, polar_agent_builder::Access::Subscribe),
+                "{} is not declared",
+                subscription.topic
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn each_real_deliver_closure_genuinely_forwards_a_correctly_reconstructed_client_event() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let subscriptions = ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor);
+
+        // The real, direct proof: invoke each of the two, real
+        // deliver closures directly -- no RouterActor involved at
+        // all, since this function no longer registers with one
+        // itself (AgentBuilder's own, real .with_subscription(...)
+        // does that now, separately, and is already, separately
+        // tested in polar-agent-builder's own test suite).
+        for subscription in &subscriptions {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: format!("payload for {}", subscription.topic).into_bytes(),
+                published_by: Some("kube-observer".to_string()),
+                published_instance: None,
+                trace_ctx: None,
+            });
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        for event in events.iter() {
+            match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } => {
+                    assert_eq!(payload, format!("payload for {topic}").as_bytes());
+                    assert_eq!(published_by, &Some("kube-observer".to_string()));
+                }
+                other => panic!("expected MessagePublished, got {other:?}"),
+            }
+        }
     }
 }

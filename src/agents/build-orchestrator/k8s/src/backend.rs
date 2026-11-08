@@ -1,19 +1,48 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use async_trait::async_trait;
 use kube::{Client, Config};
 use orchestrator_core::backend::{
-    BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, SubmittedJob,
+    BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, Retention, SubmittedJob,
 };
 use orchestrator_core::error::BackendError;
-use orchestrator_core::types::BuildSpec;
+use orchestrator_core::types::{BuildSpec, SourceRef};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{JobOptions, build_job_manifest, job_name_for_build};
+use crate::job::{
+    JobOptions, build_job_manifest_as, choose_account, expired, git_secret_name_for_build,
+    job_name_for_build,
+};
 
 pub struct KubernetesBackend {
     client: Client,
     /// Deployment-level job settings: namespace, CA bundle, resources.
     options: JobOptions,
+    /// Held from choosing an account to the Job existing, so two builds submitted together cannot be given the
+    /// same one. What holds an account is the Jobs in the cluster, which also survive this process.
+    accounts: tokio::sync::Mutex<()>,
 }
 
 impl KubernetesBackend {
@@ -44,7 +73,11 @@ impl KubernetesBackend {
                 Client::try_default().await?
             }
         };
-        Ok(Self { client, options })
+        Ok(Self {
+            client,
+            options,
+            accounts: tokio::sync::Mutex::new(()),
+        })
     }
 }
 
@@ -52,11 +85,39 @@ impl KubernetesBackend {
 impl BuildBackend for KubernetesBackend {
     #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
     async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
+        use k8s_openapi::ByteString;
         use k8s_openapi::api::batch::v1::Job;
-        use kube::api::{Api, PostParams};
+        use k8s_openapi::api::core::v1::Secret;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+        use std::collections::BTreeMap;
 
         let job_name = job_name_for_build(spec.build_id);
-        let manifest = build_job_manifest(spec, &self.options);
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
+
+        // The pod runs under the one ServiceAccount of a multi-instance workload, or under one of a fixed set the
+        // deployment made, the first no running job holds (the broker allows one session per identity there). The
+        // jobs the cluster has say which are held, so only the fixed set needs them listed.
+        let _account_choice = self.accounts.lock().await;
+        let exclusive = self.options.identity.is_some() && self.options.shared_account.is_none();
+        let running = if exclusive {
+            jobs.list(&ListParams::default())
+                .await
+                .map_err(|e| {
+                    BackendError::SubmissionFailed(format!(
+                        "could not list the jobs to find a free account: {e}"
+                    ))
+                })?
+                .items
+        } else {
+            Vec::new()
+        };
+        let account = choose_account(&self.options, &running).map_err(|held| {
+            BackendError::SubmissionFailed(format!(
+                "every one of the {held} ServiceAccounts for jobs is held by a running job"
+            ))
+        })?;
+        let manifest = build_job_manifest_as(spec, &self.options, account.as_deref());
 
         tracing::debug!(
             "Deploying job manifest \n {}",
@@ -64,12 +125,71 @@ impl BuildBackend for KubernetesBackend {
         );
 
         // TODO: We might want to use the final job manifest later, so maybe we Write manifest back to the supervisor ?
-        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
 
-        let job = jobs
-            .create(&PostParams::default(), &manifest)
-            .await
-            .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
+        // A git credential is a Secret of the build's own, made before the job so the pod does not wait for it.
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.options.namespace);
+        let git_secret = match (&spec.git_secret, &spec.source) {
+            (Some(credential), SourceRef::Git { .. }) => {
+                let name = git_secret_name_for_build(spec.build_id);
+                let secret = Secret {
+                    metadata: ObjectMeta {
+                        name: Some(name.clone()),
+                        labels: Some(BTreeMap::from([(
+                            "cyclops/build-id".to_string(),
+                            spec.build_id.to_string(),
+                        )])),
+                        ..Default::default()
+                    },
+                    type_: Some("Opaque".to_string()),
+                    data: Some(BTreeMap::from([
+                        (
+                            "username".to_string(),
+                            ByteString(credential.username.clone().into_bytes()),
+                        ),
+                        (
+                            "password".to_string(),
+                            ByteString(credential.password.clone().into_bytes()),
+                        ),
+                    ])),
+                    ..Default::default()
+                };
+                if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
+                    // The error is the API server's about the object, which does not repeat its data.
+                    return Err(BackendError::SubmissionFailed(format!(
+                        "could not make the build's git credential Secret: {e}"
+                    )));
+                }
+                Some(name)
+            }
+            _ => None,
+        };
+
+        let job = match jobs.create(&PostParams::default(), &manifest).await {
+            Ok(job) => job,
+            Err(e) => {
+                if let Some(name) = &git_secret {
+                    let _ = secrets.delete(name, &DeleteParams::default()).await;
+                }
+                return Err(BackendError::SubmissionFailed(e.to_string()));
+            }
+        };
+
+        // The Secret goes with the job: nothing outlives the build.
+        if let (Some(name), Some(job_uid), Some(job_name)) =
+            (&git_secret, &job.metadata.uid, &job.metadata.name)
+        {
+            let owner = serde_json::json!({"metadata": {"ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": job_name, "uid": job_uid
+            }]}});
+            if let Err(e) = secrets
+                .patch(name, &PatchParams::default(), &Patch::Merge(&owner))
+                .await
+            {
+                // A credential left behind is worse than a build that fails: take it away now.
+                tracing::error!(error = %e, secret = %name, "the build's credential could not be given to its job; deleting it");
+                let _ = secrets.delete(name, &DeleteParams::default()).await;
+            }
+        }
 
         let uid = job
             .metadata
@@ -83,6 +203,7 @@ impl BuildBackend for KubernetesBackend {
         tracing::info!(
             build_id = %spec.build_id,
             job_name = %job_name,
+            account = ?account,
             namespace = %self.options.namespace,
             "pipeline Job created"
         );
@@ -166,6 +287,55 @@ impl BuildBackend for KubernetesBackend {
 
         tracing::info!(handle = %handle, "kubernetes Job deleted for cancellation");
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn reap(&self, retention: &Retention) -> Result<Vec<String>, BackendError> {
+        use k8s_openapi::api::batch::v1::Job;
+        use kube::api::{Api, DeleteParams, ListParams, Preconditions};
+
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
+        // Only this orchestrator's own jobs: whatever else is in the namespace is not its to remove.
+        let listed = jobs
+            .list(&ListParams::default().labels("app.kubernetes.io/managed-by=build-orchestrator"))
+            .await
+            .map_err(|e| {
+                BackendError::Unreachable(format!(
+                    "could not list the jobs to remove the old ones: {e}"
+                ))
+            })?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or_default();
+
+        let mut removed = Vec::new();
+        for job in expired(&listed.items, now, retention) {
+            let (Some(name), Some(uid)) = (&job.metadata.name, &job.metadata.uid) else {
+                continue;
+            };
+            // Background, so that the Job's pods go with it (a Job deleted through the API alone leaves them), and
+            // the uid, so that a Job made again under the same name is not the one removed.
+            let params = DeleteParams {
+                preconditions: Some(Preconditions {
+                    uid: Some(uid.clone()),
+                    resource_version: None,
+                }),
+                ..DeleteParams::background()
+            };
+            match jobs.delete(name, &params).await {
+                Ok(_) => {
+                    info!(job = %name, "removed a finished job that is past its retention");
+                    removed.push(name.clone());
+                }
+                // Something else removed it first, which is the outcome wanted.
+                Err(kube::Error::Api(status)) if status.code == 404 || status.code == 409 => {}
+                Err(e) => {
+                    tracing::warn!(job = %name, error = %e, "could not remove a finished job")
+                }
+            }
+        }
+        Ok(removed)
     }
 
     async fn logs(&self, handle: &BackendJobHandle) -> Result<LogStream, BackendError> {
@@ -284,13 +454,13 @@ mod tests {
 
     #[test]
     fn limit_range_refusal_is_permanent() {
-        let msg = "Error creating: pods \"cyclops-build-x\" is forbidden: [maximum cpu usage per Container is 1, but limit is 2]".to_string();
-        assert_eq!(permanent_refusal(&[msg.clone()]), Some(msg));
+        let msg = "Error creating: pods \"build-x\" is forbidden: [maximum cpu usage per Container is 1, but limit is 2]".to_string();
+        assert_eq!(permanent_refusal(std::slice::from_ref(&msg)), Some(msg));
     }
 
     #[test]
     fn quota_refusal_is_a_wait() {
-        let msg = "Error creating: pods \"cyclops-build-x\" is forbidden: exceeded quota: jobs-quota, requested: pods=1, used: pods=4, limited: pods=4".to_string();
+        let msg = "Error creating: pods \"build-x\" is forbidden: exceeded quota: jobs-quota, requested: pods=1, used: pods=4, limited: pods=4".to_string();
         assert_eq!(permanent_refusal(&[msg]), None);
     }
 

@@ -1,15 +1,43 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
 -- infra/layers/2-services/neo4j/statefulset.dhall
 --
 -- Neo4j StatefulSet.
 -- Init containers (in order):
---   1. cert-client: requests a server TLS cert from the cert-issuer,
+--   1. polar-init: requests a server TLS cert from the cert-issuer,
 --      writes cert.pem, key.pem, ca.pem to the neo4j-tls emptyDir.
 --   2. neo4j-init: reads certs from neo4j-tls, writes them into the
 --      neo4j certificate directory structure, and copies neo4j.conf.
+--   3. neo4j-cacerts: the internal CA into Java's trust store.
+--   4. neo4j-volumes: the data, logs and certificate volumes to 7474:7474, the user Neo4j runs as. The pod's fsGroup
+--      does not reach a host-path volume (local-path, as minikube has it), whose folder stays as it was made.
 
 let kubernetes = ../../../schema/kubernetes.dhall
 let Constants  = ../../../schema/constants.dhall
 let Functions = ../../../schema/functions.dhall
+
+let Prelude =
+      https://prelude.dhall-lang.org/package.dhall
+        sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
 
 let VolumeSpec =
       { name             : Text
@@ -24,16 +52,22 @@ let render =
           , image               : Text
           , imagePullPolicy     : Text
           , namespace           : Text
+          , serviceAccountName  : Text
           , configVolume        : Text
-          , certIssuerUrl       : Text
-          , certClientImage     : Text
+          , credentialsObserverUrl : Text
+          , credentialsAgentIdentity : Text
+          , polarInitImage      : Text
+          , nuInitImage          : Text
           , certIssuerAudience  : Text
           , neo4jSans           : List Text
           , ports               : { http : Natural, https : Natural, bolt : Natural }
           , config              : { name : Text, path : Text }
           , volumes             : { data : VolumeSpec, logs : VolumeSpec, certs : VolumeSpec }
+          , placement           : Optional Functions.Placement
           }
       ) ->
+
+        let placed = Functions.placementOf v.placement
 
         let neo4jTlsVolume =
         kubernetes.Volume::{
@@ -63,6 +97,8 @@ let render =
               , kubernetes.VolumeMount::{ name = v.volumes.logs.name,  mountPath = v.volumes.logs.mountPath        }
               , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath       }
               , kubernetes.VolumeMount::{ name = "tmp",                mountPath = "/tmp"                          }
+              -- server.directories.run: /var/lib/neo4j is root's in the image, and the PID file goes here
+              , kubernetes.VolumeMount::{ name = "run",                mountPath = "/var/lib/neo4j/run"            }
               ]
 
         let initVolumeMounts =
@@ -110,6 +146,7 @@ let render =
                 }
               , kubernetes.Volume::{ name = v.configVolume, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , kubernetes.Volume::{ name = "tmp",          emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
+              , kubernetes.Volume::{ name = "run",          emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , kubernetes.Volume::{
                 , name      = "neo4j-init-script"
                 , configMap = Some kubernetes.ConfigMapVolumeSource::{
@@ -130,7 +167,7 @@ let render =
               , selector    = kubernetes.LabelSelector::{
                 , matchLabels = Some (toMap { name = v.name })
                 }
-              , serviceName = Constants.neo4jServiceName
+              , serviceName = Some Constants.neo4jServiceName
               , replicas    = Some 1
               , template    = kubernetes.PodTemplateSpec::{
                 , metadata = Some kubernetes.ObjectMeta::{
@@ -138,15 +175,34 @@ let render =
                   , labels = Some [ { mapKey = "name", mapValue = v.name } ]
                   }
                 , spec = Some kubernetes.PodSpec::{
+                  , nodeSelector = placed.nodeSelector
+                  , tolerations = placed.tolerations
+                  , serviceAccountName = Some v.serviceAccountName
+                  , automountServiceAccountToken = Some False
                   , securityContext = Some kubernetes.PodSecurityContext::{
                     , fsGroup             = Some 7474
                     , fsGroupChangePolicy = Some "OnRootMismatch"
                     }
                   , initContainers = Some
-                    [ Functions.makeCertServerInitContainer v.certIssuerUrl v.certClientImage v.neo4jSans
+                    [ Functions.makePolarInitContainer
+                        v.polarInitImage
+                        v.imagePullPolicy
+                        "neo4j-sa-token"
+                        -- Not told where cert-issuer is: its server certificate comes from the
+                        -- credentials agent. Neo4j is not a bootstrap identity.
+                        ""
+                        (Functions.credentialsAgentIssuerEnv v.credentialsObserverUrl v.credentialsAgentIdentity)
+                        "/workspace/token"
+                        [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" }
+                        , Constants.polarCaMount
+                        ]
+                        ([] : List Text)
+                        -- The credentials agent does not need Neo4j to answer, so
+                        -- getting the server certificate from it is no startup deadlock.
+                        [ "server:/etc/neo4j-tls:ecdsa-p256:${Prelude.Text.concatSep "," v.neo4jSans}" ]
                     , kubernetes.Container::{
                       , name            = "neo4j-init"
-                      , image           = Some "polar-nu-init:latest"
+                      , image           = Some v.nuInitImage
                       , imagePullPolicy = Some v.imagePullPolicy
                       , securityContext = Some kubernetes.SecurityContext::{
                         , runAsUser    = Some 0
@@ -167,11 +223,30 @@ let render =
                         }
                       , command = Some [ "/bin/sh", "-c" ]
                       , args = Some
-                      [ "JAVA_HOME=$(dirname $(dirname $(readlink -f /bin/java))) && cp $JAVA_HOME/lib/security/cacerts /var/lib/neo4j/conf/cacerts && chmod u+w /var/lib/neo4j/conf/cacerts && /bin/keytool -import -noprompt -alias polar-internal-ca -file /var/lib/neo4j/certificates/https/trusted/ca.pem -keystore /var/lib/neo4j/conf/cacerts -storepass changeit"
+                      [ "rm -f /var/lib/neo4j/conf/cacerts && /bin/keytool -import -noprompt -alias polar-internal-ca -file /var/lib/neo4j/certificates/https/trusted/ca.pem -keystore /var/lib/neo4j/conf/cacerts -storepass changeit -storetype PKCS12"
                       ]
                       , volumeMounts = Some
                         [ kubernetes.VolumeMount::{ name = v.configVolume,       mountPath = "/var/lib/neo4j/conf"        }
                         , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath     }
+                        ]
+                      }
+                    , kubernetes.Container::{
+                      , name            = "neo4j-volumes"
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some kubernetes.SecurityContext::{
+                        , runAsUser    = Some 0
+                        , runAsGroup   = Some 0
+                        , runAsNonRoot = Some False
+                        }
+                      , command = Some [ "/bin/sh", "-c" ]
+                      , args = Some
+                      [ "chown -R 7474:7474 ${v.volumes.data.mountPath} ${v.volumes.logs.mountPath} ${v.volumes.certs.mountPath}"
+                      ]
+                      , volumeMounts = Some
+                        [ kubernetes.VolumeMount::{ name = v.volumes.data.name,  mountPath = v.volumes.data.mountPath  }
+                        , kubernetes.VolumeMount::{ name = v.volumes.logs.name,  mountPath = v.volumes.logs.mountPath  }
+                        , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath }
                         ]
                       }
                     ]
@@ -191,7 +266,7 @@ let render =
                       , volumeMounts = Some (baseVolumeMounts)
                       }
                     ]
-                  , volumes = Some (baseVolumes # [ neo4jTlsVolume, neo4jSaTokenVolume ])
+                  , volumes = Some (baseVolumes # [ neo4jTlsVolume, neo4jSaTokenVolume, Constants.polarCaVolume ])
                   }
                 }
               }

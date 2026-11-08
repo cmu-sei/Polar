@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 /// Integration tests for BuildRegistryActor.
 ///
 /// These tests spin up a real actor using ractor's runtime and drive it
@@ -6,6 +29,7 @@
 /// Each test gets its own actor instance. ractor actors are lightweight
 /// enough that spawning one per test is not a meaningful overhead.
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod registry_actor {
     use chrono::Utc;
     use ractor::Actor;
@@ -124,7 +148,7 @@ mod registry_actor {
             .send_message(RegistryMessage::Transition {
                 build_id,
                 next_state: BuildState::Scheduled,
-                backend_handle: Some("cyclops-build-abc123".to_string()),
+                backend_handle: Some("build-abc123".to_string()),
                 resolved_image: Some(
                     "registry.example.com/builds/myapp@sha256:deadbeef".to_string(),
                 ),
@@ -139,10 +163,7 @@ mod registry_actor {
             .expect("record not found");
 
         assert_eq!(record.state, BuildState::Scheduled);
-        assert_eq!(
-            record.backend_handle.as_deref(),
-            Some("cyclops-build-abc123")
-        );
+        assert_eq!(record.backend_handle.as_deref(), Some("build-abc123"));
         assert_eq!(
             record.resolved_image.as_deref(),
             Some("registry.example.com/builds/myapp@sha256:deadbeef")
@@ -173,7 +194,7 @@ mod registry_actor {
             .send_message(RegistryMessage::Transition {
                 build_id,
                 next_state: BuildState::Scheduled,
-                backend_handle: Some("cyclops-build-abc123".to_string()),
+                backend_handle: Some("build-abc123".to_string()),
                 resolved_image: Some(
                     "registry.example.com/builds/myapp@sha256:deadbeef".to_string(),
                 ),
@@ -201,10 +222,7 @@ mod registry_actor {
 
         assert_eq!(record.state, BuildState::Running);
         // Prior values must survive.
-        assert_eq!(
-            record.backend_handle.as_deref(),
-            Some("cyclops-build-abc123")
-        );
+        assert_eq!(record.backend_handle.as_deref(), Some("build-abc123"));
         assert_eq!(
             record.resolved_image.as_deref(),
             Some("registry.example.com/builds/myapp@sha256:deadbeef")

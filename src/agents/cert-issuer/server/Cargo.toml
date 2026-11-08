@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 [package]
 name = "cert-issuer"
 version.workspace = true
@@ -6,9 +27,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+polar-scudo.workspace = true
 tokio = { workspace = true, features = ["test-util"]}
 x509-parser.workspace = true
 base64.workspace = true
+jwt_utils.workspace = true
 rsa.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
 uuid.workspace = true
@@ -22,15 +45,37 @@ tracing.workspace = true
 async-trait.workspace = true
 rcgen.workspace = true
 jsonwebtoken.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
 
 axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 dashmap = "6"
+hyper-util.workspace = true
 cert-issuer-common = { path = "../common" }
 polar = { path = "../../lib" }
+polar-env.workspace = true
+ractor.workspace = true
+polar-agent-builder.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
 
 [dev-dependencies]
+# The broker's test support, which these tests include, can give the broker the custody daemon's key.
+polar-custody.workspace = true
+proptest.workspace = true
 wiremock.workspace = true
 tempfile.workspace = true
 chrono.workspace = true
+# The broker's end-to-end harness (cassini/broker/tests/support), which a test runs cert-issuer against: a real broker,
+# and a client as the credentials agent asking for the record.
+cassini-broker.workspace = true
+polar-health.workspace = true
+polar-policy.workspace = true
+tracing-subscriber.workspace = true
+# The credentials agent's asker and ledger, which the same test runs as the other side of the record.
+credentials-agent-consumer = { path = "../../credentials-agent/consume" }
+# The voucher's client of cert-issuer over mTLS, and a new pod's on its token, in the test of broker restarts.
+cert-client = { path = "../client" }

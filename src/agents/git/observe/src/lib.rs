@@ -1,107 +1,75 @@
-use cassini_client::{OfflineBehavior, PublishRequest};
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+#![deny(clippy::disallowed_methods)]
+
+use crate::status::{Outcome, StatusTracker};
 use git_agent_common::GitRepositoryMessage;
-use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
-use polar::cassini::{CassiniClient, TcpClient};
+use git_agent_common::RepoObservationConfig;
+use git_agent_common::RepositorySet;
+use git_agent_common::status::{GIT_REPO_OBSERVATION_STATUS, ObservationStatus};
+use git2::{Cred, CredentialType, FetchOptions, Oid, ProxyOptions, RemoteCallbacks, Repository};
+use polar::cassini::TcpClient;
+use polar::egress::Egress;
 use polar::graph::nodes::git::RepoId;
 use polar::topics::GIT_REPOSITORY_EVENTS;
+use polar_agent_builder::CryptoClient;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr, SupervisionEvent, async_trait};
-use rkyv::{Archive, Deserialize, Serialize, rancor, to_bytes};
-use serde::Deserialize as SerdeDeserialize;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
-use git_agent_common::RepoObservationConfig;
-use git_agent_common::GitHttpCredential;
 
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
+/// How long a worker that is being replaced is given to stop: it may be in the middle of a fetch.
+const WORKER_GRACE: ractor::concurrency::Duration = ractor::concurrency::Duration::from_secs(30);
+
+pub mod agent;
+pub mod credentials;
+pub mod settings;
+pub mod status;
 pub mod supervisor;
 
 fn git_time_to_epoch_ms(t: &git2::Time) -> i64 {
     t.seconds() * 1000
 }
 
-/* ============================
- * Credentials
- * ============================
- */
-
-/// Operator-supplied per-repo credential configuration, loaded from YAML at
-/// agent startup. Keyed by normalized repo URL — see `normalize_repo_url`.
-#[derive(Debug, SerdeDeserialize)]
-pub struct GitAgentConfig {
-    pub repos: std::collections::HashMap<String, RepoConfig>,
-}
-
-#[derive(Debug, SerdeDeserialize)]
-pub struct RepoConfig {
-    pub http: Option<HttpCredentialConfig>,
-}
-
-#[derive(Debug, SerdeDeserialize)]
-pub struct HttpCredentialConfig {
-    pub token: String,
-    #[serde(default)]
-    pub username: Option<String>,
-}
-
-pub enum CredentialLookup {
-    Configured(GitHttpCredential),
-    NotConfigured,
-    /// An entry exists for this repo but contains no usable credential
-    /// (empty token). This is an operator error in the config file —
-    /// log loudly, but proceed as if unconfigured.
-    Misconfigured,
-}
-
-impl GitAgentConfig {
-    pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // No static credential config provided -- treat as zero
-                // pre-configured repos, matching credentials_for_url's
-                // existing NotConfigured/public-repo convention. This lets
-                // the agent run entirely off dynamic, scheduler-driven
-                // repo discovery without requiring a static git.yaml.
-                return Ok(GitAgentConfig {
-                    repos: std::collections::HashMap::new(),
-                });
-            }
-            Err(e) => return Err(e),
-        };
-        let parsed: RawGitAgentConfig = serde_yaml::from_str(&raw)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let repos = parsed
-            .repos
-            .into_iter()
-            .map(|(k, v)| (RepoId::normalize_repo_url(&k), v))
-            .collect();
-        Ok(GitAgentConfig { repos })
-    }
-
-    pub fn credentials_for_url(&self, normalized_url: &str) -> CredentialLookup {
-        match self.repos.get(normalized_url) {
-            None => CredentialLookup::NotConfigured,
-            Some(RepoConfig { http: None }) => CredentialLookup::NotConfigured,
-            Some(RepoConfig { http: Some(c) }) if c.token.is_empty() => {
-                CredentialLookup::Misconfigured
-            }
-            Some(RepoConfig { http: Some(c) }) => {
-                CredentialLookup::Configured(GitHttpCredential::Token {
-                    token: c.token.clone(),
-                    username: c.username.clone(),
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RawGitAgentConfig {
-    repos: std::collections::HashMap<String, RepoConfig>,
+/// The refs to read in the clone for the refs an author asked for. A bare clone's `refs/heads/main` stops
+/// moving after the clone; a fetch advances only `refs/remotes/<remote>/main`. So a configured `refs/heads/X`
+/// is read from `refs/remotes/<remote>/X`, the remote being the first one fetched (`origin` when none is
+/// named). Anything else (`refs/remotes/...`, `refs/tags/...`, a name that is not a full ref) is taken as
+/// written, and an empty list stays empty, for the default branch to be found after the clone.
+pub fn tracked_refs(remotes: &[String], refs: &[String]) -> Vec<String> {
+    let remote = remotes.first().map(String::as_str).unwrap_or("origin");
+    refs.iter()
+        .map(|r| match r.strip_prefix("refs/heads/") {
+            Some(branch) => format!("refs/remotes/{remote}/{branch}"),
+            None => r.clone(),
+        })
+        .collect()
 }
 
 /* ============================
@@ -113,6 +81,25 @@ struct RawGitAgentConfig {
  * Credential Provider
  * ============================
  */
+
+/// How a worker makes its clone: `GitRepoWorker::open_or_clone_bare` outside a test. A function pointer so that a
+/// test can put another in its place and need no network, and so that it can see what the clone is given. The last
+/// argument is the proxy to reach the repository through, if any (`polar::egress::Egress::proxy_for`).
+pub type CloneFn = fn(
+    &Path,
+    &str,
+    Arc<dyn GitCredentialProvider>,
+    Option<usize>,
+    Option<&str>,
+) -> Result<Repository, git2::Error>;
+
+/// Trusts the CA certificates in the file at `path` for every TLS connection libgit2 makes from now on, beside the
+/// ones it trusts already (OpenSSL's default locations: the system bundle): the egress CA.
+pub fn trust_ca_file(path: &str) -> Result<(), git2::Error> {
+    // SAFETY: libgit2's options are global to the process and not synchronised. This is called once, as the agent
+    // starts and before any worker exists, so no other libgit2 call runs beside it.
+    unsafe { git2::opts::set_ssl_cert_file(path) }
+}
 
 /// A source of Git credentials.
 ///
@@ -142,38 +129,9 @@ pub trait GitCredentialProvider: Send + Sync {
     ) -> Result<Cred, git2::Error>;
 }
 
-/// A credential provider backed by a `GitHttpCredential` value received
-/// from the scheduler at task dispatch time.
-///
-/// This replaces the old `StaticCredentialProvider` which loaded credentials
-/// from a file at agent startup. Credentials are now per-task, not per-agent.
-pub struct TaskCredentialProvider {
-    credential: GitHttpCredential,
-}
-
-impl TaskCredentialProvider {
-    pub fn new(credential: GitHttpCredential) -> Self {
-        Self { credential }
-    }
-}
-
-impl GitCredentialProvider for TaskCredentialProvider {
-    fn credentials(
-        &self,
-        _url: &str,
-        _username_from_url: Option<&str>,
-        allowed: CredentialType,
-    ) -> Result<Cred, git2::Error> {
-        if !allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
-            return Err(git2::Error::from_str("unsupported credential type"));
-        }
-        self.credential.clone().into_git2_cred()
-    }
-}
-
 /// A no-op credential provider for public repositories.
 ///
-/// Used when `RepoObservationConfig::credentials` is `None`.
+/// Used when `RepoObservationConfig::credential` is `None`.
 /// Git2 will attempt unauthenticated access.
 pub struct PublicRepoProvider;
 
@@ -190,19 +148,6 @@ impl GitCredentialProvider for PublicRepoProvider {
     }
 }
 
-/// Construct a credential provider from an optional `GitHttpCredential`.
-///
-/// `None` produces a `PublicRepoProvider` — unauthenticated access.
-/// `Some(credential)` produces a `TaskCredentialProvider`.
-pub fn credential_provider_for(
-    credential: Option<GitHttpCredential>,
-) -> Arc<dyn GitCredentialProvider> {
-    match credential {
-        Some(cred) => Arc::new(TaskCredentialProvider::new(cred)),
-        None => Arc::new(PublicRepoProvider),
-    }
-}
-
 /* ============================
  * Event emission
  * ============================
@@ -215,16 +160,22 @@ pub fn send_event(
     topic: String,
 ) -> Result<(), ActorProcessingErr> {
     info!("Forwarding event to topic {topic}");
-    let payload = to_bytes::<rancor::Error>(&event)?.to_vec();
+    git_agent_common::publish_event(&client, &topic, &event).map_err(ActorProcessingErr::from)
+}
 
-    let message = PublishRequest {
-        topic,
-        payload,
-        trace_ctx: None,
-        offline_behavior: OfflineBehavior::default(),
-    };
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
 
-    Ok(client.publish(message)?)
+/// Says what became of an attempt. Failing to say so is logged and never fails the attempt: the status is for
+/// people, and the observation is the work.
+fn publish_status(client: &TcpClient, status: &ObservationStatus) {
+    if let Err(e) = git_agent_common::publish_event(client, GIT_REPO_OBSERVATION_STATUS, status) {
+        warn!("could not publish the status of {}: {e}", status.repo_id);
+    }
 }
 
 /* ============================
@@ -242,21 +193,137 @@ pub fn send_event(
 /// you have already made a mistake.
 pub struct GitRepoSupervisor;
 
+/// A worker that is running, and the configuration it was started with, as announced.
+struct RunningWorker {
+    actor: ActorRef<GitRepoWorkerMsg>,
+    config: RepoObservationConfig,
+}
+
 pub struct GitRepoSupervisorState {
     cache_root: PathBuf,
-    workers: HashMap<RepoId, ActorRef<GitRepoWorkerMsg>>,
+    /// How many events each worker publishes at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
+    workers: HashMap<RepoId, RunningWorker>,
     tcp_client: TcpClient,
+    crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
+    egress: Egress,
 }
 
 pub struct GitRepoSupervisorArgs {
     cache_root: PathBuf,
+    /// How many events each worker publishes at once (`settings::PUBLISH_BATCH`).
+    pub publish_batch: usize,
     tcp_client: TcpClient,
+    /// Where each worker asks for the credential its repository names.
+    crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
+    /// The way out of the cluster: which proxy, if any, each repository is reached through.
+    egress: Egress,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
 pub enum RepoSupervisorMessage {
-    SpawnWorker { config: RepoObservationConfig },
-    StopWorker { repo_id: RepoId },
+    SpawnWorker {
+        config: RepoObservationConfig,
+    },
+    StopWorker {
+        repo_id: RepoId,
+    },
+    /// The `credentials` section was replaced: a repository that was waiting for its credential tries again.
+    CredentialsChanged,
+    /// Everything the controller wants observed. Each repository is started, or replaced if its settings
+    /// changed, or left alone if it is as announced; and if the set is `complete`, the workers of repositories
+    /// it does not name are stopped.
+    Reconcile {
+        set: RepositorySet,
+    },
+}
+
+/// What a failed attempt to start a repository's worker means for the supervisor of all of them.
+///
+/// A worker already running (the repository was announced twice) is expected. A worker that cannot
+/// start (an unreachable host, bad credentials) is that repository's problem and is logged: it
+/// used to fail the supervisor, which ended the whole agent. Nothing starts it again until the
+/// repository is announced again.
+pub fn tolerate_spawn_failure(repo_id: &RepoId, error: SpawnErr) -> Result<(), ActorProcessingErr> {
+    match error {
+        SpawnErr::ActorAlreadyRegistered(name) => {
+            debug!("worker {name} already running, ignoring duplicate discovery event");
+            Ok(())
+        }
+        SpawnErr::StartupFailed(reason) => {
+            error!("the worker for {repo_id} could not start, so it is not observed: {reason}");
+            Ok(())
+        }
+        other => Err(other.into()),
+    }
+}
+
+impl GitRepoSupervisor {
+    /// Makes sure a worker is running for `config`: starts one, or replaces the one running if the settings
+    /// changed, or leaves it alone if it is as announced.
+    async fn ensure_worker(
+        myself: &ActorRef<RepoSupervisorMessage>,
+        state: &mut GitRepoSupervisorState,
+        config: RepoObservationConfig,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!("Received SpawnWorker message");
+        let repo_id = config.repo_id.clone();
+
+        // The same announcement again is nothing to do. A changed one replaces the worker: the
+        // clone in the cache is reused, so only the settings change.
+        match state.workers.get(&repo_id) {
+            Some(running) if running.config == config => {
+                debug!("worker for {repo_id} already running with this configuration");
+                return Ok(());
+            }
+            Some(_) => {
+                info!("the configuration of {repo_id} changed; restarting its worker");
+                if let Some(old) = state.workers.remove(&repo_id)
+                    && let Err(e) = old
+                        .actor
+                        .stop_and_wait(Some("configuration changed".into()), Some(WORKER_GRACE))
+                        .await
+                {
+                    warn!("the old worker for {repo_id} did not stop in time: {e:?}");
+                }
+            }
+            None => {}
+        }
+
+        let announced = config.clone();
+        let args = GitRepoWorkerArgs {
+            proxy: state.egress.proxy_for(&config.repo_url),
+            config,
+            crypto: state.crypto.clone(),
+            clone: state.clone,
+            repo_path: state.cache_root.join(repo_id.to_string()),
+            tcp_client: state.tcp_client.clone(),
+            publish_batch: state.publish_batch,
+        };
+
+        match Actor::spawn_linked(
+            Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
+            GitRepoWorker,
+            args,
+            myself.clone().into(),
+        )
+        .await
+        {
+            Ok((actor, _)) => {
+                state.workers.insert(
+                    repo_id,
+                    RunningWorker {
+                        actor,
+                        config: announced,
+                    },
+                );
+            }
+            Err(e) => tolerate_spawn_failure(&repo_id, e)?,
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -280,7 +347,11 @@ impl Actor for GitRepoSupervisor {
 
         Ok(GitRepoSupervisorState {
             cache_root: args.cache_root,
+            publish_batch: args.publish_batch,
             tcp_client: args.tcp_client,
+            crypto: args.crypto,
+            clone: args.clone,
+            egress: args.egress,
             workers: HashMap::new(),
         })
     }
@@ -293,44 +364,43 @@ impl Actor for GitRepoSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             RepoSupervisorMessage::SpawnWorker { config } => {
-                trace!("Received SpawnWorker message");
-                let repo_id = config.repo_id.clone();
-
-                let credential_provider = credential_provider_for(config.credentials.clone());
-
-                let args = GitRepoWorkerArgs {
-                    config,
-                    credential_provider,
-                    repo_path: state.cache_root.join(repo_id.to_string()),
-                    tcp_client: state.tcp_client.clone(),
-                };
-
-                match Actor::spawn_linked(
-                    Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
-                    GitRepoWorker,
-                    args,
-                    myself.into(),
-                )
-                .await
-                {
-                    Ok((worker, _)) => {
-                        state.workers.insert(repo_id, worker);
+                Self::ensure_worker(&myself, state, config).await?;
+            }
+            RepoSupervisorMessage::Reconcile { set } => {
+                let named: std::collections::HashSet<RepoId> =
+                    set.repositories.iter().map(|c| c.repo_id.clone()).collect();
+                for config in set.repositories {
+                    Self::ensure_worker(&myself, state, config).await?;
+                }
+                if set.complete {
+                    let gone: Vec<RepoId> = state
+                        .workers
+                        .keys()
+                        .filter(|id| !named.contains(*id))
+                        .cloned()
+                        .collect();
+                    for repo_id in gone {
+                        // The clone stays in the cache: it is reused if the repository is named again.
+                        if let Some(worker) = state.workers.remove(&repo_id) {
+                            info!("{repo_id} is no longer in the set; stopping its worker");
+                            worker.actor.stop(Some("no longer in the set".into()));
+                        }
                     }
-                    Err(SpawnErr::ActorAlreadyRegistered(name)) => {
-                        debug!("worker {name} already running, ignoring duplicate discovery event");
-                        // Worth a TODO, not a blocker.
-                        // One product question worth a comment-but-not-now: is "ignore the duplicate" actually the right long-term behavior,
-                        // or should a rediscovery event for an already-running repo trigger the existing worker to refresh its config
-                        // (e.g. if credentials changed in git.yaml and the agent got restarted/reloaded,
-                        // or if max_depth/refs changed)? Right now "ignore" is correct and safe for today's test,
-                        // but if discovery events are meant to be re-emitted periodically by the gitlab processor (not just once at first sight),
-                        // silently ignoring them forever means config changes never propagate to already-running workers without a full agent restart.
-                    }
-                    Err(e) => return Err(e.into()),
                 }
             }
-            RepoSupervisorMessage::StopWorker { .. } => {
-                todo!("Implement cleanup logic for the filesystem");
+            RepoSupervisorMessage::CredentialsChanged => {
+                for worker in state.workers.values() {
+                    if let Err(e) = worker.actor.cast(GitRepoWorkerMsg::CredentialsChanged) {
+                        warn!("could not tell a worker the credentials changed: {e}");
+                    }
+                }
+            }
+            RepoSupervisorMessage::StopWorker { repo_id } => {
+                // The clone stays in the cache: it is reused if the repository is observed again.
+                match state.workers.remove(&repo_id) {
+                    Some(worker) => worker.actor.stop(Some("asked to stop".into())),
+                    None => warn!("asked to stop the worker for {repo_id}, which is not running"),
+                }
             }
         }
         Ok(())
@@ -345,11 +415,15 @@ impl Actor for GitRepoSupervisor {
         match event {
             SupervisionEvent::ActorFailed(cell, reason) => {
                 error!("worker {cell:?} failed: {reason:?}");
-                state.workers.retain(|_, w| w.get_id() != cell.get_id());
+                state
+                    .workers
+                    .retain(|_, w| w.actor.get_id() != cell.get_id());
             }
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
                 warn!("worker {cell:?} terminated: {reason:?}");
-                state.workers.retain(|_, w| w.get_id() != cell.get_id());
+                state
+                    .workers
+                    .retain(|_, w| w.actor.get_id() != cell.get_id());
             }
             _ => {}
         }
@@ -366,31 +440,51 @@ impl Actor for GitRepoSupervisor {
 pub enum GitRepoWorkerMsg {
     /// Fetch + export new data incrementally.
     Observe,
+    /// The `credentials` section was replaced. A worker waiting for its credential tries at once; any other
+    /// ignores it, since it asks for its credential again at every fetch.
+    CredentialsChanged,
 }
 
 pub struct GitRepoWorker;
 
 pub struct GitRepoWorkerState {
     config: RepoObservationConfig,
+    repo_path: PathBuf,
     tcp_client: TcpClient,
-    repo: Repository,
-    last_seen: HashMap<String, Oid>,
-    credential_provider: Arc<dyn GitCredentialProvider>,
+    crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
+    /// The proxy the repository is reached through, or none.
+    proxy: Option<String>,
+    /// Cloned or opened by the first attempt that has what it needs, not before: a repository whose
+    /// credential has not arrived has no clone yet.
+    repo: Option<Repository>,
+    /// Each ref's checkpoint: what of it was published.
+    checkpoints: HashMap<String, Checkpoint>,
+    /// How many events are published at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
+    /// The last attempt could not go ahead (its credential is missing or unusable, or the clone or the fetch
+    /// failed).
+    waiting: bool,
+    /// What the attempts so far amount to, for the status published after each.
+    status: StatusTracker,
+    /// The next scheduled attempt, replaced whenever one runs so there is never more than one.
+    next: Option<tokio::task::JoinHandle<Result<(), ractor::MessagingErr<GitRepoWorkerMsg>>>>,
 }
 
 pub struct GitRepoWorkerArgs {
     config: RepoObservationConfig,
     repo_path: PathBuf,
     tcp_client: TcpClient,
-    credential_provider: Arc<dyn GitCredentialProvider>,
+    crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
+    /// The proxy the repository is reached through, or none (`Egress::proxy_for` its URL).
+    proxy: Option<String>,
+    /// How many events are published at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
 }
 
-fn on_commit(
-    repo_id: RepoId,
-    ref_name: &str,
-    commit: &git2::Commit,
-    tcp_client: TcpClient,
-) -> Result<(), ActorProcessingErr> {
+/// The event a commit found on `ref_name` is published as.
+fn commit_event(repo_id: RepoId, ref_name: &str, commit: &git2::Commit) -> GitRepositoryMessage {
     debug!("Found commit for ref_name {ref_name} in repo {repo_id:?}");
 
     let observed_at = std::time::SystemTime::now()
@@ -398,7 +492,7 @@ fn on_commit(
         .unwrap()
         .as_millis();
 
-    let event = GitRepositoryMessage::CommitDiscovered {
+    GitRepositoryMessage::CommitDiscovered {
         ref_name: ref_name.to_string(),
         observed_at: observed_at.to_string(),
         repo: repo_id,
@@ -407,33 +501,196 @@ fn on_commit(
         time: git_time_to_epoch_ms(&commit.time()), // convert to ms to keep in line with other timestamps
         message: commit.message().unwrap_or_default().to_string(),
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-    };
-
-    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())?;
-    Ok(())
+    }
 }
 
-fn emit_ref_update(
+/// The event a ref's move from `old` to `new` is published as.
+fn ref_update_event(
     repo_id: RepoId,
     ref_name: &str,
     old: Option<Oid>,
     new: Oid,
-    tcp_client: TcpClient,
-) -> Result<(), ActorProcessingErr> {
+) -> GitRepositoryMessage {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
 
-    let event = GitRepositoryMessage::RefUpdated {
+    GitRepositoryMessage::RefUpdated {
         repo: repo_id,
         ref_name: ref_name.to_string(),
         old: old.map(|o| o.to_string()),
         new: new.to_string(),
         observed_at: now.to_string(),
-    };
+    }
+}
 
-    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())
+/// Where an observation's events go: the agent's client, or a test's stand-in.
+pub trait EventSink: Sync {
+    /// Publishes `event` on the repository events topic, waiting while the client has no room; `Err` if it was not
+    /// accepted.
+    fn publish(
+        &self,
+        event: &GitRepositoryMessage,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+impl EventSink for TcpClient {
+    async fn publish(&self, event: &GitRepositoryMessage) -> Result<(), String> {
+        git_agent_common::publish_event_when_ready(self, GIT_REPOSITORY_EVENTS, event).await
+    }
+}
+
+/// Where a ref's next walk starts: what of it was published.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// The tip last published whole, its update accepted: what the next update says the ref moved from.
+    pub tip: Option<Oid>,
+    /// The published commits that no other published commit descends from: the walk hides them, and so everything
+    /// they descend from. One commit on a linear history (the last of the last batch taken); the tip, once all of it
+    /// is published. A single last commit would do for a linear history; with merges it would hide only its own
+    /// ancestors, and a sibling branch's commits published before it would be published again.
+    pub frontier: Vec<Oid>,
+}
+
+/// What one walk of a ref will publish: its tip, and the commits its checkpoint does not cover, oldest first (reverse
+/// topological order: every commit after its parents). At most `max_depth` back from the tip; deeper ones are skipped,
+/// as before. Only their ids are held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefPlan {
+    pub tip: Oid,
+    pub oids: Vec<Oid>,
+}
+
+/// Plans a walk of `ref_name` from its checkpoint.
+pub fn plan_ref(
+    repo: &Repository,
+    ref_name: &str,
+    checkpoint: &Checkpoint,
+    max_depth: usize,
+) -> Result<RefPlan, git2::Error> {
+    let tip = repo
+        .find_reference(ref_name)?
+        .target()
+        .ok_or_else(|| git2::Error::from_str("ref has no target"))?;
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+    walk.push(tip)?;
+    for published in &checkpoint.frontier {
+        let _ = walk.hide(*published);
+    }
+    // Children before parents, nearest the tip first: the first `max_depth` are those nearest it.
+    let mut oids = Vec::new();
+    for oid in walk {
+        if oids.len() >= max_depth {
+            break;
+        }
+        oids.push(oid?);
+    }
+    oids.reverse();
+    Ok(RefPlan { tip, oids })
+}
+
+/// One batch's events, each with its commit and the commit's parents (for the checkpoint).
+pub type Batch = Vec<(GitRepositoryMessage, Oid, Vec<Oid>)>;
+
+/// The events of `oids`, in order.
+pub fn batch_events(
+    repo: &Repository,
+    repo_id: &RepoId,
+    ref_name: &str,
+    oids: &[Oid],
+) -> Result<Batch, git2::Error> {
+    oids.iter()
+        .map(|oid| {
+            let commit = repo.find_commit(*oid)?;
+            Ok((
+                commit_event(repo_id.clone(), ref_name, &commit),
+                commit.id(),
+                commit.parent_ids().collect(),
+            ))
+        })
+        .collect()
+}
+
+/// Publishes one batch, in order, and moves the checkpoint past it if the client took all of it. A batch refused
+/// leaves the checkpoint after the last batch taken: nothing is lost, and only this batch's events taken before the
+/// refusal are published again (the consumers' writes are MERGE-style, cassini-client-reliability.md, 5a).
+pub async fn publish_batch(
+    sink: &impl EventSink,
+    ref_name: &str,
+    batch: Batch,
+    checkpoint: &mut Checkpoint,
+) -> bool {
+    for (event, _, _) in &batch {
+        if let Err(e) = sink.publish(event).await {
+            error!(
+                "{ref_name}: a commit was not accepted ({e}); the next walk starts after the last batch taken"
+            );
+            return false;
+        }
+    }
+    for (_, oid, parents) in batch {
+        checkpoint
+            .frontier
+            .retain(|published| !parents.contains(published));
+        checkpoint.frontier.push(oid);
+    }
+    true
+}
+
+/// Publishes the ref's update once all its commits were taken, and moves its checkpoint to the tip. A ref already at
+/// the tip its checkpoint holds has not moved and is not reported again (as in `observe_refs`): a consumer acting on
+/// `RefUpdated` would otherwise act on every pass.
+pub async fn publish_ref_update(
+    sink: &impl EventSink,
+    repo_id: &RepoId,
+    ref_name: &str,
+    checkpoint: &mut Checkpoint,
+    tip: Oid,
+) -> bool {
+    if checkpoint.tip == Some(tip) {
+        return true;
+    }
+    if let Err(e) = sink
+        .publish(&ref_update_event(
+            repo_id.clone(),
+            ref_name,
+            checkpoint.tip,
+            tip,
+        ))
+        .await
+    {
+        error!("{ref_name}: its update was not accepted ({e}); it is published again next time");
+        return false;
+    }
+    checkpoint.tip = Some(tip);
+    checkpoint.frontier = vec![tip];
+    true
+}
+
+/// Publishes what `ref_name` has that its checkpoint does not, oldest first, in batches of `batch` events, moving the
+/// checkpoint after each batch the client took, then the ref's update; returns whether all of it was taken. What is
+/// held at once is the walk's commit ids and one batch's events, not a whole walk's (cassini-backpressure.md, the
+/// decisions reviewed with the maintainer, 17). The worker does the same a step at a time, borrowing its repository
+/// only between publishes (`Repository` is not `Sync`).
+pub async fn publish_ref(
+    sink: &impl EventSink,
+    repo: &Repository,
+    repo_id: &RepoId,
+    ref_name: &str,
+    checkpoint: &mut Checkpoint,
+    max_depth: usize,
+    batch: usize,
+) -> Result<bool, git2::Error> {
+    let plan = plan_ref(repo, ref_name, checkpoint, max_depth)?;
+    for chunk in plan.oids.chunks(batch.max(1)) {
+        let events = batch_events(repo, repo_id, ref_name, chunk)?;
+        if !publish_batch(sink, ref_name, events, checkpoint).await {
+            return Ok(false);
+        }
+    }
+    Ok(publish_ref_update(sink, repo_id, ref_name, checkpoint, plan.tip).await)
 }
 
 impl GitRepoWorker {
@@ -470,14 +727,22 @@ impl GitRepoWorker {
         callbacks
     }
 
+    /// What a clone or a fetch is given: the credentials, the depth, and the proxy to go through, if any. With none,
+    /// libgit2 connects directly: it is not told to look for one, so the process environment never decides.
     fn build_fetch_options(
         provider: Arc<dyn GitCredentialProvider>,
         depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> FetchOptions<'static> {
         let mut fetch_opts = FetchOptions::new();
         fetch_opts.remote_callbacks(Self::build_remote_callbacks(provider));
         if let Some(d) = depth {
             fetch_opts.depth(d as i32);
+        }
+        if let Some(proxy) = proxy {
+            let mut options = ProxyOptions::new();
+            options.url(proxy);
+            fetch_opts.proxy_options(options);
         }
         fetch_opts
     }
@@ -487,13 +752,14 @@ impl GitRepoWorker {
         repo_url: &str,
         credential_provider: Arc<dyn GitCredentialProvider>,
         shallow_depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> Result<Repository, git2::Error> {
         if repo_path.exists() {
             Repository::open_bare(repo_path)
         } else {
             let mut builder = git2::build::RepoBuilder::new();
             builder.bare(true);
-            let fetch_opts = Self::build_fetch_options(credential_provider, shallow_depth);
+            let fetch_opts = Self::build_fetch_options(credential_provider, shallow_depth, proxy);
             builder.fetch_options(fetch_opts);
             builder.clone(repo_url, repo_path)
         }
@@ -504,11 +770,12 @@ impl GitRepoWorker {
         credential_provider: Arc<dyn GitCredentialProvider>,
         remotes: &[String],
         shallow_depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> Result<(), git2::Error> {
         for remote_name in remotes {
             let mut remote = repo.find_remote(remote_name)?;
             let mut fetch_opts =
-                Self::build_fetch_options(credential_provider.clone(), shallow_depth);
+                Self::build_fetch_options(credential_provider.clone(), shallow_depth, proxy);
             remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
         }
         Ok(())
@@ -536,10 +803,9 @@ impl GitRepoWorker {
             let _ = revwalk.hide(stop);
         }
 
-        let mut depth = 0;
         let mut newest_seen: Option<Oid> = None;
 
-        for oid in revwalk {
+        for (depth, oid) in revwalk.enumerate() {
             if depth >= max_depth {
                 break;
             }
@@ -549,27 +815,193 @@ impl GitRepoWorker {
             if newest_seen.is_none() {
                 newest_seen = Some(oid);
             }
-            depth += 1;
         }
 
         Ok(newest_seen)
     }
+    /// One attempt to observe the repository: ask for the credential it names, clone it if that has not
+    /// been done, then fetch and publish. An attempt that cannot go ahead because the credential is
+    /// missing or unusable, or the clone or the fetch failed, is logged and leaves the worker waiting for the
+    /// next (the next fetch time, or the credentials changing); it does not end the worker. However it ends,
+    /// the status is published, so a person can see which it was without reading this pod's log.
+    async fn attempt(&self, state: &mut GitRepoWorkerState) {
+        let outcome = self.try_to_observe(state).await;
+        let status = state.status.record(outcome, now_ms());
+        publish_status(&state.tcp_client, &status);
+    }
+
+    async fn try_to_observe(&self, state: &mut GitRepoWorkerState) -> Outcome {
+        let provider = match credentials::resolve(&*state.crypto, &state.config).await {
+            credentials::Resolution::Ready(provider) => provider,
+            credentials::Resolution::Pending => {
+                info!(
+                    "{} is waiting for the credential it names",
+                    state.config.repo_id
+                );
+                state.waiting = true;
+                return Outcome::PendingCredential;
+            }
+            credentials::Resolution::Failed(why) => {
+                warn!("{} is not observed: {why}", state.config.repo_id);
+                state.waiting = true;
+                return Outcome::CredentialUnusable(why);
+            }
+        };
+
+        if state.repo.is_none() {
+            match (state.clone)(
+                &state.repo_path,
+                &state.config.repo_url,
+                provider.clone(),
+                state.config.shallow_depth,
+                state.proxy.as_deref(),
+            ) {
+                Ok(repo) => {
+                    if state.config.refs.is_empty() {
+                        state.config.refs = Self::resolve_default_refs(&repo);
+                        info!(
+                            "no refs configured for {:?}, defaulting to {:?}",
+                            state.config.repo_id, state.config.refs
+                        );
+                    }
+                    state.repo = Some(repo);
+                }
+                Err(e) => {
+                    error!(
+                        "{} could not be cloned, so it is not observed yet: {e}",
+                        state.config.repo_id
+                    );
+                    state.waiting = true;
+                    return Outcome::CloneFailed(e.message().to_string());
+                }
+            }
+        }
+
+        // Fetched, each ref is walked and published a batch at a time, oldest first, its checkpoint moving after each
+        // batch taken (`publish_ref`).
+        let repo_id = state.config.repo_id.clone();
+        let mut observed = {
+            let Some(repo) = state.repo.as_ref() else {
+                return Outcome::CloneFailed("no clone".into());
+            };
+            Self::fetch_with_optional_depth(
+                repo,
+                provider.clone(),
+                &state.config.remotes,
+                state.config.shallow_depth,
+                state.proxy.as_deref(),
+            )
+        };
+        if observed.is_ok() {
+            // The repository is borrowed only between publishes: it is not Sync, and this future must be Send.
+            'refs: for ref_name in state.config.refs.clone() {
+                let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                let plan = match state.repo.as_ref() {
+                    Some(repo) => plan_ref(repo, &ref_name, checkpoint, state.config.max_depth),
+                    None => break,
+                };
+                let plan = match plan {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        warn!("ref {ref_name} could not be walked ({e}), skipping");
+                        continue;
+                    }
+                };
+                for chunk in plan.oids.chunks(state.publish_batch.max(1)) {
+                    let events = match state.repo.as_ref() {
+                        Some(repo) => batch_events(repo, &repo_id, &ref_name, chunk),
+                        None => break 'refs,
+                    };
+                    let events = match events {
+                        Ok(events) => events,
+                        Err(e) => {
+                            observed = Err(e);
+                            break 'refs;
+                        }
+                    };
+                    let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                    if !publish_batch(&state.tcp_client, &ref_name, events, checkpoint).await {
+                        continue 'refs;
+                    }
+                }
+                let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                publish_ref_update(&state.tcp_client, &repo_id, &ref_name, checkpoint, plan.tip)
+                    .await;
+            }
+        }
+        match observed {
+            Ok(()) => {
+                state.waiting = false;
+                Outcome::Observed {
+                    tips: state
+                        .checkpoints
+                        .iter()
+                        .filter_map(|(name, checkpoint)| {
+                            Some((name.clone(), checkpoint.tip?.to_string()))
+                        })
+                        .collect(),
+                }
+            }
+            Err(e) => {
+                // The worker stays: a remote that is down for a while is the ordinary case, and the next
+                // attempt fetches again from where this one stopped.
+                error!(
+                    "{} could not be fetched, so it is not up to date: {e}",
+                    state.config.repo_id
+                );
+                state.waiting = true;
+                Outcome::FetchFailed(e.message().to_string())
+            }
+        }
+    }
+
+    /// As [`observe_refs`](Self::observe_refs), moving `last_seen` to every tip at once.
     pub fn observe_repository<F>(
         repo: &Repository,
         credential_provider: &Arc<dyn GitCredentialProvider>,
         obs_config: &RepoObservationConfig,
+        proxy: Option<&str>,
         last_seen: &mut HashMap<String, Oid>,
-        mut on_commit: F,
-        mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
+        on_commit: F,
+        on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
     ) -> Result<(), git2::Error>
     where
         F: FnMut(&str, &git2::Commit),
     {
+        let tips = Self::observe_refs(
+            repo,
+            credential_provider,
+            obs_config,
+            proxy,
+            last_seen,
+            on_commit,
+            on_ref_update,
+        )?;
+        last_seen.extend(tips);
+        Ok(())
+    }
+
+    /// Fetches, then walks each ref from its `last_seen`, calling `on_commit` for each commit found and
+    /// `on_ref_update` for the ref, and returns each ref's tip, for `last_seen` once what was found is published.
+    pub fn observe_refs<F>(
+        repo: &Repository,
+        credential_provider: &Arc<dyn GitCredentialProvider>,
+        obs_config: &RepoObservationConfig,
+        proxy: Option<&str>,
+        last_seen: &HashMap<String, Oid>,
+        mut on_commit: F,
+        mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
+    ) -> Result<Vec<(String, Oid)>, git2::Error>
+    where
+        F: FnMut(&str, &git2::Commit),
+    {
+        let mut tips = Vec::new();
         Self::fetch_with_optional_depth(
             repo,
             credential_provider.clone(),
             &obs_config.remotes,
             obs_config.shallow_depth,
+            proxy,
         )?;
 
         for ref_name in &obs_config.refs {
@@ -598,11 +1030,15 @@ impl GitRepoWorker {
                 on_commit(ref_name, commit)
             })?;
 
-            on_ref_update(ref_name, prev, tip);
-            last_seen.insert(ref_name.to_string(), tip);
+            // A ref that is where the last pass left it has not been updated, and is not reported as if it had:
+            // every consumer would otherwise have to know to ignore an event whose `old` is its `new`.
+            if prev != Some(tip) {
+                on_ref_update(ref_name, prev, tip);
+            }
+            tips.push((ref_name.to_string(), tip));
         }
 
-        Ok(())
+        Ok(tips)
     }
 }
 
@@ -618,35 +1054,24 @@ impl Actor for GitRepoWorker {
         args: GitRepoWorkerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-
-        match GitRepoWorker::open_or_clone_bare(
-            &args.repo_path,
-            &args.config.repo_url,
-            args.credential_provider.clone(),
-            args.config.shallow_depth,
-        ) {
-            Ok(repo) => {
-                let mut config = args.config;
-                if config.refs.is_empty() {
-                    config.refs = Self::resolve_default_refs(&repo);
-                    info!(
-                        "no refs configured for {:?}, defaulting to {:?}",
-                        config.repo_id, config.refs
-                    );
-                }
-                Ok(GitRepoWorkerState {
-                    credential_provider: args.credential_provider,
-                    config,
-                    tcp_client: args.tcp_client,
-                    repo,
-                    last_seen: HashMap::new(),
-                })
-            }
-            Err(e) => {
-                error!("Failed to initialize repository for observation. {e}");
-                Err(e.into())
-            }
-        }
+        // Nothing is cloned here: the repository may name a credential that has not arrived, and the first
+        // attempt (post_start) is the one that finds out.
+        let mut config = args.config;
+        config.refs = tracked_refs(&config.remotes, &config.refs);
+        Ok(GitRepoWorkerState {
+            repo_path: args.repo_path,
+            tcp_client: args.tcp_client,
+            crypto: args.crypto,
+            clone: args.clone,
+            proxy: args.proxy,
+            repo: None,
+            checkpoints: HashMap::new(),
+            publish_batch: args.publish_batch,
+            waiting: false,
+            status: StatusTracker::new(config.repo_id.clone()),
+            config,
+            next: None,
+        })
     }
 
     async fn post_start(
@@ -668,41 +1093,1095 @@ impl Actor for GitRepoWorker {
         match msg {
             GitRepoWorkerMsg::Observe => {
                 trace!("Received Observe message");
+                if let Some(earlier) = state.next.take() {
+                    earlier.abort();
+                }
 
-                GitRepoWorker::observe_repository(
-                    &state.repo,
-                    &state.credential_provider,
-                    &state.config,
-                    &mut state.last_seen,
-                    |ref_name, commit| {
-                        on_commit(
-                            state.config.repo_id.clone(),
-                            ref_name,
-                            commit,
-                            state.tcp_client.clone(),
-                        )
-                        .map_err(|e| error!("commit emission failed: {e}"))
-                        .ok();
-                    },
-                    |ref_name, old, new| {
-                        emit_ref_update(
-                            state.config.repo_id.clone(),
-                            ref_name,
-                            old,
-                            new,
-                            state.tcp_client.clone(),
-                        )
-                        .map_err(|e| error!("ref update emission failed: {e}"))
-                        .ok();
-                    },
-                )?;
+                self.attempt(state).await;
 
-                myself.send_after(
+                state.next = Some(myself.send_after(
                     std::time::Duration::from_secs(state.config.frequency),
                     || GitRepoWorkerMsg::Observe,
-                );
+                ));
+            }
+            GitRepoWorkerMsg::CredentialsChanged => {
+                if state.waiting {
+                    debug!(
+                        "the credentials changed; {} tries again",
+                        state.config.repo_id
+                    );
+                    myself.cast(GitRepoWorkerMsg::Observe)?;
+                }
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::test_support::{Answer, Recorder};
+    use cassini_client::TcpClientMessage;
+    use git_agent_common::status::ObservationState;
+    use git2::CredentialType;
+    use std::sync::Mutex;
+
+    /// Takes whatever the worker would publish, and says nothing.
+    struct Sink {
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for Sink {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    struct Rig {
+        worker: ActorRef<GitRepoWorkerMsg>,
+        crypto: Arc<Recorder>,
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+        cache: tempfile::TempDir,
+    }
+
+    /// A clone that makes no connection: it records what it was given and fails, as an unreachable host would.
+    fn refusing_clone(
+        _path: &Path,
+        url: &str,
+        provider: Arc<dyn GitCredentialProvider>,
+        _depth: Option<usize>,
+        proxy: Option<&str>,
+    ) -> Result<Repository, git2::Error> {
+        let credential_offered = provider
+            .credentials(url, None, CredentialType::USER_PASS_PLAINTEXT)
+            .is_ok();
+        CLONES.lock().unwrap().push((
+            url.to_string(),
+            credential_offered,
+            proxy.map(str::to_string),
+        ));
+        Err(git2::Error::from_str("test: there is no network"))
+    }
+
+    /// What `refusing_clone` was asked: the URL, whether the provider it was given offers a credential, and the
+    /// proxy it was given.
+    static CLONES: Mutex<Vec<(String, bool, Option<String>)>> = Mutex::new(Vec::new());
+
+    fn clones_of(url: &str) -> Vec<bool> {
+        CLONES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(u, _, _)| u == url)
+            .map(|(_, offered, _)| *offered)
+            .collect()
+    }
+
+    fn proxies_of(url: &str) -> Vec<Option<String>> {
+        CLONES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(u, _, _)| u == url)
+            .map(|(_, _, proxy)| proxy.clone())
+            .collect()
+    }
+
+    async fn start(config: RepoObservationConfig) -> Rig {
+        start_with(config, GitRepoWorker::open_or_clone_bare).await
+    }
+
+    async fn start_with(config: RepoObservationConfig, clone: CloneFn) -> Rig {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(
+            None,
+            Sink {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let crypto = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().unwrap();
+        let (worker, _) = Actor::spawn(
+            None,
+            GitRepoWorker,
+            GitRepoWorkerArgs {
+                repo_path: cache.path().join("clone"),
+                config,
+                tcp_client: TcpClient::from_actor_ref(sink),
+                crypto: crypto.clone(),
+                clone,
+                proxy: None,
+                publish_batch: crate::settings::DEFAULT_PUBLISH_BATCH,
+            },
+        )
+        .await
+        .unwrap();
+        Rig {
+            worker,
+            crypto,
+            received,
+            cache,
+        }
+    }
+
+    #[test]
+    fn a_branch_is_read_from_the_remote_tracking_ref_a_fetch_advances() {
+        let origin = vec!["origin".to_string()];
+        let refs = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            tracked_refs(&origin, &refs(&["refs/heads/main", "refs/heads/feature/x"])),
+            refs(&["refs/remotes/origin/main", "refs/remotes/origin/feature/x"])
+        );
+        // the first remote is the one fetched; none named is origin
+        assert_eq!(
+            tracked_refs(
+                &["upstream".to_string(), "origin".to_string()],
+                &refs(&["refs/heads/dev"])
+            ),
+            refs(&["refs/remotes/upstream/dev"])
+        );
+        assert_eq!(
+            tracked_refs(&[], &refs(&["refs/heads/dev"])),
+            refs(&["refs/remotes/origin/dev"])
+        );
+        // anything else is as written, and nothing stays nothing
+        assert_eq!(
+            tracked_refs(
+                &origin,
+                &refs(&["refs/remotes/origin/main", "refs/tags/v1", "HEAD", "main"])
+            ),
+            refs(&["refs/remotes/origin/main", "refs/tags/v1", "HEAD", "main"])
+        );
+        assert!(tracked_refs(&origin, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_worker_reads_the_refs_a_fetch_advances_not_the_ones_the_clone_froze() {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(origin.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.org").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        repo.commit(Some("refs/heads/main"), &sig, &sig, "first", &tree, &[])
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let url = origin.path().to_string_lossy().to_string();
+        let mut config = RepoObservationConfig::new(
+            RepoId::from_url(&url),
+            url,
+            vec!["origin".into()],
+            None,
+            vec!["refs/heads/main".into()],
+        );
+        config.frequency = 1;
+        let rig = start(config).await;
+        until("the first commit", || {
+            published_commits(&rig.received).contains(&"first".to_string())
+        })
+        .await;
+        // A second commit arrives at the origin; only a fetch into refs/remotes can show it.
+        let first = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        repo.commit(
+            Some("refs/heads/main"),
+            &sig,
+            &sig,
+            "second",
+            &tree,
+            &[&first],
+        )
+        .unwrap();
+        until("the second commit", || {
+            published_commits(&rig.received).contains(&"second".to_string())
+        })
+        .await;
+        rig.worker.stop(None);
+    }
+
+    /// The messages of the commits the worker has published so far.
+    fn published_commits(received: &Mutex<Vec<TcpClientMessage>>) -> Vec<String> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::Publish { payload, .. } => {
+                    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+                    aligned.extend_from_slice(payload);
+                    match rkyv::from_bytes::<GitRepositoryMessage, rkyv::rancor::Error>(&aligned) {
+                        Ok(GitRepositoryMessage::CommitDiscovered { message, .. }) => Some(message),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The statuses the worker has published so far, oldest first.
+    fn published_statuses(received: &Mutex<Vec<TcpClientMessage>>) -> Vec<ObservationStatus> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::Publish { topic, payload, .. }
+                    if topic == GIT_REPO_OBSERVATION_STATUS =>
+                {
+                    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+                    aligned.extend_from_slice(payload);
+                    rkyv::from_bytes::<ObservationStatus, rkyv::rancor::Error>(&aligned).ok()
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_status(rig: &Rig) -> Option<ObservationStatus> {
+        published_statuses(&rig.received).pop()
+    }
+
+    /// A repository with one commit on `main`, as a bare origin on disk, and the configuration that observes it.
+    fn local_origin(frequency: u64) -> (tempfile::TempDir, Repository, RepoObservationConfig) {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(origin.path()).unwrap();
+        {
+            let sig = git2::Signature::now("t", "t@example.org").unwrap();
+            let tree = repo
+                .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+                .unwrap();
+            repo.commit(Some("refs/heads/main"), &sig, &sig, "first", &tree, &[])
+                .unwrap();
+        }
+        repo.set_head("refs/heads/main").unwrap();
+        let url = origin.path().to_string_lossy().to_string();
+        let mut config = RepoObservationConfig::new(
+            RepoId::from_url(&url),
+            url,
+            vec!["origin".into()],
+            None,
+            vec!["refs/heads/main".into()],
+        );
+        config.frequency = frequency;
+        (origin, repo, config)
+    }
+
+    #[tokio::test]
+    async fn a_repository_waiting_for_its_credential_says_so() {
+        let rig = start(private_repo()).await;
+        until("a status", || last_status(&rig).is_some()).await;
+        settle().await;
+        let statuses = published_statuses(&rig.received);
+        assert_eq!(statuses.len(), 1, "one attempt, one status");
+        assert_eq!(statuses[0].state, ObservationState::PendingCredential);
+        assert_eq!(statuses[0].repo_id, private_repo().repo_id);
+        assert_eq!(statuses[0].reason, None);
+        assert_eq!(statuses[0].consecutive_failures, 0);
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_bound_to_another_host_is_a_failure_that_says_why() {
+        let rig = start(private_repo()).await;
+        *rig.crypto.answer.lock().unwrap() = Answer::HostNotBound;
+        until("the first attempt", || asked(&rig) >= 1).await;
+        until("a status", || last_status(&rig).is_some()).await;
+        let status = last_status(&rig).unwrap();
+        assert_eq!(status.state, ObservationState::Failing);
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("the credential cannot be used:"),
+            "{:?}",
+            status.reason
+        );
+        assert_eq!(status.consecutive_failures, 1);
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_clone_that_fails_is_a_failure_that_counts_and_the_worker_goes_on() {
+        let url = "https://localhost:1/status/r.git";
+        let rig = start_with(private_repo_at(url), refusing_clone).await;
+        *rig.crypto.answer.lock().unwrap() = Answer::Found {
+            username: "svc",
+            secret: b"tok",
+        };
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a failed clone", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Failing)
+        })
+        .await;
+        let first = last_status(&rig).unwrap();
+        assert_eq!(
+            first.reason.as_deref(),
+            Some("the clone failed: test: there is no network")
+        );
+        rig.worker.cast(GitRepoWorkerMsg::Observe).unwrap();
+        until("a second failure", || {
+            last_status(&rig).is_some_and(|s| s.consecutive_failures == 2)
+        })
+        .await;
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_is_fetched_is_observing_with_its_tips_and_the_time() {
+        let (_origin, repo, config) = local_origin(900);
+        let tip = repo.refname_to_id("refs/heads/main").unwrap().to_string();
+        let before = now_ms();
+        let rig = start(config).await;
+        until("observing", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Observing)
+        })
+        .await;
+        let status = last_status(&rig).unwrap();
+        assert_eq!(status.reason, None);
+        assert_eq!(status.consecutive_failures, 0);
+        assert!(status.last_success.unwrap() >= before);
+        assert_eq!(
+            status.tips,
+            vec![("refs/remotes/origin/main".to_string(), tip)]
+        );
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_that_fails_does_not_end_the_worker_and_the_next_attempt_recovers() {
+        let (origin, repo, config) = local_origin(900);
+        let rig = start(config).await;
+        until("observing", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Observing)
+        })
+        .await;
+        let observed_at = last_status(&rig).unwrap().last_success;
+
+        // The origin goes away: the next fetch cannot work.
+        let gone = origin.path().with_extension("gone");
+        std::fs::rename(origin.path(), &gone).unwrap();
+        rig.worker.cast(GitRepoWorkerMsg::Observe).unwrap();
+        until("a failed fetch", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Failing)
+        })
+        .await;
+        let failing = last_status(&rig).unwrap();
+        assert!(
+            failing
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("the fetch failed:"),
+            "{:?}",
+            failing.reason
+        );
+        assert_eq!(failing.consecutive_failures, 1);
+        assert_eq!(
+            failing.last_success, observed_at,
+            "the last success is still the last success"
+        );
+        assert!(
+            !failing.tips.is_empty(),
+            "where the refs were is still known"
+        );
+        assert!(
+            rig.worker.get_status() != ractor::ActorStatus::Stopped
+                && rig.worker.get_status() != ractor::ActorStatus::Stopping,
+            "a failed fetch ended the worker"
+        );
+
+        // It comes back, with a new commit; the same worker sees it.
+        std::fs::rename(&gone, origin.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.org").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let first = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        repo.commit(
+            Some("refs/heads/main"),
+            &sig,
+            &sig,
+            "second",
+            &tree,
+            &[&first],
+        )
+        .unwrap();
+        rig.worker.cast(GitRepoWorkerMsg::Observe).unwrap();
+        until("observing again", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Observing)
+        })
+        .await;
+        let recovered = last_status(&rig).unwrap();
+        assert_eq!(recovered.reason, None);
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert!(published_commits(&rig.received).contains(&"second".to_string()));
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_credentials_change_hurries_a_failing_fetch_but_not_a_healthy_repository() {
+        let (origin, _repo, config) = local_origin(900);
+        let rig = start(config).await;
+        until("observing", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Observing)
+        })
+        .await;
+        settle().await;
+        let healthy = published_statuses(&rig.received).len();
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            published_statuses(&rig.received).len(),
+            healthy,
+            "a repository that is being observed has no reason to try again because credentials changed"
+        );
+
+        let gone = origin.path().with_extension("gone");
+        std::fs::rename(origin.path(), &gone).unwrap();
+        rig.worker.cast(GitRepoWorkerMsg::Observe).unwrap();
+        until("a failed fetch", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Failing)
+        })
+        .await;
+        let failing = published_statuses(&rig.received).len();
+        // Its frequency is 900 s: only the message can make the next attempt now.
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("an attempt made because the credentials changed", || {
+            published_statuses(&rig.received).len() > failing
+        })
+        .await;
+
+        // Once it has recovered it is healthy again, and a change of credentials is nothing to it.
+        std::fs::rename(&gone, origin.path()).unwrap();
+        rig.worker.cast(GitRepoWorkerMsg::Observe).unwrap();
+        until("observing again", || {
+            last_status(&rig).is_some_and(|s| s.state == ObservationState::Observing)
+        })
+        .await;
+        settle().await;
+        let recovered = published_statuses(&rig.received).len();
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        settle().await;
+        assert_eq!(published_statuses(&rig.received).len(), recovered);
+        rig.worker.stop(None);
+    }
+
+    struct SupervisorRig {
+        supervisor: ActorRef<RepoSupervisorMessage>,
+        crypto: Arc<Recorder>,
+        _cache: tempfile::TempDir,
+    }
+
+    async fn start_supervisor() -> SupervisorRig {
+        start_supervisor_with(Egress::default()).await
+    }
+
+    async fn start_supervisor_with(egress: Egress) -> SupervisorRig {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, Sink { received }, ()).await.unwrap();
+        let crypto = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().unwrap();
+        let (supervisor, _) = Actor::spawn(
+            None,
+            GitRepoSupervisor,
+            GitRepoSupervisorArgs {
+                cache_root: cache.path().to_path_buf(),
+                publish_batch: crate::settings::DEFAULT_PUBLISH_BATCH,
+                tcp_client: TcpClient::from_actor_ref(sink),
+                crypto: crypto.clone(),
+                clone: refusing_clone,
+                egress,
+            },
+        )
+        .await
+        .unwrap();
+        SupervisorRig {
+            supervisor,
+            crypto,
+            _cache: cache,
+        }
+    }
+
+    fn private_repo_at(url: &str) -> RepoObservationConfig {
+        RepoObservationConfig::new(
+            RepoId::from_url(url),
+            url.into(),
+            vec!["origin".into()],
+            None,
+            Vec::new(),
+        )
+        .with_credential("gh")
+    }
+
+    #[tokio::test]
+    async fn the_same_announcement_again_changes_nothing_and_a_changed_one_replaces_the_worker() {
+        let rig = start_supervisor().await;
+        let asked = || rig.crypto.asked.lock().unwrap().len();
+        let config = private_repo_at("https://localhost:1/restart/r.git");
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker {
+                config: config.clone(),
+            })
+            .unwrap();
+        until("the first attempt", || asked() == 1).await;
+
+        // Announced again, unchanged: no new worker, so no new attempt.
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker {
+                config: config.clone(),
+            })
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            asked(),
+            1,
+            "an identical announcement started another attempt"
+        );
+
+        // Announced with a setting changed: the old worker is stopped and a new one starts.
+        let mut changed = config.clone();
+        changed.frequency = 901;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker { config: changed })
+            .unwrap();
+        until("the new worker's first attempt", || asked() == 2).await;
+
+        // Only the new worker is alive: telling the workers makes exactly one more attempt.
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        until("one more attempt", || asked() == 3).await;
+        settle().await;
+        assert_eq!(asked(), 3, "the replaced worker is still running");
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn repositories_are_restarted_one_at_a_time_each_by_its_own_change() {
+        let rig = start_supervisor().await;
+        let asked = || rig.crypto.asked.lock().unwrap().len();
+        let (a, b) = (
+            private_repo_at("https://localhost:1/two/a.git"),
+            private_repo_at("https://localhost:1/two/b.git"),
+        );
+        for config in [a.clone(), b.clone()] {
+            rig.supervisor
+                .cast(RepoSupervisorMessage::SpawnWorker { config })
+                .unwrap();
+        }
+        until("both first attempts", || asked() == 2).await;
+        let mut changed = a.clone();
+        changed.max_depth = 7;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker { config: changed })
+            .unwrap();
+        until("a's new worker", || asked() == 3).await;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        // a's new worker and b's untouched one: two attempts, not three.
+        until("both asked again", || asked() == 5).await;
+        settle().await;
+        assert_eq!(asked(), 5);
+        rig.supervisor.stop(None);
+    }
+
+    fn asked(rig: &Rig) -> usize {
+        rig.crypto.asked.lock().unwrap().len()
+    }
+
+    async fn until(what: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..600 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// A repository that is reached over https with a credential, at a host nothing listens on.
+    fn private_repo() -> RepoObservationConfig {
+        RepoObservationConfig::new(
+            RepoId::from_url("https://localhost:1/o/r.git"),
+            "https://localhost:1/o/r.git".into(),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .with_credential("gh")
+    }
+
+    #[tokio::test]
+    async fn a_repository_whose_credential_has_not_arrived_waits_and_clones_nothing() {
+        let rig = start(private_repo()).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        settle().await;
+        assert_eq!(asked(&rig), 1, "it asked again before anything changed");
+        assert!(!rig.cache.path().join("clone").exists());
+        assert!(
+            published_commits(&rig.received).is_empty(),
+            "no commit is published for a repository that was not cloned"
+        );
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_repository_tries_again_at_once_when_the_credentials_change() {
+        let rig = start(private_repo()).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        // Its frequency is 900 s, so only the message can make the second attempt happen now.
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a second attempt", || asked(&rig) == 2).await;
+        settle().await;
+        assert_eq!(asked(&rig), 2, "one message made more than one attempt");
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_has_arrived_is_used_for_the_clone_and_a_clone_that_fails_waits_for_the_next_attempt()
+     {
+        let url = "https://localhost:1/found/r.git";
+        let rig = start_with(private_repo_at(url), refusing_clone).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        assert!(
+            clones_of(url).is_empty(),
+            "nothing is cloned before the credential is there"
+        );
+        *rig.crypto.answer.lock().unwrap() = Answer::Found {
+            username: "svc",
+            secret: b"tok",
+        };
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a second attempt", || asked(&rig) == 2).await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap()[1],
+            ("gh".to_string(), "localhost".to_string())
+        );
+        // The clone is made with a provider that offers the credential, and fails; the worker is still alive
+        // and still waiting, so the next change tries the clone again.
+        until("the clone", || clones_of(url).len() == 1).await;
+        assert_eq!(clones_of(url), vec![true]);
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a third attempt", || asked(&rig) == 3).await;
+        until("the clone again", || clones_of(url).len() == 2).await;
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_public_repository_is_cloned_with_a_provider_that_offers_nothing() {
+        let url = "https://localhost:1/public/r.git";
+        let mut config = private_repo_at(url);
+        config.credential = None;
+        let rig = start_with(config, refusing_clone).await;
+        until("the clone", || clones_of(url).len() == 1).await;
+        assert_eq!(clones_of(url), vec![false]);
+        assert_eq!(asked(&rig), 0);
+        rig.worker.stop(None);
+    }
+
+    /// The proxy a repository is reached through follows its URL: one outside the cluster goes through the egress
+    /// proxy, the cluster's own git server does not.
+    #[tokio::test]
+    async fn a_repository_outside_the_cluster_is_cloned_through_the_proxy_and_one_inside_is_not() {
+        let proxy = "http://proxy.corp.example:3128";
+        let rig = start_supervisor_with(Egress {
+            proxy: Some(proxy.to_string()),
+            no_proxy: Some("localhost,127.0.0.1,::1,.svc,.cluster.local".to_string()),
+            ca_cert: None,
+        })
+        .await;
+        let outside = "https://github.com/egress-test/outside.git";
+        let inside = "https://polar-git-server.polar.svc.cluster.local/egress-test/inside.git";
+        for url in [outside, inside] {
+            let mut config = private_repo_at(url);
+            config.credential = None;
+            rig.supervisor
+                .send_message(RepoSupervisorMessage::SpawnWorker { config })
+                .unwrap();
+        }
+        until("both clones", || {
+            !proxies_of(outside).is_empty() && !proxies_of(inside).is_empty()
+        })
+        .await;
+        assert_eq!(proxies_of(outside)[0].as_deref(), Some(proxy));
+        assert_eq!(proxies_of(inside)[0], None);
+        rig.supervisor.stop(None);
+    }
+
+    /// libgit2 is told the proxy: a clone of a repository outside goes to it as a CONNECT to the host.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clone_given_a_proxy_connects_through_it() {
+        let (proxy, seen) = polar::egress::testing::recording_proxy().await;
+        let cache = tempfile::tempdir().unwrap();
+        let path = cache.path().join("clone");
+        let cloned = tokio::task::spawn_blocking(move || {
+            GitRepoWorker::open_or_clone_bare(
+                &path,
+                "https://outside.example.org/r.git",
+                Arc::new(PublicRepoProvider),
+                None,
+                Some(&proxy),
+            )
+            .map(|_| ())
+        })
+        .await
+        .unwrap();
+        assert!(cloned.is_err(), "the proxy refuses everything");
+        assert_eq!(
+            seen.lock().unwrap().first().map(String::as_str),
+            Some("CONNECT outside.example.org:443 HTTP/1.1")
+        );
+    }
+
+    /// In a child (EGRESS_TEST_URLS set): trusts POLAR_EGRESS_CA_CERT if it is set, then tries a clone of each URL.
+    fn clone_each() {
+        if let Some(ca) = polar::egress::testing::given("POLAR_EGRESS_CA_CERT") {
+            trust_ca_file(&ca).unwrap();
+        }
+        let urls = polar::egress::testing::given("EGRESS_TEST_URLS").unwrap();
+        for (i, url) in urls.split(',').enumerate() {
+            let cache = tempfile::tempdir().unwrap();
+            let result = GitRepoWorker::open_or_clone_bare(
+                &cache.path().join(i.to_string()),
+                &format!("{url}/r.git"),
+                Arc::new(PublicRepoProvider),
+                None,
+                None,
+            );
+            // What the clone found, for a person reading a failure: the stand-in is no git server.
+            println!(
+                "CLONE {url} {:?}",
+                result.err().map(|e| e.message().to_string())
+            );
+        }
+    }
+
+    /// The egress CA is added to what libgit2 trusts, not put in place of the roots OpenSSL finds by default. Those
+    /// are read from the process environment, so the clones are made in a child process: SSL_CERT_FILE, and
+    /// NIX_SSL_CERT_FILE, which nixpkgs' OpenSSL reads in its place (OpenSSL's own default file otherwise; in the
+    /// image, that is the system bundle).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_egress_ca_is_trusted_by_git_beside_the_image_roots() {
+        use polar::egress::testing::{TestCa, given, https_server, rerun};
+        if given("EGRESS_TEST_URLS").is_some() {
+            return clone_each();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let image = TestCa::new("image roots");
+        let corporate = TestCa::new("corporate root");
+        let image_file = image.write(dir.path(), "image.pem");
+        let corporate_file = corporate.write(dir.path(), "corporate.pem");
+        let name = "tests::the_egress_ca_is_trusted_by_git_beside_the_image_roots";
+
+        // Without the egress CA only the image's server is trusted: the test can tell.
+        let (inside, outside) = (https_server(&image).await, https_server(&corporate).await);
+        let urls = format!("{},{}", inside.url, outside.url);
+        let output = rerun(
+            name,
+            &[
+                ("SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("NIX_SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("EGRESS_TEST_URLS", &urls),
+            ],
+        )
+        .await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (inside.served() > 0, outside.served() > 0),
+            (true, false),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let (inside, outside) = (https_server(&image).await, https_server(&corporate).await);
+        let urls = format!("{},{}", inside.url, outside.url);
+        let output = rerun(
+            name,
+            &[
+                ("SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("NIX_SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("POLAR_EGRESS_CA_CERT", corporate_file.to_str().unwrap()),
+                ("EGRESS_TEST_URLS", &urls),
+            ],
+        )
+        .await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (inside.served() > 0, outside.served() > 0),
+            (true, true),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_bound_to_another_host_is_not_used_and_nothing_is_cloned() {
+        let rig = start(private_repo()).await;
+        *rig.crypto.answer.lock().unwrap() = Answer::HostNotBound;
+        until("the first attempt", || asked(&rig) >= 1).await;
+        settle().await;
+        assert!(!rig.cache.path().join("clone").exists());
+        assert!(published_commits(&rig.received).is_empty());
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_public_repository_is_observed_without_asking_for_a_credential() {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(origin.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.org").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let oid = repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "first", &tree, &[])
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let url = origin.path().to_string_lossy().to_string();
+        let config = RepoObservationConfig::new(
+            RepoId::from_url(&url),
+            url,
+            vec!["origin".into()],
+            None,
+            vec!["refs/remotes/origin/main".into()],
+        );
+        let rig = start(config).await;
+        until("the commit to be published", || {
+            !rig.received.lock().unwrap().is_empty()
+        })
+        .await;
+        assert_eq!(asked(&rig), 0);
+        assert!(rig.cache.path().join("clone").exists());
+        let _ = oid;
+        rig.worker.stop(None);
+    }
+
+    // Paused time, so that "the old timer would have fired by now" is exact and not a race.
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_made_early_replaces_the_scheduled_one_instead_of_adding_to_it() {
+        let mut config = private_repo();
+        config.frequency = 10;
+        let rig = start(config).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("the early attempt", || asked(&rig) == 2).await;
+        // The first schedule would fire at 10 s; the early attempt moved it to 13 s.
+        tokio::time::advance(std::time::Duration::from_secs(8)).await;
+        settle().await;
+        assert_eq!(asked(&rig), 2, "the earlier schedule still fired");
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        until("the rescheduled attempt", || asked(&rig) == 3).await;
+        rig.worker.stop(None);
+    }
+
+    fn set(urls: &[&str], complete: bool) -> RepositorySet {
+        RepositorySet {
+            repositories: urls.iter().map(|u| private_repo_at(u)).collect(),
+            complete,
+        }
+    }
+
+    /// How many workers there are: each one that is waiting for its credential asks once when told they changed.
+    async fn workers_in(rig: &SupervisorRig) -> usize {
+        settle().await;
+        let before = rig.crypto.asked.lock().unwrap().len();
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        settle().await;
+        rig.crypto.asked.lock().unwrap().len() - before
+    }
+
+    fn reconcile(rig: &SupervisorRig, set: RepositorySet) {
+        rig.supervisor
+            .cast(RepoSupervisorMessage::Reconcile { set })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_set_starts_a_worker_for_each_repository_in_it() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/set/a.git",
+                    "https://localhost:1/set/b.git",
+                    "https://localhost:1/set/c.git",
+                ],
+                false,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 3);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn the_same_set_again_changes_nothing_and_a_changed_repository_is_replaced() {
+        let rig = start_supervisor().await;
+        let urls = [
+            "https://localhost:1/again/a.git",
+            "https://localhost:1/again/b.git",
+        ];
+        reconcile(&rig, set(&urls, true));
+        assert_eq!(workers_in(&rig).await, 2);
+        let asks_before = rig.crypto.asked.lock().unwrap().len();
+        reconcile(&rig, set(&urls, true));
+        settle().await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap().len(),
+            asks_before,
+            "an identical set started new workers"
+        );
+        let mut changed = set(&urls, true);
+        changed.repositories[0].frequency = 901;
+        reconcile(&rig, changed);
+        settle().await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap().len(),
+            asks_before + 1,
+            "only the changed repository should have a new worker"
+        );
+        assert_eq!(
+            workers_in(&rig).await,
+            2,
+            "the replaced worker is still running"
+        );
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_complete_set_stops_the_workers_it_does_not_name() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/drop/a.git",
+                    "https://localhost:1/drop/b.git",
+                    "https://localhost:1/drop/c.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 3);
+        reconcile(&rig, set(&["https://localhost:1/drop/b.git"], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_set_stops_nothing_but_still_starts_what_is_new() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/inc/a.git",
+                    "https://localhost:1/inc/b.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 2);
+        reconcile(&rig, set(&["https://localhost:1/inc/c.git"], false));
+        assert_eq!(
+            workers_in(&rig).await,
+            3,
+            "the two it did not name must survive, and c start"
+        );
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_set_stops_everything_only_if_it_is_complete() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/empty/a.git",
+                    "https://localhost:1/empty/b.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 2);
+        reconcile(&rig, set(&[], false));
+        assert_eq!(
+            workers_in(&rig).await,
+            2,
+            "an incomplete empty set stopped workers"
+        );
+        reconcile(&rig, set(&[], true));
+        assert_eq!(workers_in(&rig).await, 0);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_was_dropped_is_observed_again_when_a_later_set_names_it() {
+        let rig = start_supervisor().await;
+        let url = "https://localhost:1/back/a.git";
+        reconcile(&rig, set(&[url], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        reconcile(&rig, set(&[], true));
+        assert_eq!(workers_in(&rig).await, 0);
+        reconcile(&rig, set(&[url], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        rig.supervisor.stop(None);
     }
 }

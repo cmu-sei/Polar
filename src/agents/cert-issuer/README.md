@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Cert Issuer
 
 Short-lived X.509 client certificates for Polar agents, minted at
@@ -188,52 +211,24 @@ cause every issuance to fail with `IDENTITY_MISMATCH`.
 
 ## Configuration
 
-Config is provided as a JSON file. The path is set via the
-`CERT_ISSUER_CONFIG` environment variable. Dhall is the source of
-truth for config authoring; JSON is what the binary reads.
+cert-issuer is a Polar agent on the agent builder (`docs/architecture/cert-issuer-isolation.md`, "Step 1"). Its
+settings are declared variables (`server/src/settings.rs`), read from its environment: one per scalar of the service
+(`CERT_ISSUER_BIND_ADDR`, `CERT_ISSUER_CA_CERT_PATH`, the lifetimes, `CERT_ISSUER_SERVER_IDENTITY`,
+`CERT_ISSUER_INTERNAL_CALLERS`, ...), and one JSON value each for the issuers (`CERT_ISSUER_ISSUERS`), the floor
+(`CERT_ISSUER_BOOTSTRAP`) and the lifetime overrides (`CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES`). The whole is
+checked before anything starts, by every rule `ServiceConfig::validate` applies. The builder's own flags list and check
+them:
 
 ```sh
-dhall-to-json --file conf/dev.dhall > /tmp/cert-issuer.json
-CERT_ISSUER_CONFIG=/tmp/cert-issuer.json cargo run --bin cert-issuer
+cargo run --bin cert-issuer -- --help       # every variable, with what it is for
+cargo run --bin cert-issuer -- --scaffold   # the same, as the configuration document the render fills
 ```
 
-A representative config (JSON):
-
-```json
-{
-  "bind_addr": "127.0.0.1:8443",
-  "ca": {
-    "ca_cert_path": "./dev/tmp/ca.crt",
-    "ca_key_path": "./dev/tmp/ca.key",
-    "default_lifetime": { "secs": 1800, "nanos": 0 }
-  },
-  "issuer": {
-    "issuer": "https://kubernetes.default.svc",
-    "audience": "polar-cert-issuer.prod",
-    "jwks_uri": "https://kubernetes.default.svc/openid/v1/jwks",
-    "workload_identity_claim": "sub",
-    "instance_binding_claim": "kubernetes.io/pod/uid",
-    "allowed_algorithms": ["RS256", "ES256", "EdDSA"],
-    "jwks_cache_ttl_min": { "secs": 30, "nanos": 0 },
-    "jwks_cache_ttl_max": { "secs": 3600, "nanos": 0 }
-  }
-}
-```
-
-Two fields have no defaults and must be set per-environment:
-
-- `issuer.issuer` — the OIDC issuer URL the cert issuer trusts
-- `issuer.audience` — the audience tokens must claim
-
-The Rust validator at startup rejects empty values for these fields.
-
-### TLS
-
-v1 does not terminate TLS. The binary serves plain HTTP on the
-configured `bind_addr`. TLS is the responsibility of whatever
-fronts it — a service mesh sidecar, ingress controller, or sidecar
-proxy. In Kubernetes, a NetworkPolicy restricting access to the
-cert issuer's pod is strongly recommended regardless.
+In a cluster the chart writes them into a ConfigMap (`infra/layers/2-services/cert-issuer/configmap.dhall`). It also
+needs its own service account token (`CERT_ISSUER_OWN_TOKEN`), on which it signs itself its client certificate through
+its own floor, and the Cassini client's settings (`BROKER_ADDR`, `TLS_CLIENT_CERT`, ...): it speaks over Cassini once
+Cassini is up, and does not depend on it. `conf/` holds the JSON file format the binary read before it moved onto the
+builder; it is no longer read.
 
 ## Local Development
 
@@ -294,6 +289,7 @@ Check the projected token's `audiences` field first.
 |-----------------------------|---------------------------------------------------------------------------------|
 | `config_test.rs`            | Config validation rejects HS256 and "none" at load time                         |
 | `oidc_test.rs`              | Signature, audience, issuer, expiry, algorithm restrictions, JWKS caching       |
+| `oidc_algorithms_test.rs`   | Every allowed algorithm, refusals, key/alg mismatch, nbf, iat, maximum lifetime |
 | `csr_test.rs`               | CSR parsing, single-SAN enforcement, exact-string identity matching             |
 | `handler_unit_test.rs`      | Outcome-to-status-code mapping and wire serialization stability                 |
 | `handler_integration_test.rs` | End-to-end ordering: CA never called when upstream validation fails           |
@@ -336,144 +332,3 @@ with explicit trigger conditions.
   model before adding GitLab as an issuer
 - **Bare-metal targets** via TPM or SPIRE node attestation
 - **CA cross-signing** for zero-downtime rotation
-
-## Testing the cert issuer locally
-
-This assumes you've already run `cert-issuer-setup` and have the cert
-issuer running against the generated dev config:
-
-```sh
-python3 -m http.server 8081 --directory dev/    # mock JWKS server
-CERT_ISSUER_CONFIG=dev/config.json cargo run --bin cert-issuer
-```
-
-The examples below assume the default dev bind address,
-`127.0.0.1:8443` — adjust if your `dev/config.json` differs.
-
-### Liveness
-
-`/liveness` has no dependencies and should always return `200` as
-long as the process is up:
-
-```sh
-curl -i http://127.0.0.1:8443/liveness
-```
-
-```
-HTTP/1.1 200 OK
-content-length: 0
-```
-
-There's no body and no JSON — liveness answers exactly one question
-("is the HTTP server responding") and nothing more.
-
-### Readiness
-
-`/readiness` reflects `ca_loaded AND jwks_usable`. Pretty-print with
-`jq`:
-
-```sh
-curl -s http://127.0.0.1:8443/readiness | jq
-```
-
-**Known behavior — cold start.** The cert issuer does not eagerly
-fetch JWKS at startup; the first fetch only happens on the first
-`/issue` request that needs to validate a token (see
-`Validator::fetch_key_for_kid`). This means immediately after
-starting the process, before you've sent any issuance request,
-readiness will correctly report `jwks_usable: false`:
-
-```sh
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8443/readiness
-# 503
-
-curl -s http://127.0.0.1:8443/readiness | jq
-# {
-#   "ready": false,
-#   "ca_loaded": true,
-#   "jwks_usable": false
-# }
-```
-
-`ca_loaded: true` here because CA materials load synchronously
-before the server starts accepting connections at all — if that had
-failed, the process wouldn't be running for you to curl in the first
-place.
-
-### Readiness after a successful issuance
-
-Send one real issuance request (see below) and readiness should flip
-to fully ready:
-
-```sh
-curl -s http://127.0.0.1:8443/readiness | jq
-# {
-#   "ready": true,
-#   "ca_loaded": true,
-#   "jwks_usable": true
-# }
-```
-
-### Simulating a JWKS outage
-
-Kill the mock JWKS server (Ctrl-C on the `python3 -m http.server`
-process) after having sent at least one successful issuance request,
-then check readiness immediately — it should still report ready,
-because the cache is still within `jwks_cache_ttl_max`:
-
-```sh
-curl -s http://127.0.0.1:8443/readiness | jq
-# still { "ready": true, ... } — cached keys are still usable
-```
-
-To actually observe `jwks_usable` flip to `false`, either wait past
-`jwks_cache_ttl_max` from `dev/config.json` (slow, only useful if
-you've set it low for testing) or send a request with an unrecognized
-`kid` while the JWKS server is down — that forces an opportunistic
-refetch, which will fail against the dead server, but per the
-readiness design this **should not** flip `jwks_usable` to false as
-long as the last successful fetch is still within its TTL window.
-This is the exact behavior the `health_state_survives_a_failed_opportunistic_refetch`
-test in `oidc_test.rs` pins down — if you see readiness flap to false
-here, that's a regression worth investigating, not expected behavior.
-
-### Issuing a cert directly with curl
-
-Useful for confirming the `/issue` wire contract without going
-through `cert-client`. Generate a CSR with openssl and inline it as
-JSON:
-
-```sh
-openssl req -new -newkey ed25519 -nodes \
-  -keyout /tmp/test.key -out /tmp/test.csr \
-  -subj "/" \
-  -addext "subjectAltName=DNS:polar-agent.polar.serviceaccount.cluster.local"
-
-CSR_JSON=$(jq -Rs . < /tmp/test.csr)
-
-curl -s -X POST http://127.0.0.1:8443/issue \
-  -H "Authorization: Bearer $(cat dev/token-agent)" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"csr_pem\": $CSR_JSON,
-    \"cert_type\": \"CLIENT\",
-    \"key_algorithm\": \"ED25519\",
-    \"extra_sans\": []
-  }" | jq
-```
-
-A successful response includes `certificate_pem`, `ca_chain_pem`,
-`session_id`, and `expires_at`. Anything else — a 401, 403, or 500 —
-comes back as `{ "outcome": "...", "detail": "..." }`; the `outcome`
-field is what `cert-client` and the readiness/liveness design both
-key off of, so it's worth checking that a deliberately bad request
-(wrong audience token, mismatched SAN, expired token) produces the
-`outcome` you expect before assuming a bug is somewhere else.
-
-### Quick reference
-
-| Endpoint      | Method | Dependency checks         | Kubernetes action on failure |
-|---------------|--------|----------------------------|-------------------------------|
-| `/liveness`   | GET    | none                        | restart the pod               |
-| `/readiness`  | GET    | `ca_loaded && jwks_usable`  | stop routing traffic, no restart |
-| `/issue`      | POST   | full OIDC + CSR + CA path   | per-request 4xx/5xx, not a probe |

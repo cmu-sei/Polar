@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Unit tests for cassini-types trace.rs types
 //! Tests constructors, conversions, and error paths
 
@@ -25,7 +48,10 @@ fn test_wire_trace_ctx_create_child() {
 
 #[test]
 fn test_wire_trace_ctx_from_span_context_valid() {
-    let trace_id = TraceId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let trace_id = TraceId::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
     let span_id = SpanId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let span_context = SpanContext::new(
         trace_id,
@@ -44,7 +70,10 @@ fn test_wire_trace_ctx_from_span_context_valid() {
 
 #[test]
 fn test_wire_trace_ctx_from_span_context_invalid() {
-    let trace_id = TraceId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let trace_id = TraceId::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
     let span_id = SpanId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let span_context = SpanContext::new(
         trace_id,
@@ -86,7 +115,8 @@ fn test_wire_trace_ctx_to_opentelemetry_context() {
 fn test_wire_trace_ctx_serialize_deserialize() {
     let original = WireTraceCtx::new_for_message();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
-    let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
+    let deserialized: WireTraceCtx =
+        rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
 
     assert_eq!(original.trace_id, deserialized.trace_id);
     assert_eq!(original.span_id, deserialized.span_id);
@@ -108,7 +138,8 @@ fn test_wire_trace_ctx_serde_serialize_deserialize() {
 fn test_wire_trace_ctx_rkyv_roundtrip() {
     let original = WireTraceCtx::new_for_message();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
-    let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
+    let deserialized: WireTraceCtx =
+        rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
 
     // Verify roundtrip produces identical output
     assert_eq!(original.trace_id, deserialized.trace_id);
@@ -141,6 +172,8 @@ fn test_wire_trace_ctx_from_current_span() {
 }
 
 #[test]
+// A test of `Clone` itself, though the type is `Copy` too.
+#[allow(clippy::clone_on_copy)]
 fn test_wire_trace_ctx_clone() {
     let original = WireTraceCtx::new_for_message();
     let cloned = original.clone();

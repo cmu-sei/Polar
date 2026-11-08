@@ -1,0 +1,62 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Built (configuration-flow.md); the shaded part is designed (policy-enforcement.md, stages 0, 1, 6), not built.
+sequenceDiagram
+    autonumber
+    participant KL as Kubelet
+    participant PI as polar-init (init container)
+    participant AG as Agent process
+    participant AB as AgentBuilder
+    participant PE as polar-env (Config)
+    participant IS as InfrastructureSupervisor
+    participant DS as Domain supervisor
+
+    KL->>PI: start, with --cert and --check-dep-cert arguments
+    PI->>PI: wait for the dependencies' certificates, get the custody daemon's custodian its certificate
+    PI->>PI: the custodian fetches this agent's certificates into the daemon, which keeps their keys
+    opt the agent needs encryption (POLAR_INIT_ESCROW_BOOTSTRAP)
+        PI->>PI: the custodian also fetches the escrow key, which the daemon keeps
+    end
+    PI-->>KL: exit 0
+    KL->>AG: start, with the environment the resolver derived
+    AG->>DS: spawn the domain supervisor
+    DS->>AB: new(...).with_...().configure()
+    AB->>PE: snapshot of the process environment, declared variables only
+    PE-->>AB: values with their sources: env, default, unset
+    AB->>AB: judge it: capabilities the code requires against POLAR_CAPABILITIES, each section's variables and relations
+    alt any problem
+        AB-->>AG: every problem together, process exits non-zero
+    else all well
+        AB-->>DS: ConfiguredAgent, with the Config
+    end
+    DS->>DS: read its own settings from the snapshot
+    DS->>AB: build()
+    AB->>IS: spawn: health, router, subscriptions, Cassini client, crypto
+    IS-->>DS: AgentResources, including the same Config
+
+    rect rgb(235, 219, 178)
+    Note over AB,IS: DESIGNED (policy-enforcement.md, stages 0, 1 and 6), not built
+    AB->>AB: the service name must be the workload name (POLAR_WORKLOAD), else refuse to start
+    AB->>AB: the topic set: TOPICS declared, plus implied (the builder's own topics, those NEEDS bring),<br/>the same set --scaffold prints, each implied topic with its rule
+    IS->>IS: every subscribe and publish outside the set is refused here, in the agent's log
+    IS->>IS: not healthy until a snapshot from the credentials agent is verified<br/>(a bootstrap service is: it runs on the certificate floor until its first)
+    end

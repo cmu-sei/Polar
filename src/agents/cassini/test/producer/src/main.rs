@@ -1,25 +1,35 @@
-use harness_producer::actors::*;
-use ractor::Actor;
-use tracing::info;
+/*
+   ACE Tool
 
-#[tokio::main]
-async fn main() {
-    cassini_client::init_tracing("cassini-harness-producer");
+   Copyright 2026 Carnegie Mellon University.
 
-    info!("Producer Agent Starting up.");
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-    let (_, handle) = Actor::spawn(
-        Some("cassini.harness.producer.supervisor".to_string()),
-        RootActor,
-        (),
-    )
-    .await
-    .expect("Expected harness supervisor to start.");
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
-    handle
-        .await
-        .expect("Expected producer to successfully execute.");
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
 
-    cassini_client::shutdown_tracing();
-    std::process::exit(0);
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+use harness_producer::agent::HarnessProducer;
+use std::process::ExitCode;
+
+/// The agent says what it is in `HarnessProducer`; `run` answers the command line (`--help`, `--scaffold`,
+/// `--check`), judges the configuration and starts it. It exits 0 only when its run is done.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<HarnessProducer>()
 }
+
+// Every Polar binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
+#[global_allocator]
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;

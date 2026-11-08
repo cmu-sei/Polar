@@ -1,0 +1,38 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/config/services.nuon
+#
+# In-cluster services other workloads connect to. One entry per service:
+# its Service name, its namespace (a key of cluster.namespaces) and port.
+# Addresses are derived as <dns_name>.<namespace>.svc.<cluster.domain>:<port>.
+{
+  cassini:     { dns_name: "cassini-ip-svc", namespace: "polar", port: 8080 }
+  neo4j:       { dns_name: "polar-db-svc",   namespace: "graph", port: 7687 }
+  cert-issuer: { dns_name: "cert-issuer",    namespace: "polar", port: 8443, scheme: "https" }
+  # Jaeger's OTLP HTTP port, where traces are sent (its UI, 16686, is not an endpoint for them).
+  # The configuration git server: git smart HTTP over mTLS, no TLS termination anywhere on the way.
+  polar-git-server: { dns_name: "polar-git-server", namespace: "polar", port: 8443, scheme: "https" }
+  # The credentials agent's HTTP front, which a pod without a certificate asks for one (`polar-init`).
+  # Plain http by design: the token in the request is sealed to an ephemeral session, not sent in the clear.
+  credentials-agent-observer: { dns_name: "credentials-agent-observer", namespace: "polar", port: 8080, scheme: "http" }
+  jaeger:      { dns_name: "jaeger-svc",    namespace: "polar", port: 4318, scheme: "http" }
+}

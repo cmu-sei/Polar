@@ -1,0 +1,64 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    participant Server as Polar git server
+    participant Cassini
+    participant Observer as Scheduler observer
+    participant Processor as Scheduler processor
+    participant Graph as Neo4j
+    participant Target as Target agent
+    participant CA as ConfigurationActor (in the target)
+
+    Server-)Cassini: RepoChanged
+    Cassini-)Observer: RepoChanged (for its repository)
+    Observer->>Server: git pull --ff-only (mTLS, workload certificate)
+    Observer->>Observer: evaluate the item, refuse an import
+    opt early check, same rules as the target's
+        Observer->>Observer: verify, drop and log if invalid
+    end
+    Observer-)Cassini: GitScheduleChange {whole document}
+    Cassini-)Processor: GitScheduleChange
+    Processor->>Graph: write a Configuration node, document as received
+    Processor-)Cassini: ConfigurationNotification on agent.name.configuration
+    Cassini-)Target: ConfigurationNotification (every agent subscribes to its own)
+    Target->>CA: submit(document)
+
+    Note over Target,CA: verifies for itself, in order
+    CA->>CA: 1. two fields only, no import
+    CA->>CA: 2. chain to pinned CA, cert valid
+    CA->>CA: 3. signature over the payload, then read it
+    CA->>CA: 4. addressed to this agent
+    CA->>CA: 5. signer may update each variable: Cedar first (update-configuration on Variable "agent/NAME"),<br/>the signer's c:update-configuration where no policy speaks (built 2026-10-13)
+    CA->>CA: 6. the signer's certificate is not revoked (the authority's revoked serials)
+    CA->>CA: 7. version above the last
+    alt every check passes
+        CA->>CA: apply: all or none
+        CA-)Target: ConfigChanged {version, names}
+        Target->>CA: current() and use the new values
+        CA->>CA: record names, never values
+    else any check fails
+        CA->>CA: refuse whole, keep old values
+    end
+    Note over CA,Processor: Either way it says what it did
+    CA-)Cassini: ConfigurationOutcome (status and why)
+    Cassini-)Processor: ConfigurationOutcome
+    Processor->>Graph: write an outcome node, linked to the item

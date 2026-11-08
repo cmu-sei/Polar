@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! What the executor needs from a cluster, and nothing more.
 //!
 //! The executor is written against this trait, so that its order, its waits and its reports can be
@@ -38,7 +61,8 @@ pub trait Cluster {
     async fn get(&self, id: &Id) -> Result<Option<Json>>;
 
     /// The keys of a Secret and what they hold, or `None` if it is not there.
-    async fn secret(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>>;
+    async fn secret(&self, namespace: &str, name: &str)
+    -> Result<Option<BTreeMap<String, String>>>;
 
     async fn create_secret(
         &self,
@@ -51,7 +75,11 @@ pub trait Cluster {
     async fn delete_secret(&self, namespace: &str, name: &str) -> Result<Deleted>;
 
     /// The keys of a ConfigMap and what they hold, or `None` if it is not there.
-    async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>>;
+    async fn config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<BTreeMap<String, String>>>;
 
     /// Make a ConfigMap hold these keys, creating it if it is absent. Applied server-side, so keys that
     /// someone else put there are left alone.
@@ -124,7 +152,10 @@ pub mod fake {
                 self.log(format!("apply {id} (unknown kind)"));
                 return Ok(Applied::UnknownKind);
             }
-            self.log(format!("apply {id}{}", if dry_run { " (dry run)" } else { "" }));
+            self.log(format!(
+                "apply {id}{}",
+                if dry_run { " (dry run)" } else { "" }
+            ));
             if !dry_run {
                 self.objects.borrow_mut().insert(id, object.0.clone());
             }
@@ -154,8 +185,16 @@ pub mod fake {
             Ok(self.objects.borrow().get(id).cloned())
         }
 
-        async fn secret(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
-            Ok(self.secrets.borrow().get(&(namespace.to_string(), name.to_string())).cloned())
+        async fn secret(
+            &self,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<BTreeMap<String, String>>> {
+            Ok(self
+                .secrets
+                .borrow()
+                .get(&(namespace.to_string(), name.to_string()))
+                .cloned())
         }
 
         async fn create_secret(
@@ -172,8 +211,13 @@ pub mod fake {
                 if dry_run { " (dry run)" } else { "" }
             ));
             if !dry_run {
-                let held = data.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).collect();
-                self.secrets.borrow_mut().insert((namespace.to_string(), name.to_string()), held);
+                let held = data
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.expose().to_string()))
+                    .collect();
+                self.secrets
+                    .borrow_mut()
+                    .insert((namespace.to_string(), name.to_string()), held);
             }
             Ok(())
         }
@@ -181,7 +225,12 @@ pub mod fake {
         async fn delete_secret(&self, namespace: &str, name: &str) -> Result<Deleted> {
             self.log(format!("delete secret {namespace}/{name}"));
             Ok(
-                if self.secrets.borrow_mut().remove(&(namespace.to_string(), name.to_string())).is_some() {
+                if self
+                    .secrets
+                    .borrow_mut()
+                    .remove(&(namespace.to_string(), name.to_string()))
+                    .is_some()
+                {
                     Deleted::Removed
                 } else {
                     Deleted::Absent
@@ -189,8 +238,16 @@ pub mod fake {
             )
         }
 
-        async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
-            Ok(self.config_maps.borrow().get(&(namespace.to_string(), name.to_string())).cloned())
+        async fn config_map(
+            &self,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<BTreeMap<String, String>>> {
+            Ok(self
+                .config_maps
+                .borrow()
+                .get(&(namespace.to_string(), name.to_string()))
+                .cloned())
         }
 
         async fn write_config_map(
@@ -218,7 +275,12 @@ pub mod fake {
         async fn delete_config_map(&self, namespace: &str, name: &str) -> Result<Deleted> {
             self.log(format!("delete configmap {namespace}/{name}"));
             Ok(
-                if self.config_maps.borrow_mut().remove(&(namespace.to_string(), name.to_string())).is_some() {
+                if self
+                    .config_maps
+                    .borrow_mut()
+                    .remove(&(namespace.to_string(), name.to_string()))
+                    .is_some()
+                {
                     Deleted::Removed
                 } else {
                     Deleted::Absent

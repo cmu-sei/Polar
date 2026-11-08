@@ -1,12 +1,65 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% How a signed policy reaches every agent and how it is enforced. Built: steps 1 to 12 (2026-10-13, authority-distribution.md).
+%% Designed, not built (policy-enforcement.md, decisions of 2026-10-21): the broker as a holder (stage 5), aging, the bounded
+%% degraded window and the restart into init (stage 6).
 sequenceDiagram
     autonumber
-    participant Admin as Administrator
-    participant GitLab as Version Control System (GitLab)
-    participant PolicyAgent as Policy Agent
-    participant PubSub as Pub/Sub Messaging System
-    participant Observer
+    actor Admin as Administrator
+    participant Sign as polar-sign
+    participant GS as polar-git-server<br/>(polar-schedules)
+    participant Sch as scheduler<br/>observer and processor
+    participant CA as credentials agent<br/>consumer
+    participant Bk as Cassini broker
+    participant Ag as every builder agent<br/>(AuthorityActor, PolicyActor)
 
-    Admin->>+GitLab: Update policy document
-    GitLab->>+PolicyAgent: Trigger update event
-    PolicyAgent->>+PubSub: Publish policy update event
-    PubSub->>+Observer: Deliver policy update event
+    Admin->>Sign: polar-sign runtime --agent credentials-agent --section policy --version N
+    Note over Sign: the Cedar text is validated against Polar's schema before signing (polar-sign)
+    Sign-->>Admin: the signed document (c:update-policy)
+    Admin->>GS: push permanent/... over mTLS
+    GS->>Sch: RepoChanged
+    Sch->>CA: agent.credentials-agent.configuration (forwarded unverified, the receiver verifies)
+    CA->>CA: verify chain, signer's c:update-policy (capability only, Cedar never governs its own authorship),<br/>revocation, version higher, then the schema
+    CA->>CA: re-sign as an authority Update with the escrow key, apply locally
+    CA->>Bk: publish polar-authority-updates
+    Bk->>Ag: deliver
+    Ag->>Ag: AuthorityCore: published_by is the credentials agent, key pinned from the first snapshot,<br/>signature, sequence: SetPolicy to the PolicyActor (a set that does not validate leaves the old one)
+
+    rect rgb(235, 219, 178)
+    Note over Bk: DESIGNED: the broker holds an authority too, fed in process from its own Listener
+    Bk->>Bk: the same AuthorityCore, for its subscribe and publish decisions
+    end
+
+    loop every 30 minutes, the heartbeat
+        CA->>Bk: snapshot republished
+        Bk->>Ag: deliver, the clock restarts (designed)
+    end
+
+    Note over Ag: a decision: Cedar first, the certificate where no policy speaks (both directions)
+
+    rect rgb(235, 219, 178)
+    Note over CA,Ag: DESIGNED: the credentials agent is unreachable
+    Ag->>Ag: 45 minutes without hearing: ask for a snapshot
+    Ag->>Ag: degraded: keep deciding with the cached policy, the certificate where it is silent
+    Ag->>Ag: 90 minutes (POLAR_AUTHORITY_MAX_AGE_SECS): fail the health check
+    Note over Ag: the shutdown pipeline, exit 1, the Job's new pod waits in init<br/>for the credentials agent (health_rejuvenation)
+    end

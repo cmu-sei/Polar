@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Shared types between the cert issuer and its init container client.
 //!
 //! Kept separate so the wire protocol is defined in exactly one place
@@ -6,30 +29,100 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
+pub mod ca_root;
+pub mod capability;
+pub mod csr_san;
+pub mod custody;
+pub mod group;
+pub mod held;
+pub mod hierarchy;
 pub mod identity;
+pub mod instance;
+pub mod key_match;
+pub mod keypair;
+pub mod permission;
+pub mod public_key;
+pub mod record;
+pub mod serial;
+pub mod ticket;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    clap::ValueEnum,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CertType {
+    #[default]
     Client,
     Server,
+    /// A service's own durable, agent-to-agent encryption identity --
+    /// not a client/server TLS role at all, and deliberately never
+    /// treated as one. See credentials-agent-architecture.md's own
+    /// "Agent escrow identity" section (which calls this a service's
+    /// "escrow keypair" -- named Service here specifically to avoid
+    /// conflating the certificate's own type with the separate
+    /// mechanism, described in the same document, that later escrows
+    /// it alongside its private key). It is the application layer's certificate (whom a secret is encrypted to) and
+    /// the mTLS certificate the transport layer's (who may hold a connection), so it carries the one extended key
+    /// usage `emailProtection`, which no TLS stack takes for a client or a server.
+    Service,
+    /// A key the holder signs its own statements with, never a TLS role: `digitalSignature` and the one extended key
+    /// usage `id-kp-documentSigning` ([`OID_DOCUMENT_SIGNING`]), which no TLS stack takes for a client or a server.
+    /// Signed only on `/internal/issue`, for the internal caller's own identity: the credentials agent's session
+    /// offers are signed with one (docs/architecture/core-restarts.md, "1c in detail").
+    Signing,
+    /// The custody daemon's own certificate (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"):
+    /// client authentication, for its own Cassini session, named `custody.<X>` for the workload X its pod's token
+    /// proves ([`custody::custodian_identity`]). Its `p:custody:` names say what it may ask the credentials agent for
+    /// on X's behalf. Signed only on a token, never on `/internal/issue`: it is what the pod proves itself for.
+    Custody,
 }
 
-impl ToString for CertType {
-    fn to_string(&self) -> String {
+/// `id-kp-documentSigning` (RFC 9336): the extended key usage of a [`CertType::Signing`] certificate.
+pub const OID_DOCUMENT_SIGNING: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 3, 36];
+
+impl std::fmt::Display for CertType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Client => "client",
             Self::Server => "server",
+            Self::Service => "service",
+            Self::Signing => "signing",
+            Self::Custody => "custody",
         };
-        s.into()
+        write!(f, "{s}")
     }
 }
 
-impl Default for CertType {
-    fn default() -> Self {
-        CertType::Client
-    }
+/// Admin-provisioned fallback values for Subject DN fields the
+/// user's own CSR didn't set -- see the Polar user-account CSR flow
+/// (credentials-agent-architecture.md's "User self-service issuance"
+/// section and its account-provisioning extension). Plain,
+/// unvalidated strings on the wire, matching IssueRequest's own
+/// convention for extra_sans (also a plain `Vec<String>`); real
+/// validation happens exactly once, in cert-issuer/server's csr
+/// module, via the same PersonalName/JobTitle/PhoneNumber
+/// constructors the CSR's own fields go through -- not duplicated
+/// here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubjectDnDefaults {
+    pub given_name: Option<String>,
+    pub surname: Option<String>,
+    pub title: Option<String>,
+    pub telephone_number: Option<String>,
 }
 
 /// Request body for `POST /issue`.
@@ -41,6 +134,14 @@ pub struct IssueRequest {
     pub cert_type: CertType,
     #[serde(default)]
     pub extra_sans: Vec<String>,
+    /// Admin-provisioned defaults for Subject DN fields (given name,
+    /// surname, title, telephone number), used only for whichever
+    /// fields the CSR itself doesn't set -- the CSR's own value
+    /// always wins when present. `None` for every issuance path that
+    /// has no such defaults (ordinary workload issuance, admin
+    /// bootstrap).
+    #[serde(default)]
+    pub subject_dn_defaults: Option<SubjectDnDefaults>,
 }
 
 /// Successful response body for `POST /issue`.
@@ -50,12 +151,113 @@ pub struct IssueResponse {
     pub certificate_pem: String,
     /// PEM-encoded CA certificate(s) for the trust chain.
     pub ca_chain_pem: String,
+    /// The issued certificate's own X.509 serial number -- the join
+    /// key for revocation (credentials-agent's Revoke events, and any
+    /// future CRL, are keyed on this, not session_id below, which is
+    /// a separate, per-request audit-correlation value).
+    pub serial_number: String,
     /// UUID for audit correlation. The init container surfaces this
     /// in its log output so operators can grep across logs and graph events.
     pub session_id: String,
     /// Certificate `notAfter` in RFC3339. The init container uses this
     /// to compute renewal-restart timing if it ever needs to.
     pub expires_at: OffsetDateTime,
+}
+
+/// Successful response body for `POST /validate`. Distinct from
+/// `IssueResponse` -- exists specifically for credentials-agent's
+/// two-call issuance flow (validate first to get the real identity
+/// for a grant lookup, then issue separately once permitted SANs are
+/// known).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateResponse {
+    /// The raw claim value -- not the normalized, DNS-safe identity
+    /// /issue's CSR-matching logic uses. Grants are keyed on this
+    /// exact raw value, per credentials-agent-architecture.md.
+    pub workload_identity: String,
+    pub instance_binding: Option<String>,
+    /// The standard JWT `jti` claim, if present. See
+    /// oidc::ValidatedClaims::jti's own doc comment on cert-issuer's
+    /// side for what this is -- generic claim extraction, no policy
+    /// attached here either; credentials-agent decides what (if
+    /// anything) to do with it.
+    pub jti: Option<String>,
+    /// The pod's name, from the issuer's `instance_name_claim` (`kubernetes.io/pod/name` for a Kubernetes token), when
+    /// it has one: what a multi-instance workload's certificate names its instance by, for people, beside the pod UID in
+    /// `instance_binding` (docs/architecture/authority-model.md, "Multi-instance workloads"). Absent from a reply of a
+    /// cert-issuer before it existed.
+    #[serde(default)]
+    pub instance_name: Option<String>,
+    /// The normalized, DNS-safe identity /issue's CSR-matching logic
+    /// will actually check against -- computed via the same
+    /// normalize_identity call /issue itself uses, so a client
+    /// building a CSR from this value is guaranteed to match, never a
+    /// second, independent computation that could drift. Only
+    /// populated when the request explicitly asks for it via
+    /// ValidateRequest::include_normalized_identity -- never returned
+    /// unrequested, since most callers of this endpoint (the
+    /// issuance flow's own internal /validate call) have no use for
+    /// it at all.
+    pub normalized_identity: Option<String>,
+}
+
+/// Request body for `POST /validate`. Previously took no body at all
+/// (just the bearer token via the Authorization header) -- this is
+/// the first real parameter it's ever had.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ValidateRequest {
+    #[serde(default)]
+    pub include_normalized_identity: bool,
+}
+
+/// The account an internally-issued certificate belongs to, written into
+/// its Subject DN as the standard `uid` and `mail` attributes. Unlike
+/// `SubjectDnDefaults`, these are authoritative: they come only from the
+/// caller (credentials-agent, which matched them against the ledger), never
+/// from the CSR, and a CSR that claims its own `uid` or `mail` is ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountSubject {
+    pub username: String,
+    pub email: String,
+}
+
+/// Request body for the internal, mTLS-gated /internal/issue
+/// endpoint. Reachable only over cert-issuer's mTLS listener, from a
+/// caller whose own peer certificate matches the configured
+/// internal-caller allowlist -- there is no bearer token here at all,
+/// unlike IssueRequest. The caller (credentials-agent) has already
+/// done its own authorization work before ever making this call
+/// (a K8s-token check for admin bootstrap, a username/email match
+/// for an account claim); cert-issuer's only remaining job is
+/// verifying the caller's own mTLS identity and then signing exactly
+/// what it's asked to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalIssueRequest {
+    pub csr_pem: String,
+    /// The identity to sign for -- asserted directly by the caller,
+    /// not derived from any token. Every caller of this endpoint
+    /// (account claims, admin bootstrap) has no token asserting an
+    /// identity at all; the caller's own prior authorization work is
+    /// what makes asserting this directly safe.
+    pub identity: String,
+    pub cert_type: CertType,
+    #[serde(default)]
+    pub extra_sans: Vec<String>,
+    #[serde(default)]
+    pub subject_dn_defaults: Option<SubjectDnDefaults>,
+    /// Authoritative username and email for an account certificate.
+    /// `None` for every other internal issuance.
+    #[serde(default)]
+    pub account_subject: Option<AccountSubject>,
+    /// The pod instance a workload's certificate is for, recorded as a token's would be: a custodian's, when the
+    /// credentials agent asks on a custodian's behalf (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian"). `None` for every other internal issuance.
+    #[serde(default)]
+    pub instance_binding: Option<String>,
+    /// The latest the certificate may end (Unix seconds): its lifetime is cut to it, and nothing is signed once it is
+    /// past. A custodian's end, so that none of its workload's certificates outlives it. `None`: the lifetime alone.
+    #[serde(default)]
+    pub expires_by: Option<i64>,
 }
 
 /// Error response body. Always returned on non-2xx responses.
@@ -89,6 +291,15 @@ pub enum IssueOutcome {
     CaUnavailable,
     /// Anything else. Indicates a bug or unexpected infrastructure failure.
     InternalError,
+    /// /internal/issue only: the connection's own verified mTLS peer
+    /// identity is not on the configured internal-caller allowlist --
+    /// or no client certificate was presented at all. Distinct from
+    /// InvalidToken, since no token is involved in this path.
+    CallerNotAuthorized,
+    /// The request is held (202): a bootstrap service the floor admits and the floor state does not, offered to the
+    /// credentials agent to vouch for (docs/architecture/core-restarts.md, "3 in detail"). Send the same request again
+    /// shortly; it is signed once vouched for, or refused.
+    Held,
 }
 
 #[derive(Debug, Error)]

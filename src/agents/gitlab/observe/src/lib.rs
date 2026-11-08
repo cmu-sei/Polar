@@ -1,24 +1,24 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 pub mod groups;
 pub mod meta;
@@ -92,11 +92,15 @@ pub struct GitlabObserverState {
     /// thread handle containing the observer loop
     task_handle: Option<AbortHandle>,
 
+    // Given, and never read: the observers send through the client registered as BROKER_CLIENT_NAME. Removing it
+    // changes the state's constructor and its callers, which a lint fix does not.
+    #[allow(dead_code)]
     tcp_client: ActorRef<TcpClientMessage>,
 }
 
 impl GitlabObserverState {
     /// Create a new GitlabObserverState
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gitlab_endpoint: String,
         token: Option<String>,
@@ -163,7 +167,7 @@ pub struct GitlabObserverArgs {
 
 /// Helper to init observer_state from args to cut down on repeating the same block for every obvserver
 pub fn init_observer_state(args: GitlabObserverArgs) -> GitlabObserverState {
-    return GitlabObserverState::new(
+    GitlabObserverState::new(
         args.gitlab_endpoint.clone(),
         args.token,
         args.web_client,
@@ -172,10 +176,8 @@ pub fn init_observer_state(args: GitlabObserverArgs) -> GitlabObserverState {
         Duration::from_secs(args.max_backoff),
         args.instance_uid,
         args.tcp_client,
-    );
+    )
 }
-/// Messages that observers send themselves to prompt the retrieval of resources
-
 /// Queries observers can send
 pub enum Command {
     GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
@@ -200,6 +202,9 @@ pub enum BackoffReason {
     TokenInvalid(String),
 }
 
+/// Messages that observers send themselves to prompt the retrieval of resources
+// One is sent for each tick, so a query's size beside a backoff's is not worth boxing it.
+#[allow(clippy::large_enum_variant)]
 pub enum GitlabObserverMessage {
     Tick(Command),
     Backoff(BackoffReason),
@@ -221,23 +226,23 @@ pub fn send_to_broker(
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
 
-        if let Err(e) = client.send_message(TcpClientMessage::Publish {
-            topic: topic.to_string(),
-            payload: bytes.to_vec(),
-            trace_ctx: WireTraceCtx::from_current_span(),
-        }) {
+        if let Err(e) = client.send_message(TcpClientMessage::publish(
+            topic.to_string(),
+            bytes.to_vec(),
+            WireTraceCtx::from_current_span(),
+        )) {
             return Err(ActorProcessingErr::from(format!(
                 "Failed to message TCP client {e}"
             )));
         }
 
-        return Ok(());
+        Ok(())
     } else {
-        return Err(ActorProcessingErr::from("Failed to locate TCP client"));
+        Err(ActorProcessingErr::from("Failed to locate TCP client"))
     }
 }
 pub fn derive_instance_id(base_url: &str) -> String {
-    return uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, base_url.as_bytes()).to_string();
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, base_url.as_bytes()).to_string()
 }
 
 pub fn handle_graphql_errors(
@@ -412,7 +417,7 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
         link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     }
 
-    return Some(elements);
+    Some(elements)
 }
 
 pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
@@ -430,7 +435,7 @@ pub fn extract_gitlab_id(global_id: &str) -> Option<u64> {
     if let Ok(parsed) = Url::parse(global_id) {
         parsed
             .path_segments()
-            .and_then(|segments| segments.last())
+            .and_then(|mut segments| segments.next_back())
             .and_then(|id_str| id_str.parse::<u64>().ok())
     } else {
         // Fallback: treat it as "scheme://host/path.../id"

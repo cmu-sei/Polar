@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 [package]
 name = "polar-scheduler"
 version.workspace = true
@@ -5,17 +26,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+polar-scudo.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 chrono.workspace = true
-git-agent-common.workspace = true   # for RepoId, etc. (shared types)
 neo4rs.workspace = true
 polar.workspace = true               # common polar utilities (logging, graph helpers)
+polar-agent-builder.workspace = true
+polar-router.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_dhall.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
@@ -27,6 +49,10 @@ serde_json.workspace = true
 futures.workspace = true
 proptest.workspace = true
 tokio.workspace = true
+
+[[test]]
+name = "configuration"
+path = "tests/configuration.rs"
 
 [[test]]
 name = "unit"

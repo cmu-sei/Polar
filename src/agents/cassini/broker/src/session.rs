@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::BROKER_NOT_FOUND_TXT;
 use crate::{
     CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
@@ -6,14 +29,15 @@ use crate::{
 use crate::{UNEXPECTED_MESSAGE_STR, get_subscriber_name};
 use cassini_tracing::try_set_parent_otel;
 use cassini_types::{
-    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, ShutdownPhase,
+    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, Hold, MessageId,
+    Payload, ShutdownPhase,
 };
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
@@ -26,17 +50,53 @@ pub struct SessionManager;
 struct Session {
     agent_ref: ActorRef<BrokerMessage>,
     pending_publishes: usize, // Number of unacknowledged publish requests
+    /// When the client's connection went away without a goodbye. `None` while it is connected.
+    /// A session detached for longer than the retention window is ended.
+    detached_at: Option<tokio::time::Instant>,
+    /// The verified identity of the client that registered this session.
+    identity: Option<String>,
+    /// The pod UID its certificate names, when its workload is multi-instance: sessions supersede each other by identity
+    /// and instance (docs/architecture/authority-model.md, "Multi-instance workloads").
+    instance: Option<String>,
+    /// A new session of the same identity has taken over: this one cannot be resumed, and is
+    /// only waiting for its subscribers to hold, then stops.
+    superseded: bool,
+}
+
+/// What a superseded session left behind: its subscribers, holding what they receive for a new
+/// session of the same identity to claim, until the retention window after the takeover.
+struct HeldSession {
+    registration_id: String,
+    identity: String,
+    instance: Option<String>,
+    since: tokio::time::Instant,
+    /// Every subscriber of the session confirmed it is holding.
+    ready: bool,
 }
 
 pub struct SessionManagerState {
-    /// Map of registration_id to Session ActorRefs
     sessions: HashMap<String, Session>,
     broker: ActorRef<BrokerMessage>,
     listener_mgr: Option<ActorRef<BrokerMessage>>,
-
+    /// Reference to the subscriber manager; initially None, set via
+    /// SetSubscriberManagerRef once SubscriberManager exists (SessionManager
+    /// is spawned before it). Used to continue the layered disconnect flow
+    /// (Listener -> Session -> Subscriber -> Topic) -- without this, a
+    /// session ending from a real socket disconnect never reaches
+    /// SubscriberManager at all, and every subscription it owned leaks
+    /// forever with no reachable cleanup path.
+    subscriber_mgr: Option<ActorRef<BrokerMessage>>,
+    retention: std::time::Duration,
+    /// Superseded sessions, oldest first.
+    held: Vec<HeldSession>,
+    /// Sessions ended before their retention window, with why and when: a client that comes back asking for one is
+    /// told (`ClientMessage::SessionEnded`) before it is given a new session. Kept for the retention window.
+    ended_early: HashMap<String, (String, tokio::time::Instant)>,
+    /// Questions about an identity (and instance) with a takeover still in progress, answered when it is done.
+    parked: Vec<(String, Option<String>, ractor::RpcReplyPort<Vec<String>>)>,
     is_shutting_down: bool,
     drain_phase_active: bool,
-    drain_completion_notified: bool, // Prevent duplicate signals
+    drain_completion_notified: bool,
     total_pending_publishes: usize,
     pub pending_drain_count: usize,
 }
@@ -45,15 +105,11 @@ pub struct SessionManagerArgs {
     pub broker: ActorRef<BrokerMessage>,
     /// Reference to the listener manager; initially None, will be set via SetListenerManager.
     pub listener_mgr: Option<ActorRef<BrokerMessage>>,
+    /// How long a session whose client went away without a goodbye is kept.
+    pub retention: std::time::Duration,
 }
 
 // ============================== SessionManager Actor ============================== //
-
-#[derive(Debug)]
-pub struct SetTopicManagerRef(pub ActorRef<BrokerMessage>);
-
-#[derive(Debug)]
-pub struct SetListenerManagerActorRef(pub ActorRef<BrokerMessage>);
 
 #[async_trait]
 impl Actor for SessionManager {
@@ -67,10 +123,22 @@ impl Actor for SessionManager {
         args: SessionManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
+        // Often enough that a session is ended soon after its window passes, never faster than
+        // a tenth of a second or slower than every thirty.
+        let tick = (args.retention / 4).clamp(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_secs(30),
+        );
+        drop(myself.send_interval(tick, || BrokerMessage::SessionExpiryTick));
         Ok(SessionManagerState {
             broker: args.broker,
             listener_mgr: args.listener_mgr,
+            subscriber_mgr: None,
             sessions: HashMap::new(),
+            retention: args.retention,
+            held: Vec::new(),
+            ended_early: HashMap::new(),
+            parked: Vec::new(),
             is_shutting_down: false,
             drain_phase_active: false,
             drain_completion_notified: false,
@@ -88,6 +156,21 @@ impl Actor for SessionManager {
         Ok(())
     }
 
+    /// Each session is registered under its registration ID, and ractor ends a stopped actor's children with a kill
+    /// it does not wait for, so the sessions are stopped, and waited for, before this stop is done: a stopped broker
+    /// holds no names.
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await;
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -99,9 +182,9 @@ impl Actor for SessionManager {
                 self.handle_prepare_for_shutdown(myself.clone(), state)
                     .await?;
             }
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::DrainExistingSessions =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::DrainExistingSessions,
+            } => {
                 self.handle_initiate_drain_phase(myself.clone(), state)
                     .await?;
             }
@@ -116,6 +199,8 @@ impl Actor for SessionManager {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
+                peer_instance,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -123,8 +208,36 @@ impl Actor for SessionManager {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
+                    peer_instance.map(|instance| instance.uid),
                 )
                 .await?;
+            }
+            // The control plane's ListSessions: every session the broker holds, connected or kept for its client's
+            // return, but not one taken over by a newer session of its identity. A session's subscriptions are its
+            // subscriber actors, each registered as `<registration id>:<topic>`.
+            BrokerMessage::GetSessions { reply_to, .. } => {
+                let names = ractor::registry::registered();
+                let sessions: cassini_types::SessionMap = state
+                    .sessions
+                    .iter()
+                    .filter(|(_, session)| !session.superseded)
+                    .map(|(id, _)| {
+                        let prefix = format!("{id}:");
+                        let subscriptions = names
+                            .iter()
+                            .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
+                            .collect();
+                        (
+                            id.clone(),
+                            cassini_types::SessionDetails {
+                                registration_id: id.clone(),
+                                subscriptions,
+                            },
+                        )
+                    })
+                    .collect();
+                let _ = reply_to.send(sessions);
             }
             BrokerMessage::GetSessionRef {
                 registration_id,
@@ -140,15 +253,106 @@ impl Actor for SessionManager {
                 state.listener_mgr = Some(listener_mgr);
                 debug!("SessionManager received listener manager ref");
             }
+            BrokerMessage::SetSubscriberManagerRef { subscriber_mgr } => {
+                state.subscriber_mgr = Some(subscriber_mgr);
+                debug!("SessionManager received subscriber manager ref");
+            }
             BrokerMessage::DisconnectRequest {
+                client_id,
+                registration_id,
+                reason,
+                trace_ctx,
+            } => {
+                match (registration_id, &reason) {
+                    // The client is not coming back for this session.
+                    (Some(registration_id), DisconnectReason::Goodbye) => {
+                        Self::end_session(state, &registration_id, client_id, reason, trace_ctx)
+                    }
+                    // The connection went away with no word: keep the session for the
+                    // retention window, in case the client returns.
+                    (
+                        Some(registration_id),
+                        DisconnectReason::RemoteClosed | DisconnectReason::TransportError(_),
+                    ) => {
+                        Self::detach_session(state, &registration_id);
+                    }
+                    // Never registered: there is no session to end or keep.
+                    (None, _) => {}
+                }
+            }
+            // A write to the client failed: its connection is gone.
+            BrokerMessage::TimeoutMessage {
                 registration_id, ..
             } => {
-                if let Some(registration_id) = registration_id {
-                    match state.sessions.entry(registration_id) {
-                        Entry::Occupied(entry) => {
-                            entry.remove();
-                        }
-                        Entry::Vacant(_) => (),
+                Self::detach_session(state, &registration_id);
+            }
+            // A session whose subscriber let go of what it held while its client was away and the budget was
+            // exhausted ends now, not at the retention window: what it would resume is gone (cassini-backpressure.md,
+            // the decisions, 14).
+            BrokerMessage::EndSession {
+                registration_id,
+                reason,
+            } => {
+                warn!(
+                    %registration_id,
+                    identity = ?state.sessions.get(&registration_id).and_then(|s| s.identity.clone()),
+                    %reason,
+                    "a session is ended before its retention window"
+                );
+                state.ended_early.insert(
+                    registration_id.clone(),
+                    (reason, tokio::time::Instant::now()),
+                );
+                Self::end_session(
+                    state,
+                    &registration_id,
+                    "shed".to_string(),
+                    DisconnectReason::RemoteClosed,
+                    None,
+                );
+            }
+            BrokerMessage::SessionExpiryTick => {
+                Self::end_expired_sessions(state);
+            }
+            // A session ended its connection for a stall (cassini-backpressure.md, "Decided" 1, by the one stall policy
+            // in crate::pressure): said with its identity. The session detaches for the retention window as on any
+            // lost connection.
+            BrokerMessage::SessionStallEnded {
+                registration_id,
+                topic,
+                held,
+                stalled_for,
+            } => {
+                warn!(
+                    %registration_id,
+                    identity = ?state.sessions.get(&registration_id).and_then(|s| s.identity.clone()),
+                    %topic,
+                    held,
+                    ?stalled_for,
+                    "a subscriber held its topic back past the stall bound: its connection is ended, and its \
+                     session kept for the retention window"
+                );
+            }
+            BrokerMessage::SessionHeld { registration_id } => {
+                Self::complete_takeover(state, &registration_id);
+            }
+            BrokerMessage::GetHeldSessions {
+                registration_id,
+                reply_to,
+            } => {
+                let asking = state.sessions.get(&registration_id).and_then(|session| {
+                    session
+                        .identity
+                        .clone()
+                        .map(|identity| (identity, session.instance.clone()))
+                });
+                match asking {
+                    None => {
+                        let _ = reply_to.send(Vec::new());
+                    }
+                    Some((identity, instance)) => {
+                        state.parked.push((identity, instance, reply_to));
+                        Self::answer_parked(state);
                     }
                 }
             }
@@ -194,6 +398,200 @@ impl Actor for SessionManager {
 }
 
 impl SessionManager {
+    /// The client's connection is gone and it did not say goodbye: keep the session, with its
+    /// subscribers and what they hold, until the retention window passes.
+    fn detach_session(state: &mut SessionManagerState, registration_id: &str) {
+        if let Some(session) = state.sessions.get_mut(registration_id)
+            && session.detached_at.is_none()
+        {
+            info!(%registration_id, retention = ?state.retention, "client went away, keeping its session");
+            session.detached_at = Some(tokio::time::Instant::now());
+            // Its subscribers no longer hold their topics back, and keep what they hold while the budget allows.
+            if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                let _ = subscriber_mgr.send_message(BrokerMessage::SessionDetached {
+                    registration_id: registration_id.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Ends the session now: the session actor stops (the map entry and its accounting go when the
+    /// supervisor sees it end), and the subscriber manager forgets its subscriptions, which stops
+    /// the subscriber actors and drops what they held.
+    fn end_session(
+        state: &mut SessionManagerState,
+        registration_id: &str,
+        client_id: String,
+        reason: DisconnectReason,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) {
+        if let Some(session) = state.sessions.get(registration_id) {
+            session
+                .agent_ref
+                .stop(Some(format!("session ended: {reason:?}")));
+        }
+        // Continue the layered flow (Listener -> Session -> Subscriber -> Topic), so every
+        // subscription the session owned is cleaned up.
+        match &state.subscriber_mgr {
+            Some(subscriber_mgr) => {
+                let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id,
+                    registration_id: Some(registration_id.to_string()),
+                    reason,
+                    trace_ctx,
+                });
+            }
+            None => warn!("SessionManager: subscriber_mgr not set, cannot forward disconnect"),
+        }
+    }
+
+    /// A new session of `identity` has registered: every older session of that identity is
+    /// superseded, whether its client has gone or only looks connected (a pod replaced before
+    /// the broker has noticed the old connection is dead). It can no longer be resumed; a
+    /// connection it still has is closed; its subscribers are told to hold what they receive,
+    /// and the session stops once they all do.
+    fn supersede_older(
+        state: &mut SessionManagerState,
+        identity: &str,
+        instance: Option<&str>,
+        new_id: &str,
+        new_client_id: &str,
+    ) {
+        let superseded: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(id, session)| {
+                id.as_str() != new_id
+                    && !session.superseded
+                    && supersedes(
+                        (identity, instance),
+                        (session.identity.as_deref(), session.instance.as_deref()),
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for registration_id in superseded {
+            info!(%registration_id, %identity, new_session = %new_id, "superseded by a new session of the same identity");
+            if let Some(session) = state.sessions.get_mut(&registration_id) {
+                session.superseded = true;
+                if session.detached_at.is_none() {
+                    let _ = session
+                        .agent_ref
+                        .send_message(BrokerMessage::CloseConnection {
+                            except: new_client_id.to_string(),
+                        });
+                }
+            }
+            state.held.push(HeldSession {
+                registration_id: registration_id.clone(),
+                identity: identity.to_string(),
+                instance: instance.map(str::to_string),
+                since: tokio::time::Instant::now(),
+                ready: false,
+            });
+            match &state.subscriber_mgr {
+                Some(subscriber_mgr) => {
+                    let _ = subscriber_mgr
+                        .send_message(BrokerMessage::SessionSuperseded { registration_id });
+                }
+                None => warn!("SessionManager: subscriber_mgr not set, cannot hold subscriptions"),
+            }
+        }
+    }
+
+    /// The subscribers of a superseded session all hold: the session itself is no longer needed.
+    fn complete_takeover(state: &mut SessionManagerState, registration_id: &str) {
+        if let Some(held) = state
+            .held
+            .iter_mut()
+            .find(|held| held.registration_id == registration_id)
+        {
+            held.ready = true;
+        }
+        // Drained, not stopped: a stop is a signal, ahead of the queue, and a session with no subscribers is held at once,
+        // so it would end before closing its connection (`CloseConnection`, sent as it was superseded), and the old
+        // instance would stay connected with no session.
+        if let Some(session) = state.sessions.get(registration_id) {
+            let _ = session.agent_ref.drain();
+        }
+        Self::answer_parked(state);
+    }
+
+    /// Answers each parked question whose identity has no takeover still in progress.
+    fn answer_parked(state: &mut SessionManagerState) {
+        let parked = std::mem::take(&mut state.parked);
+        for (identity, instance, reply_to) in parked {
+            let theirs = |held: &&HeldSession| {
+                supersedes(
+                    (identity.as_str(), instance.as_deref()),
+                    (Some(held.identity.as_str()), held.instance.as_deref()),
+                )
+            };
+            let in_progress = state.held.iter().filter(theirs).any(|held| !held.ready);
+            if in_progress {
+                state.parked.push((identity, instance, reply_to));
+            } else {
+                let ids = state
+                    .held
+                    .iter()
+                    .filter(theirs)
+                    .map(|held| held.registration_id.clone())
+                    .collect();
+                let _ = reply_to.send(ids);
+            }
+        }
+    }
+
+    /// Ends every session that has been without its client for longer than the retention window,
+    /// and lets go of what superseded sessions held once their window has passed.
+    fn end_expired_sessions(state: &mut SessionManagerState) {
+        let retention = state.retention;
+        state
+            .ended_early
+            .retain(|_, (_, since)| since.elapsed() < retention);
+        let lapsed: Vec<String> = state
+            .held
+            .iter()
+            .filter(|held| held.ready && held.since.elapsed() >= state.retention)
+            .map(|held| held.registration_id.clone())
+            .collect();
+        for registration_id in lapsed {
+            info!(%registration_id, "retention window passed, letting go of what was held");
+            state
+                .held
+                .retain(|held| held.registration_id != registration_id);
+            if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id: "retention".to_string(),
+                    registration_id: Some(registration_id),
+                    reason: DisconnectReason::RemoteClosed,
+                    trace_ctx: None,
+                });
+            }
+        }
+        let expired: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.superseded
+                    && session
+                        .detached_at
+                        .is_some_and(|since| since.elapsed() >= state.retention)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for registration_id in expired {
+            info!(%registration_id, "retention window passed, ending the session");
+            Self::end_session(
+                state,
+                &registration_id,
+                "retention".to_string(),
+                DisconnectReason::RemoteClosed,
+                None,
+            );
+        }
+    }
+
     // ===== Handler methods for SessionManager =====
     async fn handle_prepare_for_shutdown(
         &self,
@@ -279,6 +677,7 @@ impl SessionManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -286,109 +685,184 @@ impl SessionManager {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        peer_identity: Option<String>,
+        peer_instance: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received registration request");
+        async {
+            trace!("received registration request");
 
-        if state.is_shutting_down {
-            warn!("Rejecting registration request during shutdown");
-            // Use stored listener_mgr to send response (listener manager will forward to correct listener)
-            if let Some(listener_mgr) = &state.listener_mgr {
-                listener_mgr.send_message(BrokerMessage::RegistrationResponse {
-                    client_id,
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                })?;
-                return Ok(());
-            } else {
-                error!("SessionManager: listener_mgr not set, cannot send registration response");
-                return Ok(());
-            }
-        }
-
-        let Some(listener_ref) = where_is(client_id.clone()) else {
-            warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}");
-            return Ok(());
-        };
-
-        // Try to reuse an existing session
-        if let Some(existing_id) = &registration_id {
-            if let Some(session) = state.sessions.get_mut(existing_id) {
-                info!(registration_id = %existing_id, "reusing existing session");
-                if let Err(e) = session
-                    .agent_ref
-                    .send_message(BrokerMessage::ReassignClient {
-                        client_ref: listener_ref.clone().into(),
+            if state.is_shutting_down {
+                warn!("Rejecting registration request during shutdown");
+                // Use stored listener_mgr to send response (listener manager will forward to correct listener)
+                if let Some(listener_mgr) = &state.listener_mgr {
+                    listener_mgr.send_message(BrokerMessage::RegistrationResponse {
+                        client_id,
+                        result: Err("Broker is shutting down".to_string()),
                         trace_ctx: Some(span.context()),
-                    })
-                {
-                    error!("Failed to reassign client to existing session: {}", e);
+                        session: None,
+                    })?;
+                    return Ok(());
                 } else {
+                    error!("SessionManager: listener_mgr not set, cannot send registration response");
+                    return Ok(());
+                }
+            }
+
+            let Some(listener_ref) = where_is(client_id.clone()) else {
+                warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}");
+                return Ok(());
+            };
+
+            // Try to reuse an existing session. Only the identity that owns it may: a registration id is not a bearer token.
+            if let Some(existing_id) = &registration_id {
+                if let Some(session) = state.sessions.get(existing_id)
+                    && !session.superseded
+                    && !may_resume_as(
+                        (session.identity.as_deref(), session.instance.as_deref()),
+                        (peer_identity.as_deref(), peer_instance.as_deref()),
+                    )
+                {
+                    warn!(
+                        registration_id = %existing_id,
+                        session_identity = ?session.identity,
+                        connection_identity = ?peer_identity,
+                        "a connection asked to resume a session that is not its identity's: giving it a new one"
+                    );
+                }
+                if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
+                    !session.superseded
+                        && may_resume_as(
+                            (session.identity.as_deref(), session.instance.as_deref()),
+                            (peer_identity.as_deref(), peer_instance.as_deref()),
+                        )
+                }) {
+                    info!(registration_id = %existing_id, "reusing existing session");
+                    session.detached_at = None;
+                    if let Err(e) = session
+                        .agent_ref
+                        .send_message(BrokerMessage::ReassignClient {
+                            client_ref: listener_ref.clone().into(),
+                            trace_ctx: Some(span.context()),
+                        })
+                    {
+                        error!("Failed to reassign client to existing session: {}", e);
+                    } else {
+                        let Some(_listener_mgr) = &state.listener_mgr else {
+                            error!(
+                                "SessionManager: listener_mgr not set, cannot send registration response"
+                            );
+                            return Ok(());
+                        };
+                        listener_ref.send_message(BrokerMessage::RegistrationResponse {
+                            client_id: client_id.clone(),
+                            result: Ok(existing_id.clone()),
+                            trace_ctx: Some(span.context()),
+                            session: Some(session.agent_ref.clone()),
+                        })?;
+
+                        // Only now that the session agent has been told of the new connection are
+                        // the subscribers told to replay what they held for it. Told at the same
+                        // time (as the broker used to), they replayed to the old, dead connection
+                        // before it was replaced, and the messages failed again.
+                        if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                            let _ = subscriber_mgr.send_message(BrokerMessage::RegistrationRequest {
+                                registration_id: Some(existing_id.clone()),
+                                client_id,
+                                trace_ctx: Some(span.context()),
+                                peer_identity: None,
+                                peer_instance: None,
+                            });
+                        } else {
+                            warn!(
+                                "SessionManager: subscriber_mgr not set, cannot rehydrate subscribers"
+                            );
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    warn!(registration_id = %existing_id, "requested session not found, creating new one");
+                    // Ended early: its client is told, and why, before it is given a new one.
+                    if let Some((reason, _)) = state.ended_early.remove(existing_id) {
+                        let _ = listener_ref.send_message(BrokerMessage::SessionEnded {
+                            registration_id: existing_id.clone(),
+                            reason,
+                        });
+                    }
+                }
+            }
+
+            // Create new session
+            let new_id = Uuid::new_v4().to_string();
+            info!(registration_id = %new_id, "starting session for client");
+
+            match Actor::spawn_linked(
+                Some(new_id.clone()),
+                SessionAgent,
+                SessionAgentArgs {
+                    client_ref: listener_ref.clone().into(),
+                },
+                myself.clone().into(),
+            )
+            .await
+            {
+                Ok((session_agent, _)) => {
+                    state.sessions.insert(
+                        new_id.clone(),
+                        Session {
+                            agent_ref: session_agent.clone(),
+                            pending_publishes: 0,
+                            detached_at: None,
+                            identity: peer_identity.clone(),
+                            instance: peer_instance.clone(),
+                            superseded: false,
+                        },
+                    );
+                    // A client asking to resume a session that was superseded is the instance that
+                    // lost it, still running. It is given a session of its own, but it does not
+                    // displace the one that took over: two live instances would otherwise take
+                    // turns closing each other's connections.
+                    let is_the_loser = registration_id
+                        .as_ref()
+                        .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
+                    if let Some(identity) = &peer_identity
+                        && !is_the_loser
+                    {
+                        Self::supersede_older(
+                            state,
+                            identity,
+                            peer_instance.as_deref(),
+                            &new_id,
+                            &client_id,
+                        );
+                    }
+                    // Pass broker ref to the session agent
+                    let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
+                        broker: state.broker.clone(),
+                    });
                     let Some(_listener_mgr) = &state.listener_mgr else {
                         error!(
-                            "SessionManager: listener_mgr not set, cannot send registration response"
+                            "SessionManager: listener_mgr not set, cannot send registration response for new session"
                         );
                         return Ok(());
                     };
                     listener_ref.send_message(BrokerMessage::RegistrationResponse {
                         client_id,
-                        result: Ok(existing_id.clone()),
+                        result: Ok(new_id.clone()),
                         trace_ctx: Some(span.context()),
+                        session: Some(session_agent.clone()),
                     })?;
-                    return Ok(());
                 }
-            } else {
-                warn!(registration_id = %existing_id, "requested session not found, creating new one");
+                Err(e) => {
+                    error!(registration_id = %new_id, "failed to spawn session agent: {e}");
+                }
             }
+            Ok::<(), ActorProcessingErr>(())
         }
-
-        // Create new session
-        let new_id = Uuid::new_v4().to_string();
-        info!(registration_id = %new_id, "starting session for client");
-
-        match Actor::spawn_linked(
-            Some(new_id.clone()),
-            SessionAgent,
-            SessionAgentArgs {
-                client_ref: listener_ref.clone().into(),
-            },
-            myself.clone().into(),
-        )
+        .instrument(span.clone())
         .await
-        {
-            Ok((session_agent, _)) => {
-                state.sessions.insert(
-                    new_id.clone(),
-                    Session {
-                        agent_ref: session_agent.clone(),
-                        pending_publishes: 0,
-                    },
-                );
-                // Pass broker ref to the session agent
-                let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
-                    broker: state.broker.clone(),
-                });
-                session_agent
-                    .cast(BrokerMessage::InitSession {
-                        client_id,
-                        trace_ctx: Some(span.context()),
-                    })
-                    .ok();
-                let Some(_listener_mgr) = &state.listener_mgr else {
-                    error!(
-                        "SessionManager: listener_mgr not set, cannot send registration response for new session"
-                    );
-                    return Ok(());
-                };
-            }
-            Err(e) => {
-                error!(registration_id = %new_id, "failed to spawn session agent: {e}");
-            }
-        }
-        Ok(())
     }
 
     async fn handle_actor_terminated(
@@ -470,6 +944,88 @@ pub struct SessionAgentState {
     registration_id: String, // store for convenience
     shutting_down: bool,
     broker: Option<ActorRef<BrokerMessage>>, // will be set after creation
+    /// Its connection, as its Listener gave it, and what its reader has told of it: the facts the stall policy decides
+    /// from (`crate::pressure::verdict`).
+    connection: Option<Connection>,
+}
+
+/// A session's connection, and what its reader has said of it.
+struct Connection {
+    client_id: String,
+    control: Arc<dyn cassini_types::ConnectionControl>,
+    /// When its reader last read an acknowledgement, or the connection opened.
+    progress_at: tokio::time::Instant,
+    /// Its reader waits for a frame's admission.
+    waiting: bool,
+    /// When it was last spared, and when its last progress before that was.
+    spared: Option<(tokio::time::Instant, tokio::time::Instant)>,
+    /// When a judgement first found it should be ended, if one did and none has found otherwise since.
+    condemned: Option<tokio::time::Instant>,
+}
+
+impl SessionAgent {
+    /// A subscriber of this session says it has stalled: decided by the one stall policy from what this session knows
+    /// of its connection (`crate::pressure::verdict`). Spared, its reader refuses for now and reads on; ended, its
+    /// connection is cut from outside its Listener (which may be waiting on a write to this client), and the session
+    /// detaches as on any lost connection.
+    fn judge_stall(
+        myself: &ActorRef<BrokerMessage>,
+        state: &mut SessionAgentState,
+        topic: String,
+        held: usize,
+        stalled_for: std::time::Duration,
+        stall: std::time::Duration,
+        subscriber: ActorRef<BrokerMessage>,
+    ) {
+        use crate::pressure::{StallFacts, Verdict, verdict};
+        let Some(connection) = state.connection.as_mut() else {
+            return;
+        };
+        let now = tokio::time::Instant::now();
+        let facts = StallFacts {
+            since_progress: now - connection.progress_at,
+            reader_waiting: connection.waiting,
+            since_spared: connection.spared.map(|(at, _)| now - at),
+            progressed_since_spared: connection
+                .spared
+                .is_some_and(|(_, before)| connection.progress_at > before),
+            since_condemned: connection.condemned.map(|at| now - at),
+        };
+        match verdict(stall, facts) {
+            Verdict::Ignore => connection.condemned = None,
+            Verdict::Condemn => {
+                connection.condemned.get_or_insert(now);
+            }
+            Verdict::Spare => {
+                connection.condemned = None;
+                connection.control.refuse_for(stall);
+                connection.spared = Some((now, connection.progress_at));
+                info!(
+                    registration_id = %state.registration_id,
+                    %topic,
+                    held,
+                    ?stalled_for,
+                    "a stalled subscriber's connection waits for room, so what it acknowledged may be unread: its \
+                     publishes are refused for now, and its connection kept"
+                );
+            }
+            Verdict::End => {
+                connection.control.cut(&format!(
+                    "the broker ended this connection: its subscription to {topic} stalled past the stall bound"
+                ));
+                state.connection = None;
+                let _ = subscriber.send_message(BrokerMessage::StallEnded);
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::SessionStallEnded {
+                        registration_id: state.registration_id.clone(),
+                        topic,
+                        held,
+                        stalled_for,
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -489,6 +1045,7 @@ impl Actor for SessionAgent {
             registration_id,
             shutting_down: false,
             broker: None,
+            connection: None,
         })
     }
 
@@ -513,13 +1070,6 @@ impl Actor for SessionAgent {
             BrokerMessage::PrepareForShutdown { .. } => {
                 self.handle_prepare_for_shutdown(state).await?;
             }
-            BrokerMessage::InitSession {
-                trace_ctx,
-                client_id,
-            } => {
-                self.handle_init_session(myself.clone(), state, client_id, trace_ctx)
-                    .await?;
-            }
             BrokerMessage::RegistrationRequest {
                 client_id,
                 trace_ctx,
@@ -535,12 +1085,22 @@ impl Actor for SessionAgent {
                 self.handle_reassign_client(state, client_ref, trace_ctx)
                     .await?;
             }
+            BrokerMessage::CloseConnection { except } => {
+                if state.client_ref.get_name().as_deref() != Some(except.as_str()) {
+                    info!(registration_id = %state.registration_id, "closing the connection of a superseded session");
+                    state.client_ref.stop(Some("SUPERSEDED".to_string()));
+                }
+            }
             BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
+                published_instance,
+                id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -550,19 +1110,118 @@ impl Actor for SessionAgent {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
+                    published_instance,
+                    id,
+                    window,
                 )
                 .await?;
             }
+            // A refusal of one of this session's publishes, from the broker or its topic: the client is told, and the
+            // publish is no longer pending.
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                result: Err(reason),
+                trace_ctx,
+                published_by,
+                published_instance,
+                origin,
+                delivery_id,
+                refusal,
+            } => {
+                let _ = state
+                    .client_ref
+                    .send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload,
+                        result: Err(reason),
+                        trace_ctx,
+                        published_by,
+                        published_instance,
+                        origin,
+                        delivery_id,
+                        refusal,
+                    });
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::SessionPendingUpdate {
+                        registration_id: state.registration_id.clone(),
+                        delta: -1,
+                    });
+                }
+            }
+            // A subscriber let go of what it held while its client was away and the budget was exhausted: this session
+            // asks to be ended now.
+            BrokerMessage::SessionShed { topic, count } => {
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::EndSession {
+                        registration_id: state.registration_id.clone(),
+                        reason: format!(
+                            "the broker's memory budget was exhausted while this client was away: what its session \
+                             held on {topic} ({count} messages) was let go, and the session ended"
+                        ),
+                    });
+                }
+            }
+            BrokerMessage::ConnectionOpened { client_id, control } => {
+                state.connection = Some(Connection {
+                    client_id,
+                    control,
+                    progress_at: tokio::time::Instant::now(),
+                    waiting: false,
+                    spared: None,
+                    condemned: None,
+                });
+            }
+            BrokerMessage::ConnectionProgress { client_id } => {
+                if let Some(connection) = state.connection.as_mut()
+                    && connection.client_id == client_id
+                {
+                    connection.progress_at = tokio::time::Instant::now();
+                }
+            }
+            BrokerMessage::ConnectionWaiting { client_id, waiting } => {
+                if let Some(connection) = state.connection.as_mut()
+                    && connection.client_id == client_id
+                {
+                    connection.waiting = waiting;
+                }
+            }
+            BrokerMessage::SubscriberStalled {
+                topic,
+                held,
+                stalled_for,
+                stall,
+                subscriber,
+            } => Self::judge_stall(&myself, state, topic, held, stalled_for, stall, subscriber),
             BrokerMessage::PushMessage {
                 payload,
                 topic,
                 trace_ctx,
+                published_by,
+                published_instance,
+                origin,
+                delivery_id,
             } => {
-                self.handle_push_message(myself.clone(), state, payload, topic, trace_ctx)
-                    .await?;
+                self.handle_push_message(
+                    myself.clone(),
+                    state,
+                    payload,
+                    topic,
+                    trace_ctx,
+                    published_by,
+                    published_instance,
+                    origin,
+                    delivery_id,
+                )
+                .await?;
             }
-            BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
-                self.handle_publish_ack(myself.clone(), state, topic, trace_ctx)
+            BrokerMessage::PublishRequestAck {
+                topic,
+                id,
+                trace_ctx,
+            } => {
+                self.handle_publish_ack(myself.clone(), state, topic, id, trace_ctx)
                     .await?;
             }
             BrokerMessage::SubscribeRequest {
@@ -613,22 +1272,6 @@ impl Actor for SessionAgent {
                     registration_id,
                     topic,
                     result,
-                    trace_ctx,
-                )
-                .await?;
-            }
-            BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx,
-            } => {
-                self.handle_disconnect_request(
-                    myself.clone(),
-                    state,
-                    reason,
-                    client_id,
-                    registration_id,
                     trace_ctx,
                 )
                 .await?;
@@ -685,30 +1328,6 @@ impl SessionAgent {
         Ok(())
     }
 
-    async fn handle_init_session(
-        &self,
-        _myself: ActorRef<BrokerMessage>,
-        state: &mut SessionAgentState,
-        client_id: String,
-        trace_ctx: Option<opentelemetry::Context>,
-    ) -> Result<(), ActorProcessingErr> {
-        let registration_id = state.registration_id.clone();
-        let span = trace_span!("session.init", %client_id, %registration_id);
-        try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received init");
-
-        state
-            .client_ref
-            .cast(BrokerMessage::RegistrationResponse {
-                client_id,
-                result: Ok(registration_id),
-                trace_ctx: Some(span.context()),
-            })
-            .ok();
-        Ok(())
-    }
-
     async fn handle_re_registration_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -733,6 +1352,7 @@ impl SessionAgent {
                         client_id: client_id.clone(),
                         result: Ok(registration_id.clone()),
                         trace_ctx: Some(span.context()),
+                        session: Some(myself.clone()),
                     })
                 {
                     error!("failed to send registration ack to listener: {e}");
@@ -744,6 +1364,7 @@ impl SessionAgent {
                             client_id,
                             result: Ok(registration_id),
                             trace_ctx: Some(span.context()),
+                            session: Some(myself.clone()),
                         }) {
                             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT} {e}!");
                             error!("{err_msg}");
@@ -752,6 +1373,7 @@ impl SessionAgent {
                                     client_id: state.client_ref.get_name().unwrap_or_default(),
                                     result: Err(err_msg),
                                     trace_ctx: Some(span.context()),
+                                    session: None,
                                 },
                             );
                             myself.stop(Some(e.to_string()));
@@ -783,22 +1405,42 @@ impl SessionAgent {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         myself: ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         _reply_to: Option<ActorRef<BrokerMessage>>, // added but ignored; we'll use our own
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
+        id: MessageId,
+        window: Hold,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("session.publish_request", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
         if state.shutting_down {
+            // Refused for now: the client keeps it, and sends it to the broker that comes next.
             warn!("Rejecting publish during shutdown");
+            let _ = state
+                .client_ref
+                .send_message(BrokerMessage::PublishResponse {
+                    topic,
+                    payload: Payload::uncharged(Arc::new(Vec::new())),
+                    result: Err("the broker is shutting down".to_string()),
+                    trace_ctx: Some(span.context()),
+                    published_by: None,
+                    published_instance: None,
+                    origin: Some(id),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                });
+            drop(window);
             return Ok(());
         }
 
@@ -826,9 +1468,14 @@ impl SessionAgent {
                     .client_ref
                     .send_message(BrokerMessage::PublishResponse {
                         topic,
-                        payload,
+                        payload: Payload::uncharged(Arc::new(Vec::new())),
                         result: Err(err_msg),
                         trace_ctx: Some(span.context()),
+                        published_by: None,
+                        published_instance: None,
+                        origin: Some(id),
+                        delivery_id: None,
+                        refusal: Some(cassini_types::PublishRefusal::Unavailable),
                     });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -857,6 +1504,10 @@ impl SessionAgent {
             // Set reply_to to ourselves so the topic agent can ack us directly
             reply_to: Some(myself.clone()),
             trace_ctx: Some(span.context()),
+            published_by,
+            published_instance,
+            id,
+            window,
         }) {
             error!("failed to forward publish to broker: {e}");
             // Notify manager that publish failed (delta -1)
@@ -872,13 +1523,18 @@ impl SessionAgent {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_push_message(
         &self,
         _myself: ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
+        origin: Option<MessageId>,
+        delivery_id: u64,
     ) -> Result<(), ActorProcessingErr> {
         let registration_id = state.registration_id.clone();
         let span = trace_span!("session.push_message", %registration_id, %topic);
@@ -888,18 +1544,23 @@ impl SessionAgent {
 
         if let Err(e) = state.client_ref.cast(BrokerMessage::PublishResponse {
             topic: topic.clone(),
-            payload: payload.clone(),
+            payload,
             result: Ok(()),
             trace_ctx: Some(span.context()),
+            published_by,
+            published_instance,
+            origin,
+            delivery_id: Some(delivery_id),
+            refusal: None,
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 
             if let Some(subscriber) = where_is(get_subscriber_name(&registration_id, &topic)) {
                 subscriber
-                    .send_message(BrokerMessage::PushMessageFailed {
-                        payload: payload.clone(),
+                    .send_message(BrokerMessage::PushMessageFailed { delivery_id })
+                    .inspect_err(|_| {
+                        warn!("failed to tell the subscriber on {topic} a delivery failed")
                     })
-                    .inspect_err(|_| warn!("failed to DLQ message on topic {topic}"))
                     .ok();
             }
         }
@@ -911,6 +1572,7 @@ impl SessionAgent {
         myself: ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
         topic: String,
+        id: MessageId,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
         let registration_id = state.registration_id.clone();
@@ -924,6 +1586,7 @@ impl SessionAgent {
             .client_ref
             .send_message(BrokerMessage::PublishRequestAck {
                 topic,
+                id,
                 trace_ctx: Some(span.context()),
             })
         {
@@ -959,6 +1622,13 @@ impl SessionAgent {
 
         if state.shutting_down {
             warn!("Rejecting subscribe during shutdown");
+            // Refused, and the client told so: a silent drop looks like a subscription that was taken.
+            crate::topic::acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("Broker is shutting down".to_string()),
+                Some(span.context()),
+            );
             return Ok(());
         }
 
@@ -1096,36 +1766,6 @@ impl SessionAgent {
         Ok(())
     }
 
-    async fn handle_disconnect_request(
-        &self,
-        myself: ActorRef<BrokerMessage>,
-        _state: &mut SessionAgentState,
-        reason: DisconnectReason,
-        client_id: String,
-        registration_id: Option<String>,
-        trace_ctx: Option<opentelemetry::Context>,
-    ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("session.disconnect_request", %client_id);
-        try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received disconnect request");
-        info!("client disconnected");
-
-        if let Some(manager) = myself.try_get_supervisor() {
-            let _ = manager.send_message(BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx: Some(span.context()),
-            });
-        } else {
-            error!("couldn't find supervisor");
-        }
-        // Stop this session actor now that the client is gone
-        myself.stop(Some("DISCONNECTED".to_string()));
-        Ok(())
-    }
-
     async fn handle_timeout_message(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -1221,4 +1861,29 @@ impl SessionAgent {
             });
         Ok(())
     }
+}
+
+/// Whether a connection presenting `connection` may resume a session that belongs to `session`: only the same
+/// identity, and never when either is unknown (a certificate with no DNS name has no identity to match). Pure.
+pub fn may_resume(session: Option<&str>, connection: Option<&str>) -> bool {
+    matches!((session, connection), (Some(s), Some(c)) if s == c)
+}
+
+/// [`may_resume`], by identity and instance: a connection of one pod of a multi-instance workload never resumes another
+/// pod's session (docs/architecture/authority-model.md, "Multi-instance workloads"). Each side is `(identity, pod UID)`.
+/// Pure.
+pub fn may_resume_as(
+    session: (Option<&str>, Option<&str>),
+    connection: (Option<&str>, Option<&str>),
+) -> bool {
+    may_resume(session.0, connection.0)
+        && cert_issuer_common::instance::same_instance(session.1, connection.1)
+}
+
+/// Whether a new session of `(identity, instance)` supersedes an older one of `older` (its identity, if it has one, and
+/// its instance): the same identity and the same instance (`cert_issuer_common::instance::same_instance`). A
+/// single-instance workload's new session supersedes every older one of its identity; a pod restarted in place (the
+/// same UID) supersedes its own; two pods of a multi-instance workload never supersede each other. Pure.
+pub fn supersedes(newer: (&str, Option<&str>), older: (Option<&str>, Option<&str>)) -> bool {
+    older.0 == Some(newer.0) && cert_issuer_common::instance::same_instance(newer.1, older.1)
 }

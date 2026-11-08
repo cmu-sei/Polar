@@ -1,13 +1,48 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
-use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
+pub use polar_custody::client::ClientKey;
+mod connect;
+pub mod credit;
+pub mod environment;
+pub mod facade;
+#[cfg(feature = "slow-hand-off")]
+pub mod hand_off;
+pub mod outbox;
+pub mod refused;
+
+use cassini_types::{
+    ClientEvent, ClientMessage, ControlOp, MAX_FRAME_BYTES, MessageId, WireTraceCtx,
+};
 use ractor::concurrency::{Duration, sleep};
 use ractor::{Actor, ActorProcessingErr, ActorRef, Message, OutputPort, RpcReplyPort, async_trait};
 use rkyv::rancor::Error;
 use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, ServerName};
 use socket2::SockRef;
 use std::env;
 use std::marker::PhantomData;
@@ -31,6 +66,30 @@ pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
 pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+/// How long a transport the broker refused for its protocol version waits before it tries again: a client and broker
+/// of different versions do not agree by trying (they must be built together).
+pub const PROTOCOL_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a transport waits before it reconnects: at once, unless the broker refused its protocol.
+pub fn reconnect_wait(protocol_refused: bool) -> std::time::Duration {
+    if protocol_refused {
+        PROTOCOL_RETRY
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+/// What a deferral (`ClientEvent::PublishDeferred`) adds to the broker's reason when a facade keeps the publish.
+pub const DEFERRED_AND_KEPT: &str = "kept, and sent again after a wait or on the next registration";
+/// What it adds when the transport has no facade: nothing keeps the publish, so its caller must send it again.
+pub const DEFERRED_NOT_KEPT: &str =
+    "not kept: this transport has no outbox, so whoever published it must send it again";
+
+/// A new epoch for a client's numbering of what it publishes: random, so a client that starts again does not reuse
+/// the numbers of the one before (docs/architecture/cassini-client-reliability.md, section 4). Never zero, which the
+/// broker's own publishes use.
+pub fn new_epoch() -> u64 {
+    uuid::Uuid::new_v4().as_u64_pair().0.max(1)
+}
 
 /// Bridges [`ClientEvent`] messages from the TCP client to any actor using a mapping closure.
 ///
@@ -66,8 +125,10 @@ impl MessageQueue {
     }
 
     pub fn from_env() -> Option<Self> {
-        std::env::var("CASSINI_QUEUE_PATH")
+        environment::CASSINI_QUEUE_PATH
+            .read(&polar_env::ProcessEnv)
             .ok()
+            .flatten()
             .map(|p| Self::new(PathBuf::from(p)))
     }
 
@@ -77,8 +138,7 @@ impl MessageQueue {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let line = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         writeln!(file, "{}", line)
     }
 
@@ -125,6 +185,7 @@ pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub trace_ctx: Option<WireTraceCtx>,
     pub offline_behavior: OfflineBehavior,
+    pub share_identity: bool,
 }
 
 impl<M: Message + Sync> Default for ClientEventForwarder<M> {
@@ -181,6 +242,19 @@ impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
     }
 }
 
+/// What a transport does when its connection to the broker is lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReconnectMode {
+    /// Connect again and ask to resume, inside the same actor. The transport on its own (the CLI
+    /// daemon, and every agent that holds it directly) has always done this.
+    #[default]
+    InPlace,
+    /// End, and leave bringing up a new transport to whoever supervises it. The facade does:
+    /// it knows whether a transport is registered, holds publishes meanwhile, and backs off. A
+    /// transport that mended itself would leave it believing the connection was still up.
+    LeaveToSupervisor,
+}
+
 /// A basse configuration for a TCP Client actor
 #[derive(Clone, Debug)]
 pub struct TCPClientConfig {
@@ -188,7 +262,34 @@ pub struct TCPClientConfig {
     pub server_name: String,
     pub ca_certificate_path: String,
     pub client_certificate_path: String,
-    pub client_key_path: String,
+    /// The certificate's key: a file, or the custody daemon, which signs for it.
+    pub client_key: ClientKey,
+    /// What the transport does when the connection is lost.
+    pub reconnect: ReconnectMode,
+    /// A TLS configuration made in code, used as given in place of the CA, certificate and key files, which are then
+    /// never read: the custody daemon's own, whose key is in its own memory (docs/architecture/key-custody.md, step 5).
+    pub tls: Option<Arc<ClientConfig>>,
+}
+
+/// Why a message could not be made a frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameError {
+    /// It does not fit in one frame ([`MAX_FRAME_BYTES`]).
+    TooLarge { bytes: usize },
+    /// It could not be encoded.
+    Encode(String),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::TooLarge { bytes } => write!(
+                f,
+                "the message is {bytes} bytes as a frame, over the limit of {MAX_FRAME_BYTES}"
+            ),
+            FrameError::Encode(e) => write!(f, "the message could not be encoded: {e}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -212,24 +313,66 @@ impl TCPClientConfig {
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key: ClientKey::File(client_key_path),
+            reconnect: ReconnectMode::default(),
+            tls: None,
         }
     }
 
-    /// Read filepaths from the environment and return. If we can't read these, we can't start
-    pub fn new() -> Result<Self, ActorProcessingErr> {
-        let client_certificate_path = env::var("TLS_CLIENT_CERT")?;
-        let client_key_path = env::var("TLS_CLIENT_KEY")?;
-        let ca_certificate_path = env::var("TLS_CA_CERT")?;
-        let broker_endpoint = env::var("BROKER_ADDR")?;
-        let server_name = env::var("CASSINI_SERVER_NAME")?;
+    /// This configuration, with the transport to do `reconnect` when the connection is lost.
+    pub fn with_reconnect(mut self, reconnect: ReconnectMode) -> Self {
+        self.reconnect = reconnect;
+        self
+    }
 
+    /// This configuration, connecting with `tls` as given: the files it names are not read.
+    pub fn with_tls(mut self, tls: Arc<ClientConfig>) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Read the coordinates from the process environment. If we can't read these, we can't
+    /// start, and the error names every variable that is missing.
+    pub fn new() -> Result<Self, ActorProcessingErr> {
+        Self::from_env(&polar_env::ProcessEnv).map_err(ActorProcessingErr::from)
+    }
+
+    /// As [`new`](Self::new), reading from `env`, so a snapshot or a test supplies its own.
+    /// Every problem is reported together, each naming the variable and what it is for.
+    pub fn from_env(env: &dyn polar_env::Env) -> Result<Self, String> {
+        use environment::{
+            BROKER_ADDR, CASSINI_SERVER_NAME, TLS_CA_CERT, TLS_CLIENT_CERT, read_client_key,
+        };
+        let mut problems = Vec::new();
+        let mut take = |read: Result<String, polar_env::EnvError>| match read {
+            Ok(value) => value,
+            Err(error) => {
+                problems.push(error.to_string());
+                String::new()
+            }
+        };
+        let client_certificate_path = take(TLS_CLIENT_CERT.read(env));
+        let ca_certificate_path = take(TLS_CA_CERT.read(env));
+        let broker_endpoint = take(BROKER_ADDR.read(env));
+        let server_name = take(CASSINI_SERVER_NAME.read(env));
+        let client_key = match read_client_key(env) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                problems.push(error.to_string());
+                None
+            }
+        };
+        let (Some(client_key), true) = (client_key, problems.is_empty()) else {
+            return Err(problems.join("; "));
+        };
         Ok(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key,
+            reconnect: ReconnectMode::default(),
+            tls: None,
         })
     }
 
@@ -244,14 +387,16 @@ impl TCPClientConfig {
         let server_name = server_name.or_else(|| env::var("CASSINI_SERVER_NAME").ok())?;
         let ca_certificate_path = ca_cert.or_else(|| env::var("TLS_CA_CERT").ok())?;
         let client_certificate_path = client_cert.or_else(|| env::var("TLS_CLIENT_CERT").ok())?;
-        let client_key_path = client_key.or_else(|| env::var("TLS_CLIENT_KEY").ok())?;
+        let client_key = ClientKey::File(client_key.or_else(|| env::var("TLS_CLIENT_KEY").ok())?);
 
         Some(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key,
+            reconnect: ReconnectMode::default(),
+            tls: None,
         })
     }
 }
@@ -275,6 +420,12 @@ pub enum TcpClientMessage {
         topic: String,
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
+        /// Whether the publisher's identity (always known to the
+        /// broker via the connection's own verified mTLS cert) should
+        /// actually be forwarded to subscribers on delivery. Prefer
+        /// the publish()/publish_anonymous() constructors over
+        /// constructing this variant directly.
+        share_identity: bool,
     },
     Subscribe {
         topic: String,
@@ -304,7 +455,6 @@ pub enum TcpClientMessage {
     GetSession {
         trace_ctx: Option<WireTraceCtx>,
     },
-    SetEventHandler(ActorRef<ClientEvent>),
     Reconnect,
     Reconnected {
         reader: Option<ReadHalf<TlsStream<TcpStream>>>,
@@ -315,9 +465,203 @@ pub enum TcpClientMessage {
     /// a transition back to Unregistered and a fresh registration,
     /// rather than retrying the same now-invalid registration_id forever.
     SessionInvalidated,
+    /// From the transport to the facade: the broker's answer to a subscribe or a publish this client sent (`Ok`
+    /// only for a subscription taken). The facade keeps what was refused (`refused`).
+    BrokerAnswered {
+        topic: String,
+        use_: facade::TopicUse,
+        result: Result<(), String>,
+    },
+    /// The agent's authority changed: the facade asks its gate again about every topic it was refused, and sends
+    /// the wanted subscriptions it now admits.
+    JudgeAgain,
+    /// From the facade to the transport: send the publish its outbox numbered `id`. The outbox keeps it until it is
+    /// acknowledged, and sends it again on the next registration if it is not.
+    Transmit {
+        topic: String,
+        payload: Arc<Vec<u8>>,
+        trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
+        id: MessageId,
+    },
+    /// From the transport to the facade: the broker accepted the publish numbered `id`.
+    Acknowledged {
+        id: MessageId,
+    },
+    /// From the transport to the facade: the publish numbered `id` will never be accepted (the broker refused it, or
+    /// it does not fit in a frame), so the outbox lets it go.
+    Refused {
+        id: MessageId,
+    },
+    /// From the transport to the facade: the broker could not take the publish numbered `id` now
+    /// (`PublishRefusal::Unavailable`); the outbox keeps it, and it is sent again on the next registration or after a
+    /// wait.
+    Deferred {
+        id: MessageId,
+    },
+    /// From the reader to the transport: the broker refused this client's protocol version; it waits
+    /// `PROTOCOL_RETRY` before each later try, rather than reconnecting at once.
+    ProtocolRefused,
+    /// The facade's own: send the publish numbered `id` again, if the outbox still holds it and `timer` is still the
+    /// one armed for it (a later deferral or a registration replaces or cancels it).
+    Resend {
+        id: MessageId,
+        timer: u64,
+    },
+    /// Tell the broker this client has the delivery numbered `delivery_id`, so it lets go of it
+    /// (`ClientMessage::PublishResponseAck`).
+    AcknowledgeDelivery {
+        delivery_id: u64,
+    },
+    /// To the facade: a publish that has already taken room in `slot` of the client's credit (`credit.rs`), as
+    /// `TcpClient::publish` and `publish_when_ready` send it. A `Publish` cast to the facade takes its room there.
+    PublishWith {
+        topic: String,
+        payload: Vec<u8>,
+        trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
+        slot: credit::Slot,
+    },
+    /// To the facade: a publish on `topic` was refused before it was sent (`reason`); the agent is told
+    /// (`ClientEvent::PublishDropped`).
+    NotSent {
+        topic: String,
+        reason: String,
+    },
+}
+
+impl TcpClientMessage {
+    /// The message's kind, its variant's name: what a span records of it. Its Debug would write out a publish's
+    /// payload.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TcpClientMessage::RegistrationResponse { .. } => "RegistrationResponse",
+            TcpClientMessage::ErrorMessage { .. } => "ErrorMessage",
+            TcpClientMessage::GetRegistrationId { .. } => "GetRegistrationId",
+            TcpClientMessage::ClientRegistered { .. } => "ClientRegistered",
+            TcpClientMessage::Register => "Register",
+            TcpClientMessage::Publish { .. } => "Publish",
+            TcpClientMessage::Subscribe { .. } => "Subscribe",
+            TcpClientMessage::UnsubscribeRequest { .. } => "UnsubscribeRequest",
+            TcpClientMessage::Disconnect { .. } => "Disconnect",
+            TcpClientMessage::ControlRequest { .. } => "ControlRequest",
+            TcpClientMessage::ListSessions { .. } => "ListSessions",
+            TcpClientMessage::ListTopics { .. } => "ListTopics",
+            TcpClientMessage::GetSession { .. } => "GetSession",
+            TcpClientMessage::Reconnect => "Reconnect",
+            TcpClientMessage::Reconnected { .. } => "Reconnected",
+            TcpClientMessage::SessionInvalidated => "SessionInvalidated",
+            TcpClientMessage::BrokerAnswered { .. } => "BrokerAnswered",
+            TcpClientMessage::JudgeAgain => "JudgeAgain",
+            TcpClientMessage::Transmit { .. } => "Transmit",
+            TcpClientMessage::Acknowledged { .. } => "Acknowledged",
+            TcpClientMessage::Refused { .. } => "Refused",
+            TcpClientMessage::Deferred { .. } => "Deferred",
+            TcpClientMessage::Resend { .. } => "Resend",
+            TcpClientMessage::ProtocolRefused => "ProtocolRefused",
+            TcpClientMessage::AcknowledgeDelivery { .. } => "AcknowledgeDelivery",
+            TcpClientMessage::PublishWith { .. } => "PublishWith",
+            TcpClientMessage::NotSent { .. } => "NotSent",
+        }
+    }
+
+    /// The common case -- identity shared with subscribers. Prefer
+    /// this over constructing Publish directly.
+    pub fn publish(topic: String, payload: Vec<u8>, trace_ctx: Option<WireTraceCtx>) -> Self {
+        TcpClientMessage::Publish {
+            topic,
+            payload,
+            trace_ctx,
+            share_identity: true,
+        }
+    }
+
+    /// Explicit opt-out for the rare case where genuine anonymity is
+    /// wanted -- the broker still knows who's connected (it's derived
+    /// from the verified mTLS cert, not client-supplied), it simply
+    /// won't forward that identity on to subscribers for this publish.
+    pub fn publish_anonymous(
+        topic: String,
+        payload: Vec<u8>,
+        trace_ctx: Option<WireTraceCtx>,
+    ) -> Self {
+        TcpClientMessage::Publish {
+            topic,
+            payload,
+            trace_ctx,
+            share_identity: false,
+        }
+    }
 }
 
 type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
+
+/// How a `TcpClientActor` delivers every real, incoming `ClientEvent`
+/// to the rest of its own agent -- the one, real, structural choice
+/// this crate genuinely offers, replacing what were previously two,
+/// independent, always-both-fired fields (`events_output` broadcast
+/// and a direct `event_handler`, see this crate's own, prior history
+/// for the shape this replaced).
+///
+/// `Broadcast` is unchanged, existing behavior -- every current agent
+/// keeps working exactly as before, migrated mechanically to this
+/// enum's own shape.
+///
+/// `Router` is the new, real, per-topic-directed alternative: genuine
+/// `ClientEvent::MessagePublished` events are converted to a real
+/// `polar_router::IncomingMessage` and routed by topic via `router`
+/// (see `polar-router`'s own crate documentation for the complete,
+/// real reasoning); every other, real `ClientEvent` variant --
+/// connection-lifecycle events like `Registered`/`TransportError`,
+/// never genuinely "a message on a topic" in the first place -- goes
+/// directly to `lifecycle` instead, mirroring `TcpClient::spawn`'s
+/// own, existing `map_event` closure pattern.
+#[derive(Clone)]
+pub enum DeliveryMode {
+    Broadcast(Arc<OutputPort<ClientEvent>>),
+    Router {
+        router: ActorRef<polar_router::RouterMessage>,
+        // Arc, not Box -- spawn_reader's own real, spawned read-loop
+        // task needs its own, cloned copy of `delivery` (the same
+        // real reason state.events_output/event_handler were always
+        // cloned out of state before this replaced them), and a
+        // trait-object closure can only be cloned via shared
+        // ownership, never by value.
+        lifecycle: Arc<dyn Fn(ClientEvent) + Send + Sync>,
+    },
+}
+
+/// Writes delivery acknowledgements to `writer` as they are sent to the returned channel, a batch at a time, beside
+/// the transport's mailbox: an acknowledgement never waits behind the publishes queued there, only behind the frame
+/// being written (a single stream keeps its order). Ends when the channel's senders are gone or a write fails (the
+/// connection is gone, and its reader says so).
+pub fn spawn_ack_writer<W>(writer: Arc<Mutex<W>>) -> AckSender
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (acks, mut pending) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
+    tokio::spawn(async move {
+        while let Some(first) = pending.recv().await {
+            let mut frames = Vec::new();
+            let mut next = Some(first);
+            while let Some(message) = next {
+                match TcpClientActor::frame(&message) {
+                    Ok(frame) => frames.extend_from_slice(&frame),
+                    Err(e) => warn!(?message, "a delivery acknowledgement was not framed: {e}"),
+                }
+                next = pending.try_recv().ok();
+            }
+            let mut writer = writer.lock().await;
+            if writer.write_all(&frames).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+        }
+    });
+    acks
+}
+
+/// What a connection's acknowledgement writer is sent: `PublishResponseAck`s, and `FrameUndecodable`s.
+pub type AckSender = tokio::sync::mpsc::UnboundedSender<ClientMessage>;
 
 /// Actor state for the TCP client
 pub struct TcpClientState {
@@ -328,19 +672,25 @@ pub struct TcpClientState {
     registration: RegistrationState,
     client_config: Arc<ClientConfig>,
 
-    /// Output port where message payloads and the topic it came from is piped to a dispatcher
-    events_output: Arc<OutputPort<ClientEvent>>,
+    delivery: DeliveryMode,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
-    pub event_handler: Option<ActorRef<ClientEvent>>,
+    reconnect: ReconnectMode,
+    answers: Option<ActorRef<TcpClientMessage>>,
+    /// How this transport numbers a publish it is sent directly (`Publish`), with no facade numbering it: an epoch
+    /// of its own, and the next seq in it.
+    epoch: u64,
+    next_seq: u64,
+    /// The broker refused this client's protocol version: it waits `PROTOCOL_RETRY` before each later try.
+    protocol_refused: bool,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
-    /// If `None`, a default unsubscribed port is created internally.
-    /// Prefer [`event_handler`] via [`ClientEventForwarder`] for reliable delivery.
-    pub events_output: Option<Arc<OutputPort<ClientEvent>>>,
-    pub event_handler: Option<ActorRef<ClientEvent>>,
+    pub delivery: DeliveryMode,
+    /// Told the broker's answer to each subscribe and publish (`BrokerAnswered`): the facade, which keeps what was
+    /// refused. None for a client without one.
+    pub answers: Option<ActorRef<TcpClientMessage>>,
 }
 
 /// TCP client actor
@@ -359,59 +709,53 @@ impl TcpClientActor {
         client_config: &Arc<ClientConfig>,
     ) -> Result<TlsStream<TcpStream>, ActorProcessingErr> {
         let connector = TlsConnector::from(Arc::clone(client_config));
-        let mut backoff = std::time::Duration::from_millis(100);
-        let max_backoff = std::time::Duration::from_secs(2);
-        let max_attempts = 8;
-
         let server_name = ServerName::try_from(server_name)
             .map_err(|_| ActorProcessingErr::from("Invalid DNS name"))?;
 
-        for attempt in 1..=max_attempts {
-            match TcpStream::connect(addr.clone()).await {
-                Ok(tcp) => {
-                    // Convert to std::net::TcpStream to set socket options
-                    let std_stream = tcp.into_std().map_err(|e| {
-                        ActorProcessingErr::from(format!("Failed to convert to std stream: {}", e))
-                    })?;
+        // Each try is bounded: with the broker gone its address answers nothing, and an
+        // unbounded try would wait on the kernel's retransmits (see connect.rs).
+        connect::with_retries(&connect::Policy::default(), |_| {
+            let connector = connector.clone();
+            let server_name = server_name.clone();
+            let addr = addr.clone();
+            async move {
+                let tcp = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| format!("TCP connect failed: {e}"))?;
+                // Convert to std::net::TcpStream to set socket options
+                let std_stream = tcp
+                    .into_std()
+                    .map_err(|e| format!("Failed to convert to std stream: {e}"))?;
 
-                    // Use socket2 to set buffer sizes
-                    let sock_ref = SockRef::from(&std_stream);
-                    sock_ref
-                        .set_recv_buffer_size(100 * 1024 * 1024)
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "Failed to set recv buffer size: {}",
-                                e
-                            ))
-                        })?;
-                    sock_ref
-                        .set_send_buffer_size(100 * 1024 * 1024)
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "Failed to set send buffer size: {}",
-                                e
-                            ))
-                        })?;
-
-                    // Convert back to tokio stream
-                    let tcp = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
-                        ActorProcessingErr::from(format!(
-                            "Failed to convert back to tokio stream: {}",
-                            e
-                        ))
-                    })?;
-
-                    match connector.connect(server_name.clone(), tcp).await {
-                        Ok(tls) => return Ok(tls),
-                        Err(e) => debug!(attempt, error = %e, "TLS handshake failed, retrying"),
-                    }
+                // Find a dead broker in about a minute, whether the connection is idle or
+                // has data in flight, instead of waiting on it forever.
+                if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&std_stream) {
+                    warn!("could not enable dead-peer detection on the broker connection: {e}");
                 }
-                Err(e) => debug!(attempt, error = %e, "TCP connect failed, retrying"),
+
+                // Use socket2 to set buffer sizes
+                let sock_ref = SockRef::from(&std_stream);
+                sock_ref
+                    .set_recv_buffer_size(100 * 1024 * 1024)
+                    .map_err(|e| format!("Failed to set recv buffer size: {e}"))?;
+                sock_ref
+                    .set_send_buffer_size(100 * 1024 * 1024)
+                    .map_err(|e| format!("Failed to set send buffer size: {e}"))?;
+
+                // Convert back to tokio stream
+                let tcp = tokio::net::TcpStream::from_std(std_stream)
+                    .map_err(|e| format!("Failed to convert back to tokio stream: {e}"))?;
+
+                connector
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|e| format!("TLS handshake failed: {e}"))
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(max_backoff);
-        }
-        Err(ActorProcessingErr::from("Failed to connect after retries"))
+        })
+        .await
+        .map_err(|last| {
+            ActorProcessingErr::from(format!("Failed to connect after retries: {last}"))
+        })
     }
 
     fn spawn_reader(
@@ -422,209 +766,478 @@ impl TcpClientActor {
         // Take ownership of the read half exactly once.
         let reader = state.reader.take().expect("Reader already taken");
 
-        let queue_out = state.events_output.clone();
-        let handler = state.event_handler.clone(); // clone the optional direct handler
+        let delivery = state.delivery.clone();
+        let answers = state.answers.clone();
         let broker_addr = state.bind_addr.clone();
+        let reconnect = state.reconnect;
+        // This connection's delivery acknowledgements are written beside the mailbox, ahead of what waits in it.
+        let acks = state.writer.clone().map(spawn_ack_writer);
 
         let read_loop_span =
             info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
 
-        let abort = tokio::spawn(async move {
-            let mut msg_count = 0;
-            let mut buf_reader = tokio::io::BufReader::new(reader);
-            loop {
-                msg_count += 1;
-                trace!("TCP client read loop iteration {}", msg_count);
-                match buf_reader.read_u32().await {
-                    Ok(incoming_msg_length) => {
-                        if incoming_msg_length > 0 {
-                            let mut buffer = vec![0; incoming_msg_length as usize];
+        // The load harness's slow consumer, when it asked for one (hand_off.rs); nothing otherwise.
+        #[cfg(feature = "slow-hand-off")]
+        let mut pace = hand_off::pace();
 
-                            trace!("Reading {incoming_msg_length} byte(s).");
-                            if buf_reader.read_exact(&mut buffer).await.is_ok() {
-                                let _fg = trace_span!(
-                                    "tcp_client.read_frame",
+        let abort = tokio::spawn(
+            async move {
+                let mut msg_count = 0;
+                // The frames read on this connection, numbered as the broker numbers what it writes.
+                let mut frames: u64 = 0;
+                let mut buf_reader = tokio::io::BufReader::new(reader);
+                loop {
+                    msg_count += 1;
+                    trace!("TCP client read loop iteration {}", msg_count);
+                    match buf_reader.read_u32().await {
+                        Ok(incoming_msg_length) => {
+                            if incoming_msg_length as usize > MAX_FRAME_BYTES {
+                                warn!(
                                     len = incoming_msg_length,
-                                    first_16 = ?&buffer[..buffer.len().min(16)],
-                                )
-                                .entered();
-
-                                trace!(
-                                    len = incoming_msg_length,
-                                    first_16 = ?&buffer[..buffer.len().min(16)],
-                                    "Received frame"
+                                    max = MAX_FRAME_BYTES,
+                                    "Oversized frame from broker; reconnecting before allocating"
                                 );
-
-                                match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
-                                    Ok(message) => {
-                                        match message {
-                                            ClientMessage::RegistrationResponse { result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_registration_response");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                match result {
-                                                    Ok(registration_id) => {
-                                                        myself
-                                                            .send_message(
-                                                                TcpClientMessage::RegistrationResponse(
-                                                                    registration_id,
-                                                                ),
-                                                            )
-                                                            .expect("Could not forward message to {myself:?");
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("Failed to register session with the server. {e}");
-                                                    }
-                                                }
-                                            }
-                                            ClientMessage::PublishResponse {
-                                                topic,
-                                                payload,
-                                                result,
-                                                trace_ctx,
-                                            } => {
-                                                let span = trace_span!("client.handle_publish_response");
-                                                if let Some(wire_ctx) = trace_ctx {
-                                                    tracing::trace!("Received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
-                                                }
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    let current_trace_ctx = WireTraceCtx::from_current_span();
-                                                    let event = ClientEvent::MessagePublished {
-                                                        topic: topic.clone(),
-                                                        payload: payload.to_vec(),
-                                                        trace_ctx: current_trace_ctx,
-                                                    };
-                                                    // Send to output port (existing)
-                                                    queue_out.send(event.clone());
-                                                    trace!("TCP client sent MessagePublished to output port for topic {}", topic);
-                                                    // Send to direct handler if present
-                                                    if let Some(ref handler) = handler
-                                                        && let Err(e) = handler.send_message(event) {
-                                                            error!("Failed to send MessagePublished to direct handler: {}", e);
-                                                        }
-                                                } else {
-                                                    warn!("Failed to publish message to topic: {topic}");
-                                                }
-                                            }
-                                            ClientMessage::SubscribeAcknowledgment { topic, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_subscribe_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    info!("Successfully subscribed to topic: {topic}");
-                                                } else {
-                                                    warn!("Failed to subscribe to topic: {topic}, {result:?}");
-                                                }
-                                            }
-
-                                            ClientMessage::UnsubscribeAcknowledgment { topic, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_unsubscribe_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    info!("Successfully unsubscribed from topic: {topic}");
-                                                } else {
-                                                    warn!("Failed to unsubscribe from topic: {topic}");
-                                                }
-                                            }
-                                            ClientMessage::ErrorMessage { error, trace_ctx } => {
-                                                let span = trace_span!("client.handle_error_message").entered();
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-                                                warn!("Received error from broker: {error}");
-
-                                                // A session-mismatch response means the broker has no record of
-                                                // our registration_id (e.g. it restarted/rejuvenated). Resuming
-                                                // is impossible; force a fresh registration instead of retrying
-                                                // the same rejected request forever.
-                                                if error.contains("session mismatch") {
-                                                    warn!("Session no longer valid on broker; re-registering fresh");
-                                                    let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
-                                                }
-                                            }
-                                            ClientMessage::PublishRequestAck { topic, trace_ctx } => {
-                                                let span = trace_span!("client.handle_publish_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-                                                debug!("Received publish ack for topic: {topic}");
-
-                                                let event = ClientEvent::PublishAcknowledged { topic };
-
-                                                // Send to output port
-                                                queue_out.send(event.clone());
-                                                // Send to direct handler if present
-                                                if let Some(ref handler) = handler
-                                                    && let Err(e) = handler.send_message(event) {
-                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
-                                                    }
-
-
-                                            }
-                                            ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_control_response");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                trace!("Received control response for registration: {registration_id}, result: {:?}", result);
-
-                                                let current_trace_ctx = WireTraceCtx::from_current_span();
-                                                let event = ClientEvent::ControlResponse {
-                                                    registration_id,
-                                                    result,
-                                                    trace_ctx: current_trace_ctx,
-                                                };
-                                                // Send to output port
-                                                queue_out.send(event.clone());
-                                                // Send to direct handler if present
-                                                if let Some(ref handler) = handler
-                                                    && let Err(e) = handler.send_message(event) {
-                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
-                                                    }
-                                            }
-                                            _ => {
-                                                let _g = trace_span!("client.handle_unknown_message").entered();
-                                                trace!("Received unexpected message type");
-                                            },
-                                        }
+                                let reason = format!(
+                                    "frame length {incoming_msg_length} exceeds max {MAX_FRAME_BYTES} bytes"
+                                );
+                                TcpClientActor::dispatch_event(
+                                    &delivery,
+                                    ClientEvent::TransportError {
+                                        reason: reason.clone(),
+                                    },
+                                );
+                                match reconnect {
+                                    ReconnectMode::InPlace => {
+                                        let _ = myself.send_message(TcpClientMessage::Reconnect);
                                     }
-                                    Err(e) => {
-                                        error!(
-                                            len = buffer.len(),
-                                            first_8 = ?&buffer[..buffer.len().min(8)],
-                                            "{e} Received raw frame"
-                                        );
-                                        continue;
+                                    ReconnectMode::LeaveToSupervisor => {
+                                        myself.stop(Some(reason));
                                     }
+                                }
+                                break;
+                            }
+
+                            if incoming_msg_length > 0 {
+                                let mut buffer = vec![0; incoming_msg_length as usize];
+
+                                trace!("Reading {incoming_msg_length} byte(s).");
+                                if buf_reader.read_exact(&mut buffer).await.is_ok() {
+                                    #[cfg(feature = "slow-hand-off")]
+                                    hand_off::before_hand_off(&mut pace, &buffer).await;
+                                    let _fg = trace_span!(
+                                        "tcp_client.read_frame",
+                                        len = incoming_msg_length,
+                                        first_16 = ?&buffer[..buffer.len().min(16)],
+                                    )
+                                    .entered();
+
+                                    trace!(
+                                        len = incoming_msg_length,
+                                        first_16 = ?&buffer[..buffer.len().min(16)],
+                                        "Received frame"
+                                    );
+
+                                    frames += 1;
+                                    TcpClientActor::on_frame(
+                                        myself.clone(),
+                                        &delivery,
+                                        answers.as_ref(),
+                                        acks.as_ref(),
+                                        frames,
+                                        &buffer,
+                                    );
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "TCP reader terminating");
-                        let event = ClientEvent::TransportError {
-                            reason: format!("{UNEXPECTED_DISCONNECT} {e}")
-                        };
-                        queue_out.send(event.clone());
-                        if let Some(ref handler) = handler
-                            && let Err(e) = handler.send_message(event) {
-                                error!("Failed to send TransportError to direct handler: {}", e);
+                        Err(e) => {
+                            warn!(error = %e, "TCP reader terminating");
+                            let event = ClientEvent::TransportError {
+                                reason: format!("{UNEXPECTED_DISCONNECT} {e}"),
+                            };
+                            TcpClientActor::dispatch_event(&delivery, event);
+                            match reconnect {
+                                // Instead of breaking, send Reconnect to self
+                                ReconnectMode::InPlace => {
+                                    let _ = myself.send_message(TcpClientMessage::Reconnect);
+                                }
+                                // The supervisor brings a new transport; this one is done.
+                                ReconnectMode::LeaveToSupervisor => {
+                                    myself.stop(Some(format!("{UNEXPECTED_DISCONNECT} {e}")));
+                                }
                             }
-                        // Instead of breaking, send Reconnect to self
-                        let _ = myself.send_message(TcpClientMessage::Reconnect);
-                        break;
+                            break;
+                        }
                     }
                 }
             }
-        }.instrument(read_loop_span))
+            .instrument(read_loop_span),
+        )
         .abort_handle();
 
         state.abort_handle = Some(abort);
+        Ok(())
+    }
+
+    /// Given an already-parsed, real `ClientMessage` off the wire,
+    /// decides and executes what happens next -- extracted from
+    /// spawn_reader's own, previously-tightly-interleaved read loop
+    /// specifically so this decision logic is directly, genuinely
+    /// unit-testable without needing a real socket or async runtime
+    /// at all: nothing in this function actually awaits anything, it
+    /// was simply nested inside spawn_reader's own, real, async read
+    /// loop before this.
+    #[cfg(test)]
+    fn process_client_message(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
+        message: ClientMessage,
+    ) {
+        Self::process_client_message_with(myself, delivery, answers, None, message)
+    }
+
+    /// One frame from the broker, the `frame`th on this connection: decoded and handled, or, if it does not decode,
+    /// logged and named to the broker (`ClientMessage::FrameUndecodable`): the client will never decode it, so a
+    /// delivery in it could never be acknowledged, and would be held, and sent again on every resume, for good
+    /// (cassini-backpressure.md, second review, finding B).
+    fn on_frame(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
+        acks: Option<&AckSender>,
+        frame: u64,
+        buffer: &[u8],
+    ) {
+        match rkyv::from_bytes::<ClientMessage, Error>(buffer) {
+            Ok(message) => {
+                Self::process_client_message_with(myself, delivery, answers, acks, message);
+            }
+            Err(e) => {
+                error!(
+                    frame,
+                    len = buffer.len(),
+                    first_8 = ?&buffer[..buffer.len().min(8)],
+                    "{e} Received a frame that does not decode: the broker is told which"
+                );
+                if let Some(acks) = acks
+                    && acks
+                        .send(ClientMessage::FrameUndecodable { frame })
+                        .is_err()
+                {
+                    warn!(
+                        frame,
+                        "the broker could not be told of a frame that does not decode"
+                    );
+                }
+            }
+        }
+    }
+
+    /// As [`process_client_message`](Self::process_client_message), acknowledging deliveries through `acks` (the
+    /// connection's acknowledgement writer, [`spawn_ack_writer`]) when there is one.
+    fn process_client_message_with(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
+        acks: Option<&AckSender>,
+        message: ClientMessage,
+    ) {
+        let answer = |topic: &str, use_: facade::TopicUse, result: &Result<(), String>| {
+            if let Some(answers) = answers
+                && let Err(e) = answers.send_message(TcpClientMessage::BrokerAnswered {
+                    topic: topic.to_string(),
+                    use_,
+                    result: result.clone(),
+                })
+            {
+                warn!("the broker's answer on {topic} could not be passed on: {e}");
+            }
+        };
+        match message {
+            ClientMessage::RegistrationResponse { result, trace_ctx } => {
+                let span = trace_span!("client.handle_registration_response");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                match result {
+                    Ok(registration_id) => {
+                        info!("Registration succeeded: {registration_id}");
+                        myself
+                            .send_message(TcpClientMessage::RegistrationResponse(registration_id))
+                            .expect("Could not forward message to {myself:?");
+                    }
+                    Err(refusal) => {
+                        if refusal.code == cassini_types::RefusalCode::ProtocolMismatch {
+                            error!(
+                                ours = cassini_types::PROTOCOL_VERSION,
+                                "the broker refused this client's protocol version: {}; it tries again every {:?}",
+                                refusal.reason,
+                                PROTOCOL_RETRY
+                            );
+                            let _ = myself.send_message(TcpClientMessage::ProtocolRefused);
+                        }
+                        warn!(
+                            code = ?refusal.code,
+                            "Failed to register session with the server. {}", refusal.reason
+                        );
+                        // Said to whoever listens, as it is final for this connection: the broker closes it.
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::RegistrationRefused {
+                                code: refusal.code,
+                                reason: refusal.reason,
+                            },
+                        );
+                    }
+                }
+            }
+            // The session it asked to resume was ended early (what it held was let go): the agent is told, to
+            // resynchronise; the broker gives it a new session next.
+            ClientMessage::SessionEnded {
+                registration_id,
+                reason,
+            } => {
+                warn!(%registration_id, "the broker ended this client's session: {reason}");
+                TcpClientActor::dispatch_event(
+                    delivery,
+                    ClientEvent::SessionEnded {
+                        registration_id,
+                        reason,
+                    },
+                );
+            }
+            ClientMessage::PublishResponse {
+                topic,
+                payload,
+                result,
+                trace_ctx,
+                published_by,
+                published_instance,
+                origin,
+                delivery_id,
+                refusal,
+            } => {
+                let span = trace_span!("client.handle_publish_response");
+                if let Some(wire_ctx) = trace_ctx {
+                    tracing::trace!(
+                        "Received PublishResponse with trace_id: {:02x?}",
+                        wire_ctx.trace_id
+                    );
+                }
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                if result.is_ok() {
+                    let current_trace_ctx = WireTraceCtx::from_current_span();
+                    let event = ClientEvent::MessagePublished {
+                        topic: topic.clone(),
+                        payload: payload.to_vec(),
+                        trace_ctx: current_trace_ctx,
+                        published_by: published_by.clone(),
+                        published_instance: published_instance.clone(),
+                    };
+                    TcpClientActor::dispatch_event(delivery, event);
+                    trace!("TCP client dispatched MessagePublished for topic {}", topic);
+                    if let Some(delivery_id) = delivery_id {
+                        TcpClientActor::delivery_handed_off(&myself, acks, delivery_id);
+                    }
+                } else if let (Err(reason), Some(cassini_types::PublishRefusal::Unavailable)) =
+                    (&result, refusal)
+                {
+                    // Not a refusal of this publish, but of now: a facade keeps it and sends it again, and the agent's
+                    // topic is not taken as refused. A bare transport keeps nothing: its caller is told so.
+                    info!("The broker could not take a publish on {topic} now: {reason}");
+                    let kept = match (answers, origin) {
+                        (Some(answers), Some(id)) => {
+                            if let Err(e) = answers.send_message(TcpClientMessage::Deferred { id })
+                            {
+                                warn!(
+                                    "the deferral of a publish on {topic} could not be passed on: {e}"
+                                );
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    let after = if kept {
+                        DEFERRED_AND_KEPT
+                    } else {
+                        DEFERRED_NOT_KEPT
+                    };
+                    TcpClientActor::dispatch_event(
+                        delivery,
+                        ClientEvent::PublishDeferred {
+                            topic: topic.clone(),
+                            reason: format!("{reason}: {after}"),
+                        },
+                    );
+                } else if let Err(reason) = result {
+                    // The broker did not take our publish: the agent hears it, not only the log.
+                    warn!("The broker refused a publish on {topic}: {reason}");
+                    answer(&topic, facade::TopicUse::Publish, &Err(reason.clone()));
+                    if let (Some(answers), Some(id)) = (answers, origin)
+                        && let Err(e) = answers.send_message(TcpClientMessage::Refused { id })
+                    {
+                        warn!("the refusal of a publish on {topic} could not be passed on: {e}");
+                    }
+                    TcpClientActor::dispatch_event(
+                        delivery,
+                        ClientEvent::PublishRefused {
+                            topic: topic.clone(),
+                            reason: reason.clone(),
+                        },
+                    );
+                }
+            }
+            ClientMessage::SubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx,
+            } => {
+                let span = trace_span!("client.handle_subscribe_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                answer(&topic, facade::TopicUse::Subscribe, &result);
+                match result {
+                    Ok(()) => {
+                        info!("Subscribed to topic: {topic}");
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::ClientSubscribed {
+                                topic: topic.clone(),
+                            },
+                        );
+                    }
+                    Err(reason) => {
+                        warn!("The broker refused a subscription to {topic}: {reason}");
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::SubscribeRefused {
+                                topic: topic.clone(),
+                                reason: reason.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            ClientMessage::UnsubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx,
+            } => {
+                let span = trace_span!("client.handle_unsubscribe_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                if result.is_ok() {
+                    info!("Successfully unsubscribed from topic: {topic}");
+                } else {
+                    warn!("Failed to unsubscribe from topic: {topic}");
+                }
+            }
+            ClientMessage::ErrorMessage { error, trace_ctx } => {
+                let span = trace_span!("client.handle_error_message").entered();
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+                warn!("Received error from broker: {error}");
+
+                // A session-mismatch response means the broker has no record of
+                // our registration_id (e.g. it restarted/rejuvenated). Resuming
+                // is impossible; force a fresh registration instead of retrying
+                // the same rejected request forever.
+                if error.contains("session mismatch") {
+                    warn!("Session no longer valid on broker; re-registering fresh");
+                    let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
+                }
+            }
+            ClientMessage::PublishRequestAck {
+                topic,
+                epoch,
+                seq,
+                trace_ctx,
+            } => {
+                let span = trace_span!("client.handle_publish_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+                debug!("Received publish ack for topic: {topic}");
+
+                let id = MessageId { epoch, seq };
+                if let Some(answers) = answers
+                    && let Err(e) = answers.send_message(TcpClientMessage::Acknowledged { id })
+                {
+                    warn!(
+                        "the acknowledgement of a publish on {topic} could not be passed on: {e}"
+                    );
+                }
+                let event = ClientEvent::PublishAcknowledged { topic, id };
+                TcpClientActor::dispatch_event(delivery, event);
+            }
+            ClientMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx,
+            } => {
+                let span = trace_span!("client.handle_control_response");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                trace!(
+                    "Received control response for registration: {registration_id}, result: {:?}",
+                    result
+                );
+
+                let current_trace_ctx = WireTraceCtx::from_current_span();
+                let event = ClientEvent::ControlResponse {
+                    registration_id,
+                    result,
+                    trace_ctx: current_trace_ctx,
+                };
+                TcpClientActor::dispatch_event(delivery, event);
+            }
+            _ => {
+                let _g = trace_span!("client.handle_unknown_message").entered();
+                trace!("Received unexpected message type");
+            }
+        }
+    }
+
+    /// A message as a frame: its length (u32, big-endian, as the broker reads it) and its bytes. A message whose
+    /// frame would be over [`MAX_FRAME_BYTES`] is refused here, before anything is written: the broker would close the
+    /// connection on it.
+    pub fn frame(message: &ClientMessage) -> Result<Vec<u8>, FrameError> {
+        let bytes =
+            rkyv::to_bytes::<Error>(message).map_err(|e| FrameError::Encode(e.to_string()))?;
+        if bytes.len() > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge { bytes: bytes.len() });
+        }
+        let len = bytes.len() as u32;
+        let mut buffer = Vec::with_capacity(4 + bytes.len());
+        buffer.extend_from_slice(&len.to_be_bytes());
+        buffer.extend_from_slice(&bytes);
+        Ok(buffer)
+    }
+
+    /// A frame's body (what follows its length) as the message it carries.
+    pub fn unframe(body: &[u8]) -> Result<ClientMessage, FrameError> {
+        rkyv::from_bytes::<ClientMessage, Error>(body)
+            .map_err(|e| FrameError::Encode(e.to_string()))
+    }
+
+    /// Writes a frame to the broker and flushes it.
+    async fn write_frame(
+        frame: &[u8],
+        state: &mut TcpClientState,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(arc_writer) = state.writer.as_ref() else {
+            error!("No writer available in TcpClientState");
+            return Err(ActorProcessingErr::from("No writer assigned to client!"));
+        };
+        let mut writer = arc_writer.lock().await;
+        writer.write_all(frame).await?;
+        // Flush to ensure data is sent immediately (CRITICAL!)
+        writer.flush().await?;
         Ok(())
     }
 
@@ -633,43 +1246,11 @@ impl TcpClientActor {
         message: ClientMessage,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
-        // NOTE: Broker expects u32 length prefix, NOT u64
-        match rkyv::to_bytes::<Error>(&message) {
-            Ok(bytes) => {
-                // Validate frame size fits in u32
-                let len: u32 = bytes
-                    .len()
-                    .try_into()
-                    .map_err(|_| ActorProcessingErr::from("Frame too large (>4GB)"))?;
-
-                // Pre-allocate buffer with exact capacity (4 bytes + payload)
-                let mut buffer = Vec::with_capacity(4 + bytes.len());
-
-                // Write 4-byte BE length prefix (matching broker's read_u32)
-                buffer.extend_from_slice(&len.to_be_bytes());
-
-                //add message to buffer
-                buffer.extend_from_slice(&bytes);
-
-                //write message
-                if let Some(arc_writer) = state.writer.as_ref() {
-                    let mut writer = arc_writer.lock().await;
-
-                    // Write entire buffer in one go
-                    writer.write_all(&buffer).await?;
-
-                    // Flush to ensure data is sent immediately (CRITICAL!)
-                    writer.flush().await?;
-                    Ok(())
-                } else {
-                    error!("No writer available in TcpClientState");
-                    let reason = "No writer assigned to client!".to_string();
-                    Err(ActorProcessingErr::from(reason))
-                }
-            }
+        match Self::frame(&message) {
+            Ok(frame) => Self::write_frame(&frame, state).await,
             Err(e) => {
-                warn!("Failed to serialize message. {e}");
-                Err(ActorProcessingErr::from(e))
+                warn!("Failed to frame message. {e}");
+                Err(ActorProcessingErr::from(e.to_string()))
             }
         }
     }
@@ -680,25 +1261,105 @@ impl TcpClientActor {
         reason: String,
     ) {
         let _g = warn_span!("tcp_client.transport_error", error = %reason).entered();
-        state.events_output.send(ClientEvent::TransportError {
-            reason: reason.clone(),
-        });
+        Self::dispatch_event(
+            &state.delivery,
+            ClientEvent::TransportError {
+                reason: reason.clone(),
+            },
+        );
         drop(_g);
         myself.stop(Some(reason));
     }
 
-    // ===== Handler methods =====
+    /// The one, real, single place a `ClientEvent` is ever actually
+    /// delivered out of this actor -- replaces four, separate,
+    /// previously near-identical "send to the broadcast port, then
+    /// conditionally also send to a direct handler" call sites (see
+    /// this crate's own, prior history for the shape this replaced).
+    ///
+    /// `MessagePublished` specifically is the one, real variant
+    /// `DeliveryMode::Router` treats differently from every other
+    /// variant -- it's the only one that's genuinely "a message on a
+    /// topic," and the only one converted into a real
+    /// `polar_router::IncomingMessage` and routed by topic. Every
+    /// other, real `ClientEvent` (connection-lifecycle events like
+    /// `Registered`/`TransportError`, never genuinely topic-shaped at
+    /// all) goes directly to `lifecycle` instead.
+    fn dispatch_event(delivery: &DeliveryMode, event: ClientEvent) {
+        match delivery {
+            DeliveryMode::Broadcast(events_output) => {
+                events_output.send(event);
+            }
+            DeliveryMode::Router { router, lifecycle } => match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    trace_ctx,
+                    published_by,
+                    published_instance,
+                } => {
+                    if let Err(e) = router.send_message(polar_router::RouterMessage::Route(
+                        polar_router::IncomingMessage {
+                            topic,
+                            payload,
+                            published_by,
+                            published_instance,
+                            trace_ctx,
+                        },
+                    )) {
+                        error!("Failed to route MessagePublished to RouterActor: {e}");
+                    }
+                }
+                other => lifecycle(other),
+            },
+        }
+    }
 
-    // Handlers for messages that can be processed regardless of registration state
-    async fn handle_set_event_handler(
-        &self,
-        _myself: ActorRef<TcpClientMessage>,
+    /// A delivery has been handed to the agent (its router, or whoever listens to its events): the broker is told it
+    /// may let go of it. This is the one place a delivery is acknowledged. Acknowledging it after the agent has done
+    /// its work (a consumer's graph write, docs/architecture/cassini-client-reliability.md, 5a) is not built: it would
+    /// move this call to the domain, which would be given the `delivery_id` with the message.
+    ///
+    /// It goes through the connection's acknowledgement writer when there is one, not the transport's mailbox, so it
+    /// never waits behind the publishes queued there (docs/architecture/cassini-backpressure.md, review finding 1).
+    fn delivery_handed_off(
+        myself: &ActorRef<TcpClientMessage>,
+        acks: Option<&AckSender>,
+        delivery_id: u64,
+    ) {
+        if let Some(acks) = acks
+            && acks
+                .send(ClientMessage::PublishResponseAck { delivery_id })
+                .is_ok()
+        {
+            return;
+        }
+        if let Err(e) = myself.send_message(TcpClientMessage::AcknowledgeDelivery { delivery_id }) {
+            warn!(delivery_id, "a delivery could not be acknowledged: {e}");
+        }
+    }
+
+    /// The real, single, shared shape behind nine, separate,
+    /// previously near-identical outbound handler functions (each
+    /// built its own real ClientMessage envelope, sent it, and on
+    /// error called emit_transport_err_and_stop -- differing only in
+    /// which envelope variant and fields). Always returns Ok(()) --
+    /// a real send failure is never propagated up as an error, only
+    /// logged and emitted as a real, genuine ClientEvent::TransportError,
+    /// matching every one of the original nine call sites' own,
+    /// existing behavior exactly.
+    async fn send_or_fail(
+        myself: ActorRef<TcpClientMessage>,
         state: &mut TcpClientState,
-        handler: ActorRef<ClientEvent>,
+        envelope: ClientMessage,
     ) -> Result<(), ActorProcessingErr> {
-        state.event_handler = Some(handler);
+        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+        }
         Ok(())
     }
+
+    // ===== Handler methods =====
 
     async fn handle_reconnected(
         &self,
@@ -728,7 +1389,10 @@ impl TcpClientActor {
         let server_name = state.server_name.clone();
         let client_config = state.client_config.clone();
         let myself_clone = myself.clone();
+        // A broker that refused this client's protocol is not asked again at once.
+        let wait = reconnect_wait(state.protocol_refused);
         tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
             match TcpClientActor::connect_with_backoff(addr, server_name, &client_config).await {
                 Ok(tls_stream) => {
                     let (reader, write_half) = split(tls_stream);
@@ -757,13 +1421,15 @@ impl TcpClientActor {
         let envelope = ClientMessage::RegistrationRequest {
             registration_id: None,
             trace_ctx: Self::current_trace_ctx(),
+            protocol: cassini_types::PROTOCOL_VERSION,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
+    /// The broker accepted a registration: this is the session from now on, and the agent is
+    /// told, so it subscribes. Used whether the client was unregistered or was asking to resume
+    /// (the broker may answer a resume with the same session, or, after a restart that lost it,
+    /// a new one); in both the agent must be told, and subscribing again is harmless.
     async fn handle_registration_response_unregistered(
         &self,
         _myself: ActorRef<TcpClientMessage>,
@@ -774,12 +1440,7 @@ impl TcpClientActor {
             registration_id: registration_id.clone(),
         };
         let event = ClientEvent::Registered { registration_id };
-        state.events_output.send(event.clone());
-        if let Some(handler) = &state.event_handler
-            && let Err(e) = handler.send_message(event)
-        {
-            error!("Failed to send Registered to direct handler: {}", e);
-        }
+        TcpClientActor::dispatch_event(&state.delivery, event);
         Ok(())
     }
 
@@ -793,11 +1454,9 @@ impl TcpClientActor {
         let envelope = ClientMessage::RegistrationRequest {
             registration_id: Some(registration_id.to_owned()),
             trace_ctx: Self::current_trace_ctx(),
+            protocol: cassini_types::PROTOCOL_VERSION,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_get_registration_id(
@@ -811,23 +1470,47 @@ impl TcpClientActor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish(
         &self,
         myself: ActorRef<TcpClientMessage>,
         state: &mut TcpClientState,
         registration_id: &str,
         topic: String,
-        payload: Vec<u8>,
+        payload: Arc<Vec<u8>>,
         trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let envelope = ClientMessage::PublishRequest {
-            topic,
-            payload: payload.into(),
+            topic: topic.clone(),
+            payload,
             registration_id: registration_id.to_owned(),
             trace_ctx,
+            share_identity,
+            epoch: id.epoch,
+            seq: id.seq,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+        match Self::frame(&envelope) {
+            Ok(frame) => {
+                if let Err(e) = Self::write_frame(&frame, state).await {
+                    TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+                }
+            }
+            // Not the connection's fault: the publish is refused, and the connection kept.
+            Err(e) => {
+                error!(%topic, "a publish was not sent: {e}");
+                if let Some(answers) = &state.answers {
+                    let _ = answers.send_message(TcpClientMessage::Refused { id });
+                }
+                TcpClientActor::dispatch_event(
+                    &state.delivery,
+                    ClientEvent::PublishRefused {
+                        topic,
+                        reason: e.to_string(),
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -845,10 +1528,7 @@ impl TcpClientActor {
             topic,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_unsubscribe_request(
@@ -864,10 +1544,7 @@ impl TcpClientActor {
             topic,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_disconnect(
@@ -884,9 +1561,7 @@ impl TcpClientActor {
             registration_id: Some(registration_id.to_owned()),
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
-        }
+        TcpClientActor::send_or_fail(myself.clone(), state, envelope).await?;
         if let Some(handle) = state.abort_handle.take() {
             handle.abort();
         }
@@ -907,10 +1582,7 @@ impl TcpClientActor {
             op,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_list_sessions(
@@ -925,10 +1597,7 @@ impl TcpClientActor {
             op: ControlOp::ListSessions,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_list_topics(
@@ -943,10 +1612,7 @@ impl TcpClientActor {
             op: ControlOp::ListTopics,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     // Fallback for unregistered state
@@ -996,71 +1662,68 @@ impl Actor for TcpClientActor {
 
         // --- 1. Initialize crypto provider once ---
         let _g = debug_span!("tls.install_crypto_provider").entered();
-        match rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        match rustls::crypto::ring::default_provider().install_default() {
             Ok(_) => warn!("Default crypto provider installed (this should only happen once)"),
             Err(_) => debug!("Crypto provider already configured"),
         }
         drop(_g);
 
-        // --- 2. Load CA certificate into root store ---
-        let _g = debug_span!("tls.load_ca_cert").entered();
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        let ca_path = &args.config.ca_certificate_path;
+        // A configuration made in code is used as given; otherwise it is built from the files.
+        let client_config = match &args.config.tls {
+            Some(tls) => tls.clone(),
+            None => {
+                // --- 2. Load CA certificate into root store ---
+                let _g = debug_span!("tls.load_ca_cert").entered();
+                let mut root_cert_store = rustls::RootCertStore::empty();
+                let ca_path = &args.config.ca_certificate_path;
 
-        let ca_cert = CertificateDer::from_pem_file(ca_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read CA certificate from {ca_path}: {e}"
-            ))
-        })?;
+                let ca_cert = CertificateDer::from_pem_file(ca_path).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to read CA certificate from {ca_path}: {e}"
+                    ))
+                })?;
 
-        root_cert_store.add(ca_cert).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to add CA certificate to root store: {e}"
-            ))
-        })?;
-        drop(_g);
+                root_cert_store.add(ca_cert).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to add CA certificate to root store: {e}"
+                    ))
+                })?;
+                drop(_g);
 
-        // --- 3. Build WebPKI verifier ---
-        let _g = debug_span!("tls.build_verifier").entered();
-        let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
-            .build()
-            .map_err(|e| {
-                ActorProcessingErr::from(anyhow::anyhow!("Failed to build WebPKI verifier: {e}"))
-            })?;
-        drop(_g);
+                // --- 3. Build WebPKI verifier ---
+                let _g = debug_span!("tls.build_verifier").entered();
+                let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
+                    .build()
+                    .map_err(|e| {
+                        ActorProcessingErr::from(anyhow::anyhow!(
+                            "Failed to build WebPKI verifier: {e}"
+                        ))
+                    })?;
+                drop(_g);
 
-        // --- 4. Load client cert and key ---
-        let _g = debug_span!("tls.load_client_cert_key").entered();
-        let mut certs = Vec::new();
-        let cert_path = &args.config.client_certificate_path;
-        let key_path = &args.config.client_key_path;
+                // --- 4. Load client cert; its key is a file or the custody daemon's ---
+                let _g = debug_span!("tls.load_client_cert_key").entered();
+                let mut certs = Vec::new();
+                let cert_path = &args.config.client_certificate_path;
 
-        let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read client certificate from {cert_path}: {e}"
-            ))
-        })?;
+                let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to read client certificate from {cert_path}: {e}"
+                    ))
+                })?;
 
-        certs.push(client_cert);
+                certs.push(client_cert);
+                drop(_g);
 
-        let private_key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read client private key from {key_path}: {e}"
-            ))
-        })?;
-        drop(_g);
-
-        // --- 5. Build Rustls client config ---
-        let _g = debug_span!("tls.build_client_config").entered();
-        let client_config = rustls::ClientConfig::builder()
-            .with_webpki_verifier(verifier)
-            .with_client_auth_cert(certs, private_key)
-            .map_err(|e| {
-                ActorProcessingErr::from(anyhow::anyhow!(
-                    "Failed to build Rustls client config: {e}"
-                ))
-            })?;
-        drop(_g);
+                // --- 5. Build Rustls client config ---
+                let _g = debug_span!("tls.build_client_config").entered();
+                let client_config =
+                    polar_custody::client::client_config(verifier, certs, &args.config.client_key)
+                        .map_err(|e| ActorProcessingErr::from(anyhow::anyhow!(e)))?;
+                drop(_g);
+                Arc::new(client_config)
+            }
+        };
 
         // --- 6. Determine registration state ---
         let registration = match args.registration_id {
@@ -1072,20 +1735,20 @@ impl Actor for TcpClientActor {
 
         // --- 7. Construct final state ---
         // init_span ends when this function returns (no long-lived spawned tasks here)
-        let events_output = args
-            .events_output
-            .unwrap_or_else(|| Arc::new(OutputPort::default()));
-
         let state = TcpClientState {
+            reconnect: args.config.reconnect,
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
             reader: None,
             writer: None,
             registration,
-            client_config: Arc::new(client_config),
-            events_output,
+            client_config,
+            delivery: args.delivery,
             abort_handle: None,
-            event_handler: args.event_handler,
+            answers: args.answers,
+            epoch: new_epoch(),
+            next_seq: 1,
+            protocol_refused: false,
         };
 
         Ok(state)
@@ -1102,36 +1765,39 @@ impl Actor for TcpClientActor {
             broker_addr = %addr,
             server_name = %state.server_name,
         );
-        let _g = connect_span.enter();
-        info!("Connecting to {addr}");
+        async {
+            info!("Connecting to {addr}");
 
-        let tls_stream = TcpClientActor::connect_with_backoff(
-            addr.clone(),
-            state.server_name.clone(),
-            &state.client_config,
-        )
-        .await?;
+            let tls_stream = TcpClientActor::connect_with_backoff(
+                addr.clone(),
+                state.server_name.clone(),
+                &state.client_config,
+            )
+            .await?;
 
-        info!("TLS connection established");
+            info!("TLS connection established");
 
-        let (reader, write_half) = split(tls_stream);
-        let writer = tokio::io::BufWriter::new(write_half);
+            let (reader, write_half) = split(tls_stream);
+            let writer = tokio::io::BufWriter::new(write_half);
 
-        state.reader = Some(reader);
-        state.writer = Some(Arc::new(Mutex::new(writer)));
+            state.reader = Some(reader);
+            state.writer = Some(Arc::new(Mutex::new(writer)));
 
-        info!("Successfully connected to {addr}. Listening for messages.");
+            info!("Successfully connected to {addr}. Listening for messages.");
 
-        // Spawn the long-running reader loop under its own span (spawn_reader should instrument the task).
-        self.spawn_reader(myself.clone(), state)?;
+            // Spawn the long-running reader loop under its own span (spawn_reader should instrument the task).
+            self.spawn_reader(myself.clone(), state)?;
 
-        // Kick off registration *after* connection is guaranteed
-        info!("Requesting registration");
-        myself
-            .send_message(TcpClientMessage::Register)
-            .map_err(ActorProcessingErr::from)?;
+            // Kick off registration *after* connection is guaranteed
+            info!("Requesting registration");
+            myself
+                .send_message(TcpClientMessage::Register)
+                .map_err(ActorProcessingErr::from)?;
 
-        Ok(())
+            Ok::<(), ActorProcessingErr>(())
+        }
+        .instrument(connect_span)
+        .await
     }
 
     async fn post_stop(
@@ -1146,10 +1812,12 @@ impl Actor for TcpClientActor {
         Ok(())
     }
 
+    // The message is recorded by its kind, never by Debug: Debug writes a publish's payload out byte by byte, and this
+    // span is at INFO, so every publish of every agent paid about 27 ms a MiB for it (stage 5a's load harness).
     #[tracing::instrument(
         name = "cassini.tcp_client.handle",
-        skip(self, myself, state),
-        fields(registration = ?state.registration, msg = ?message),
+        skip(self, myself, state, message),
+        fields(registration = ?state.registration, msg = message.kind()),
     )]
     async fn handle(
         &self,
@@ -1158,17 +1826,13 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match (&mut state.registration, message) {
-            // ---- SetEventHandler (always handled) ----
-            (_, TcpClientMessage::SetEventHandler(handler)) => {
-                self.handle_set_event_handler(myself, state, handler)
-                    .await?
-            }
-
             // ---- Reconnected (always handled) ----
             (_, TcpClientMessage::Reconnected { reader, writer }) => {
                 self.handle_reconnected(myself, state, reader, writer)
                     .await?
             }
+
+            (_, TcpClientMessage::ProtocolRefused) => state.protocol_refused = true,
 
             // ---- SessionInvalidated (always handled) ----
             (_, TcpClientMessage::SessionInvalidated) => {
@@ -1198,6 +1862,18 @@ impl Actor for TcpClientActor {
                     .await?
             }
 
+            // ---- A registration answer while already registered ----
+            // The client asked to resume a session. Whatever the broker answers, that is the
+            // session now, and the agent is told. Ignoring it left the agent running and deaf
+            // after a broker restart, because nothing resubscribed.
+            (
+                RegistrationState::Registered { .. },
+                TcpClientMessage::RegistrationResponse(registration_id),
+            ) => {
+                self.handle_registration_response_unregistered(myself, state, registration_id)
+                    .await?
+            }
+
             // ---- Registered state ----
             (RegistrationState::Registered { registration_id }, msg) => {
                 // Clone registration_id to release the borrow on state.registration
@@ -1215,13 +1891,55 @@ impl Actor for TcpClientActor {
                         topic,
                         payload,
                         trace_ctx,
+                        share_identity,
                     } => {
-                        self.handle_publish(myself, state, &reg_id, topic, payload, trace_ctx)
-                            .await?;
+                        let id = MessageId {
+                            epoch: state.epoch,
+                            seq: state.next_seq,
+                        };
+                        state.next_seq += 1;
+                        self.handle_publish(
+                            myself,
+                            state,
+                            &reg_id,
+                            topic,
+                            Arc::new(payload),
+                            trace_ctx,
+                            share_identity,
+                            id,
+                        )
+                        .await?;
+                    }
+                    TcpClientMessage::Transmit {
+                        topic,
+                        payload,
+                        trace_ctx,
+                        share_identity,
+                        id,
+                    } => {
+                        self.handle_publish(
+                            myself,
+                            state,
+                            &reg_id,
+                            topic,
+                            payload,
+                            trace_ctx,
+                            share_identity,
+                            id,
+                        )
+                        .await?;
                     }
                     TcpClientMessage::Subscribe { topic, trace_ctx } => {
                         self.handle_subscribe(myself, state, &reg_id, topic, trace_ctx)
                             .await?;
+                    }
+                    TcpClientMessage::AcknowledgeDelivery { delivery_id } => {
+                        TcpClientActor::send_or_fail(
+                            myself,
+                            state,
+                            ClientMessage::PublishResponseAck { delivery_id },
+                        )
+                        .await?;
                     }
                     TcpClientMessage::UnsubscribeRequest { topic, trace_ctx } => {
                         self.handle_unsubscribe_request(myself, state, &reg_id, topic, trace_ctx)
@@ -1255,5 +1973,969 @@ impl Actor for TcpClientActor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod process_client_message_tests {
+    /// A message is named by its kind, and the kind does not hold the payload, however large it is.
+    #[test]
+    fn a_message_is_named_by_its_kind_not_its_payload() {
+        let publish = TcpClientMessage::publish("t".to_string(), vec![7u8; 1 << 20], None);
+        assert_eq!(publish.kind(), "Publish");
+        assert_eq!(TcpClientMessage::Register.kind(), "Register");
+        assert_eq!(
+            TcpClientMessage::SessionInvalidated.kind(),
+            "SessionInvalidated"
+        );
+    }
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A minimal, real, fake stand-in for TcpClientActor itself --
+    /// genuinely receives TcpClientMessage, just records what it got
+    /// rather than acting on it. Lets these tests assert on the real,
+    /// specific messages process_client_message forwards to `myself`
+    /// (e.g. SessionInvalidated), without needing a real,
+    /// full TcpClientActor with an actual TLS connection at all.
+    struct FakeTcpClient {
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeTcpClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    async fn spawn_fake_tcp_client() -> (
+        ActorRef<TcpClientMessage>,
+        Arc<Mutex<Vec<TcpClientMessage>>>,
+    ) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (actor, _) = Actor::spawn(
+            None,
+            FakeTcpClient {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        (actor, received)
+    }
+
+    async fn broadcast_delivery() -> (DeliveryMode, Arc<Mutex<Vec<ClientEvent>>>) {
+        let captured: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_closure = captured.clone();
+        let events_output = Arc::new(OutputPort::default());
+
+        // A real, minimal subscriber actor -- reused here purely as
+        // OutputPort's own, required subscriber target, not itself
+        // under test.
+        struct Sink;
+        #[async_trait]
+        impl Actor for Sink {
+            type Msg = ClientEvent;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+            async fn handle(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _message: Self::Msg,
+                _state: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+
+        // The real subscriber closure genuinely runs synchronously,
+        // inline, on send() -- captured directly here rather than via
+        // a second actor hop, since these tests only care about the
+        // real content dispatch_event hands to events_output, not
+        // about a second actor's own, separate mailbox timing.
+        let (sink, _) = Actor::spawn(None, Sink, ()).await.unwrap();
+        events_output.subscribe(sink, move |event: ClientEvent| {
+            captured_for_closure.lock().unwrap().push(event.clone());
+            Some(event)
+        });
+
+        (DeliveryMode::Broadcast(events_output), captured)
+    }
+
+    #[tokio::test]
+    async fn a_successful_publish_response_dispatches_message_published() {
+        let (myself, _received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            None,
+            ClientMessage::PublishResponse {
+                topic: "a-real-topic".to_string(),
+                payload: b"real payload".to_vec().into(),
+                result: Ok(()),
+                trace_ctx: None,
+                published_by: Some("some-agent".to_string()),
+                published_instance: Some(cassini_types::Instance {
+                    uid: "pod-uid".to_string(),
+                    pod: Some("some-agent-0".to_string()),
+                }),
+                delivery_id: None,
+                refusal: None,
+                origin: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = captured.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "expected exactly one dispatched event");
+        match &events[0] {
+            ClientEvent::MessagePublished {
+                topic,
+                payload,
+                published_by,
+                published_instance,
+                ..
+            } => {
+                assert_eq!(topic, "a-real-topic");
+                assert_eq!(payload, b"real payload");
+                assert_eq!(published_by, &Some("some-agent".to_string()));
+                // The instance the broker stamped beside it travels with it (protocol 2).
+                assert_eq!(
+                    published_instance
+                        .as_ref()
+                        .map(|i| (i.uid.as_str(), i.pod.as_deref())),
+                    Some(("pod-uid", Some("some-agent-0")))
+                );
+            }
+            other => panic!("expected MessagePublished, got {other:?}"),
+        }
+    }
+
+    /// A delivery is acknowledged, by its number, once it has been handed on; a refusal and a delivery with no number
+    /// are not.
+    #[tokio::test]
+    async fn a_delivery_handed_on_is_acknowledged_by_its_number() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        for (result, delivery_id) in [
+            (Ok(()), Some(42)),
+            (Err("refused".to_string()), None),
+            (Ok(()), None),
+        ] {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                None,
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: b"x".to_vec().into(),
+                    result,
+                    trace_ctx: None,
+                    published_by: None,
+                    published_instance: None,
+                    origin: None,
+                    delivery_id,
+                    refusal: None,
+                },
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let acknowledged: Vec<u64> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::AcknowledgeDelivery { delivery_id } => Some(*delivery_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(acknowledged, [42]);
+        assert!(matches!(
+            captured.lock().unwrap().first(),
+            Some(ClientEvent::MessagePublished { .. })
+        ));
+    }
+
+    /// A refusal the broker says is for now (`Unavailable`) is passed on as deferred: the facade keeps the publish, the
+    /// agent is not told it was refused, and its topic is not taken as refused. One it says is denied settles as before.
+    #[tokio::test]
+    async fn an_unavailable_refusal_defers_the_publish_and_a_denied_one_settles_it() {
+        use cassini_types::PublishRefusal;
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (answers, told) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        for (seq, refusal) in [
+            (1, PublishRefusal::Unavailable),
+            (2, PublishRefusal::Denied),
+        ] {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                Some(&answers),
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: Vec::new().into(),
+                    result: Err("no".to_string()),
+                    trace_ctx: None,
+                    published_by: None,
+                    published_instance: None,
+                    origin: Some(MessageId { epoch: 5, seq }),
+                    delivery_id: None,
+                    refusal: Some(refusal),
+                },
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let told: Vec<String> = told
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| match m {
+                TcpClientMessage::Deferred { id } => format!("deferred {}", id.seq),
+                TcpClientMessage::Refused { id } => format!("refused {}", id.seq),
+                other => other.kind().to_string(),
+            })
+            .collect();
+        assert_eq!(told, ["deferred 1", "BrokerAnswered", "refused 2"]);
+        let refused = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::PublishRefused { .. }))
+            .count();
+        assert_eq!(
+            refused, 1,
+            "only the denied one is told to the agent as refused"
+        );
+    }
+
+    /// What a deferral says is true for whoever has the transport: through a facade the publish is kept and sent again;
+    /// a bare transport keeps nothing, so its caller is told it must send it again (second review, finding D).
+    #[tokio::test]
+    async fn a_deferral_says_who_sends_the_publish_again() {
+        let deferred = |answers: bool| async move {
+            let (myself, _) = spawn_fake_tcp_client().await;
+            let (facade, _) = spawn_fake_tcp_client().await;
+            let (delivery, captured) = broadcast_delivery().await;
+            TcpClientActor::process_client_message(
+                myself,
+                &delivery,
+                answers.then_some(&facade),
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: Vec::new().into(),
+                    result: Err("Broker is shutting down".to_string()),
+                    trace_ctx: None,
+                    published_by: None,
+                    published_instance: None,
+                    origin: Some(MessageId { epoch: 5, seq: 1 }),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                },
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let events = captured.lock().unwrap().clone();
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    ClientEvent::PublishDeferred { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .expect("a deferral is told")
+        };
+        let kept = deferred(true).await;
+        assert!(kept.starts_with("Broker is shutting down"), "{kept}");
+        assert!(kept.contains(DEFERRED_AND_KEPT), "{kept}");
+        let bare = deferred(false).await;
+        assert!(bare.starts_with("Broker is shutting down"), "{bare}");
+        assert!(bare.contains(DEFERRED_NOT_KEPT), "{bare}");
+        assert!(!bare.contains(DEFERRED_AND_KEPT), "{bare}");
+    }
+
+    /// A frame from the broker that does not decode is named to the broker by its number, on the acknowledgement
+    /// path: the client will never decode it, and a delivery in it is let go rather than held for good (second review,
+    /// finding B). One that decodes is handled as before.
+    #[tokio::test]
+    async fn a_frame_that_does_not_decode_is_named_to_the_broker() {
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (delivery, _) = broadcast_delivery().await;
+        let (acks, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        TcpClientActor::on_frame(
+            myself.clone(),
+            &delivery,
+            None,
+            Some(&acks),
+            7,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+        );
+        match sent.try_recv() {
+            Ok(ClientMessage::FrameUndecodable { frame }) => assert_eq!(frame, 7),
+            other => panic!("the broker is told which frame: {other:?}"),
+        }
+        let delivered = TcpClientActor::frame(&ClientMessage::PublishResponse {
+            topic: "news".to_string(),
+            payload: b"fine".to_vec().into(),
+            result: Ok(()),
+            trace_ctx: None,
+            published_by: None,
+            published_instance: None,
+            origin: None,
+            delivery_id: Some(3),
+            refusal: None,
+        })
+        .unwrap();
+        // Read into a buffer of its own, as the reader does (rkyv wants it aligned).
+        let body = delivered[4..].to_vec();
+        TcpClientActor::on_frame(myself, &delivery, None, Some(&acks), 8, &body);
+        match sent.try_recv() {
+            Ok(ClientMessage::PublishResponseAck { delivery_id }) => assert_eq!(delivery_id, 3),
+            other => panic!("a delivery that decodes is acknowledged: {other:?}"),
+        }
+    }
+
+    /// A refusal of this client's protocol version is told as such, the transport is told to wait before its next
+    /// try, and that wait is `PROTOCOL_RETRY`, not a tight loop (cassini-backpressure.md, the decisions, 19).
+    #[tokio::test]
+    async fn a_protocol_refusal_is_said_and_the_next_try_waits() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            None,
+            ClientMessage::RegistrationResponse {
+                result: Err(cassini_types::Refusal::protocol(
+                    cassini_types::PROTOCOL_VERSION + 1,
+                )),
+                trace_ctx: None,
+            },
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(captured.lock().unwrap().iter().any(|e| matches!(
+            e,
+            ClientEvent::RegistrationRefused {
+                code: cassini_types::RefusalCode::ProtocolMismatch,
+                ..
+            }
+        )));
+        assert!(
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.kind() == "ProtocolRefused"),
+            "the transport is told"
+        );
+        assert_eq!(reconnect_wait(false), std::time::Duration::ZERO);
+        assert_eq!(reconnect_wait(true), PROTOCOL_RETRY);
+    }
+
+    /// The broker's word that a session was ended early reaches the agent as a typed event it can act on (the
+    /// decisions, 14).
+    #[tokio::test]
+    async fn a_session_the_broker_ended_is_told_to_the_agent() {
+        let events = dispatched_for(ClientMessage::SessionEnded {
+            registration_id: "old".to_string(),
+            reason: "let go".to_string(),
+        })
+        .await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ClientEvent::SessionEnded { registration_id, reason }] if registration_id == "old" && reason == "let go"
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The events the client dispatches for one message from the broker.
+    async fn dispatched_for(message: ClientMessage) -> Vec<ClientEvent> {
+        let (myself, _received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        TcpClientActor::process_client_message(myself, &delivery, None, message);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        captured.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_is_said_with_the_broker_s_code_and_reason() {
+        use cassini_types::{Refusal, RefusalCode};
+        // The code is passed on as it came, whatever the words: the revoked text under another code is not a
+        // revocation, and a revocation in other words is one.
+        for (code, words) in [
+            (RefusalCode::Revoked, cassini_types::REVOKED_REFUSAL),
+            (RefusalCode::Revoked, "said differently"),
+            (RefusalCode::Other, cassini_types::REVOKED_REFUSAL),
+            (RefusalCode::Other, "Broker is shutting down"),
+        ] {
+            let events = dispatched_for(ClientMessage::RegistrationResponse {
+                result: Err(Refusal {
+                    code,
+                    reason: words.to_string(),
+                }),
+                trace_ctx: None,
+            })
+            .await;
+            assert!(
+                matches!(events.as_slice(), [ClientEvent::RegistrationRefused { code: got, reason }]
+                    if *got == code && reason == words),
+                "{code:?} {words:?}: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_publish_response_is_a_refusal_never_a_delivered_message() {
+        let events = dispatched_for(ClientMessage::PublishResponse {
+            topic: "a-real-topic".to_string(),
+            payload: b"real payload".to_vec().into(),
+            result: Err("broker rejected it".to_string()),
+            trace_ctx: None,
+            published_by: None,
+            published_instance: None,
+            delivery_id: None,
+            refusal: None,
+            origin: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::PublishRefused { topic, reason }]
+                if topic == "a-real-topic" && reason == "broker rejected it"),
+            "a failed publish is a PublishRefused, never a MessagePublished: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_the_broker_took_is_acknowledged_to_the_agent() {
+        let events = dispatched_for(ClientMessage::SubscribeAcknowledgment {
+            topic: "news".to_string(),
+            result: Ok(()),
+            trace_ctx: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::ClientSubscribed { topic }] if topic == "news"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_the_broker_refused_is_a_refusal_the_agent_sees() {
+        let events = dispatched_for(ClientMessage::SubscribeAcknowledgment {
+            topic: "news".to_string(),
+            result: Err("refused: not declared".to_string()),
+            trace_ctx: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::SubscribeRefused { topic, reason }]
+                if topic == "news" && reason == "refused: not declared"),
+            "{events:?}"
+        );
+    }
+
+    /// The broker's answers to this client's subscribes and publishes, as whoever is told of them (the facade) hears
+    /// them, for each message from the broker.
+    async fn answered_for(
+        messages: Vec<ClientMessage>,
+    ) -> Vec<(String, crate::facade::TopicUse, Result<(), String>)> {
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (answers, told) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+        for message in messages {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                Some(&answers),
+                message,
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        told.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::BrokerAnswered {
+                    topic,
+                    use_,
+                    result,
+                } => Some((topic.clone(), *use_, result.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_broker_s_answers_to_subscribes_and_publishes_are_told_and_a_delivery_is_not_one() {
+        use crate::facade::TopicUse;
+        let answered = answered_for(vec![
+            ClientMessage::SubscribeAcknowledgment {
+                topic: "news".to_string(),
+                result: Ok(()),
+                trace_ctx: None,
+            },
+            ClientMessage::SubscribeAcknowledgment {
+                topic: "weather".to_string(),
+                result: Err("the broker refused: no".to_string()),
+                trace_ctx: None,
+            },
+            ClientMessage::PublishResponse {
+                topic: "sport".to_string(),
+                payload: Vec::new().into(),
+                result: Err("the broker refused: no".to_string()),
+                trace_ctx: None,
+                published_by: None,
+                published_instance: None,
+                delivery_id: None,
+                refusal: None,
+                origin: None,
+            },
+            // Someone else's message, delivered: not an answer to anything this client asked.
+            ClientMessage::PublishResponse {
+                topic: "news".to_string(),
+                payload: b"x".to_vec().into(),
+                result: Ok(()),
+                trace_ctx: None,
+                published_by: None,
+                published_instance: None,
+                delivery_id: None,
+                refusal: None,
+                origin: None,
+            },
+        ])
+        .await;
+        assert_eq!(
+            answered,
+            [
+                ("news".to_string(), TopicUse::Subscribe, Ok(())),
+                (
+                    "weather".to_string(),
+                    TopicUse::Subscribe,
+                    Err("the broker refused: no".to_string())
+                ),
+                (
+                    "sport".to_string(),
+                    TopicUse::Publish,
+                    Err("the broker refused: no".to_string())
+                ),
+            ]
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+        /// For any topic and reason: a refusal reaches the agent as exactly one refusal event carrying both, and a
+        /// refusal is never mistaken for a delivery or a subscription taken.
+        #[test]
+        fn a_refusal_is_exactly_one_refusal_event_carrying_the_topic_and_reason(
+            topic in "[a-z][a-z0-9.:-]{0,40}",
+            reason in "[ -~]{0,80}",
+            subscribe in proptest::bool::ANY,
+        ) {
+            let message = if subscribe {
+                ClientMessage::SubscribeAcknowledgment {
+                    topic: topic.clone(),
+                    result: Err(reason.clone()),
+                    trace_ctx: None,
+                }
+            } else {
+                ClientMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: Vec::new().into(),
+                    result: Err(reason.clone()),
+                    trace_ctx: None,
+                    published_by: None,
+                    published_instance: None,
+                    delivery_id: None,
+                    refusal: None,
+                    origin: None,
+                }
+            };
+            let events = tokio::runtime::Runtime::new().unwrap().block_on(dispatched_for(message));
+            proptest::prop_assert_eq!(events.len(), 1, "{:?}", events);
+            match &events[0] {
+                ClientEvent::SubscribeRefused { topic: t, reason: r } if subscribe => {
+                    proptest::prop_assert_eq!(t, &topic);
+                    proptest::prop_assert_eq!(r, &reason);
+                }
+                ClientEvent::PublishRefused { topic: t, reason: r } if !subscribe => {
+                    proptest::prop_assert_eq!(t, &topic);
+                    proptest::prop_assert_eq!(r, &reason);
+                }
+                other => proptest::prop_assert!(false, "not the refusal expected: {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_mismatch_error_message_triggers_session_invalidated() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            None,
+            ClientMessage::ErrorMessage {
+                error: "session mismatch: unknown registration".to_string(),
+                trace_ctx: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let messages = received.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, TcpClientMessage::SessionInvalidated)),
+            "expected SessionInvalidated to have genuinely been forwarded to myself, got {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_error_message_never_triggers_session_invalidated() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            None,
+            ClientMessage::ErrorMessage {
+                error: "some other, unrelated broker error".to_string(),
+                trace_ctx: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let messages = received.lock().unwrap();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, TcpClientMessage::SessionInvalidated)),
+            "an ordinary error must never trigger a real re-registration"
+        );
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    async fn router() -> ActorRef<polar_router::RouterMessage> {
+        Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// A transport state with no connection, whose lifecycle events land in the returned list.
+    async fn state(
+        registration: RegistrationState,
+    ) -> (TcpClientState, Arc<Mutex<Vec<ClientEvent>>>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let state = TcpClientState {
+            reconnect: ReconnectMode::default(),
+            bind_addr: "broker:1".into(),
+            server_name: "broker".into(),
+            writer: None,
+            reader: None,
+            registration,
+            client_config: Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            ),
+            delivery: DeliveryMode::Router {
+                router: router().await,
+                lifecycle: Arc::new(move |event| captured.lock().unwrap().push(event)),
+            },
+            abort_handle: None,
+            answers: None,
+            epoch: 1,
+            next_seq: 1,
+            protocol_refused: false,
+        };
+        (state, events)
+    }
+
+    async fn myself() -> ActorRef<TcpClientMessage> {
+        struct Idle;
+        #[async_trait]
+        impl Actor for Idle {
+            type Msg = TcpClientMessage;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        Actor::spawn(None, Idle, ()).await.unwrap().0
+    }
+
+    fn registered_ids(events: &Arc<Mutex<Vec<ClientEvent>>>) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::Registered { registration_id } => Some(registration_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_first_registration_is_reported() {
+        let (mut state, events) = state(RegistrationState::Unregistered).await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("first".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &state.registration,
+            RegistrationState::Registered { registration_id } if registration_id == "first"
+        ));
+        assert_eq!(registered_ids(&events), ["first"]);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_given_to_a_client_that_asked_to_resume_is_reported() {
+        // After a broker restart the broker has no record of the session the client asks to
+        // resume, and answers with a new one. The client used to ignore that, so nothing
+        // resubscribed and the agent was up and deaf.
+        let (mut state, events) = state(RegistrationState::Registered {
+            registration_id: "old".into(),
+        })
+        .await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("new".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &state.registration,
+            RegistrationState::Registered { registration_id } if registration_id == "new"
+        ));
+        assert_eq!(registered_ids(&events), ["new"]);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_is_reported_too_so_the_agent_resubscribes_harmlessly() {
+        let (mut state, events) = state(RegistrationState::Registered {
+            registration_id: "same".into(),
+        })
+        .await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("same".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered_ids(&events), ["same"]);
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn publish_of(bytes: usize) -> ClientMessage {
+        ClientMessage::PublishRequest {
+            topic: "t".to_string(),
+            payload: Arc::new(vec![7; bytes]),
+            registration_id: "r".to_string(),
+            trace_ctx: None,
+            share_identity: true,
+            // The largest numbers there are, so the frame measured is as large as a publish's can be.
+            epoch: u64::MAX,
+            seq: u64::MAX,
+        }
+    }
+
+    /// A frame is its length, big-endian, then the message; one over the limit is refused before anything is written.
+    #[test]
+    fn a_frame_over_the_limit_is_refused_and_one_at_it_is_made() {
+        let fits = TcpClientActor::frame(&publish_of(cassini_types::MAX_PAYLOAD_BYTES)).unwrap();
+        let len = u32::from_be_bytes(fits[..4].try_into().unwrap()) as usize;
+        assert_eq!(len, fits.len() - 4);
+        assert!(len <= MAX_FRAME_BYTES);
+        assert!(matches!(
+            TcpClientActor::frame(&publish_of(MAX_FRAME_BYTES)),
+            Err(FrameError::TooLarge { bytes }) if bytes > MAX_FRAME_BYTES
+        ));
+    }
+
+    /// A publish too large for a frame is refused to whoever listens, and the transport stays: it is not the
+    /// connection's fault.
+    #[tokio::test]
+    async fn a_publish_too_large_for_a_frame_is_refused_and_the_transport_stays() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let router = Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap()
+            .0;
+        let mut state = TcpClientState {
+            reconnect: ReconnectMode::default(),
+            bind_addr: "broker:1".into(),
+            server_name: "broker".into(),
+            writer: None,
+            reader: None,
+            registration: RegistrationState::Registered {
+                registration_id: "r".into(),
+            },
+            client_config: Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            ),
+            delivery: DeliveryMode::Router {
+                router,
+                lifecycle: Arc::new(move |event| captured.lock().unwrap().push(event)),
+            },
+            abort_handle: None,
+            answers: None,
+            epoch: 1,
+            next_seq: 1,
+            protocol_refused: false,
+        };
+        struct Idle;
+        #[async_trait]
+        impl Actor for Idle {
+            type Msg = TcpClientMessage;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (myself, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        TcpClientActor
+            .handle(
+                myself.clone(),
+                TcpClientMessage::publish("big".into(), vec![0; MAX_FRAME_BYTES], None),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [ClientEvent::PublishRefused { topic, .. }] if topic == "big"
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !matches!(
+                myself.get_status(),
+                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+            ),
+            "the transport is not ended for it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    fn nowhere() -> TCPClientConfig {
+        TCPClientConfig::from_values(
+            // Nothing listens here: the transport's connecting is not what is tested.
+            "127.0.0.1:9".into(),
+            "localhost".into(),
+            "/nowhere/ca.pem".into(),
+            "/nowhere/cert.pem".into(),
+            "/nowhere/key.pem".into(),
+        )
+        .with_reconnect(ReconnectMode::LeaveToSupervisor)
+    }
+
+    async fn start(config: TCPClientConfig) -> Result<ActorRef<TcpClientMessage>, String> {
+        Actor::spawn(
+            None,
+            TcpClientActor,
+            TcpClientArgs {
+                config,
+                registration_id: None,
+                delivery: DeliveryMode::Broadcast(Arc::new(OutputPort::default())),
+                answers: None,
+            },
+        )
+        .await
+        .map(|(actor, _)| actor)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_configuration_made_in_code_is_used_as_given_and_no_file_is_read() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let made = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        );
+        let transport = start(nowhere().with_tls(made))
+            .await
+            .expect("started without reading the files");
+        transport.stop(None);
+        assert!(
+            start(nowhere()).await.is_err(),
+            "without one, the files are read, and these are not there"
+        );
     }
 }

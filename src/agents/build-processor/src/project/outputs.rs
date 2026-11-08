@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Build outputs: what a build produced — files, SBOMs and the dependency
 //! graph they describe, binaries, container images.
 //!
@@ -173,7 +196,7 @@ pub fn sbom_analyzed(fragment: SbomGraphFragment) -> Vec<GraphOp> {
         .map(package_row)
         .collect();
     if !rows.is_empty() {
-        ops.push(GraphOp::RawQuery {
+        ops.push(GraphOp::RawMergeWrite {
             cypher: "UNWIND $rows AS row \
                  MERGE (p:Package { purl: row.purl }) \
                  SET p.name = row.name, \
@@ -202,7 +225,7 @@ pub fn sbom_analyzed(fragment: SbomGraphFragment) -> Vec<GraphOp> {
             }
         };
         if !deps.is_empty() {
-            ops.push(GraphOp::RawQuery {
+            ops.push(GraphOp::RawMergeWrite {
                 cypher: format!(
                     "UNWIND $deps AS dep \
                      MERGE (r:Package {{ purl: $root }}) \
@@ -238,7 +261,7 @@ pub fn sbom_analyzed(fragment: SbomGraphFragment) -> Vec<GraphOp> {
         .collect();
     let edge_count = pairs.len();
     if !pairs.is_empty() {
-        ops.push(GraphOp::RawQuery {
+        ops.push(GraphOp::RawMergeWrite {
             cypher: format!(
                 "UNWIND $pairs AS pair \
                  MERGE (a:Package {{ purl: pair.from }}) \

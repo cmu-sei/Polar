@@ -1,26 +1,23 @@
-# ` (OSS)
-
-# Copyright 2024 Carnegie Mellon University.
-
-# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING
-# INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON
-# UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS
-# TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE
-# OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE
-# MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND
-# WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
-
-# Licensed under a MIT-style license, please see license.txt or contact
-# permission@sei.cmu.edu for full terms.
-
-# [DISTRIBUTION STATEMENT A] This material has been approved for public release
-# and unlimited distribution.  Please see Copyright notice for non-US
-# Government use and distribution.
-
-# This Software includes and/or makes use of Third-Party Software each subject
-# to its own license.
-
-# DM24-0470
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
 
 [package]
 name = "jira-observer"
@@ -30,20 +27,24 @@ license.workspace = true
 description = "Observer agent for Jira — polls APIs, publishes updates via Cassini broker."
 
 [dependencies]
+base64.workspace = true
+polar-scudo.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
+# Reads a Retry-After given as an HTTP date, and checks QUERY_DATE is a date (lib.rs, settings.rs).
 chrono.workspace = true
-clokwerk.workspace = true
 jira_common.workspace = true
 log.workspace = true
-parse_link_header.workspace = true
 polar.workspace = true
+polar-agent-builder.workspace = true
+# The credential: the CryptoActor's answers (polar-crypto) and the escrowed secret a section carries (polar-escrow).
+polar-crypto.workspace = true
+polar-env.workspace = true
+polar-escrow.workspace = true
 ractor.workspace = true
-rand.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true
 serde_json.workspace = true
-serde_path_to_error.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
@@ -51,6 +52,18 @@ tracing-glog.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+# Test CAs, TLS servers and child processes (polar::egress::testing).
+polar = { workspace = true, features = ["testing"] }
+# What the observers tell the agent's health (a hold, a release), recorded by a stand-in health actor in the tests.
+polar-health.workspace = true
+proptest.workspace = true
+# A real escrowed secret for the credentials section's tests (an RSA recipient, as git's tests make).
+rand.workspace = true
+rsa.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
 
 [[bin]]
 name = "jira-observer"

@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Property tests for cassini-types trace.rs types
 //! Tests rkyv serialize→deserialize roundtrips, Arc<Vec<u8>> payloads, and boundary conditions
 
@@ -11,10 +34,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_rkyv_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -24,10 +47,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_serde_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: WireTraceCtx = serde_json::from_str(&json).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -37,10 +60,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_zero_length_payload(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -50,10 +73,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_max_size_payload(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -63,10 +86,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_non_utf8_payload(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -76,10 +99,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_null_bytes_payload(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -89,10 +112,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_arc_payload_survives_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify Arc<Vec<u8>> payloads survive roundtrip unchanged
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -102,10 +125,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_boundary_zero_length(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify boundary conditions
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -115,10 +138,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_boundary_max_size(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify boundary conditions
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -128,10 +151,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_boundary_non_utf8(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify boundary conditions
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -141,10 +164,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_boundary_null_bytes(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify boundary conditions
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -155,11 +178,11 @@ proptest! {
     fn test_wire_trace_ctx_to_span_context_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
         let span_context = original.to_span_context();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
         let span_context2 = deserialized.to_span_context();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(span_context.trace_id(), span_context2.trace_id());
         prop_assert_eq!(span_context.span_id(), span_context2.span_id());
@@ -170,11 +193,11 @@ proptest! {
     fn test_wire_trace_ctx_to_opentelemetry_context_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
         let _otel_context = original.to_opentelemetry_context();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
         let _otel_context2 = deserialized.to_opentelemetry_context();
-        
+
         // Verify roundtrip produces identical output
         // Note: is_valid() is not available on SpanRef, so we skip this check
     }
@@ -183,11 +206,11 @@ proptest! {
     fn test_wire_trace_ctx_create_child_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::new_for_message();
         let child = original.create_child();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
         let child2 = deserialized.create_child();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(child.trace_id, child2.trace_id);
         prop_assert_ne!(child.span_id, child2.span_id);
@@ -204,12 +227,12 @@ proptest! {
             true,
             TraceState::default(),
         );
-        
+
         let original = WireTraceCtx::from_span_context(&span_context).unwrap();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -227,12 +250,12 @@ proptest! {
             false, // invalid
             TraceState::default(),
         );
-        
+
         let original = WireTraceCtx::from_span_context(&span_context).unwrap();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);
@@ -242,10 +265,10 @@ proptest! {
     #[test]
     fn test_wire_trace_ctx_from_current_span_roundtrip(_payload in any::<Vec<u8>>()) {
         let original = WireTraceCtx::from_current_span().unwrap();
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
         let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Verify roundtrip produces identical output
         prop_assert_eq!(original.trace_id, deserialized.trace_id);
         prop_assert_eq!(original.span_id, deserialized.span_id);

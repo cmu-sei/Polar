@@ -1,26 +1,23 @@
-# Polar (OSS)
-
-# Copyright 2024 Carnegie Mellon University.
-
-# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING
-# INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON
-# UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS
-# TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE
-# OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE
-# MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND
-# WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
-
-# Licensed under a MIT-style license, please see license.txt or contact
-# permission@sei.cmu.edu for full terms.
-
-# [DISTRIBUTION STATEMENT A] This material has been approved for public release
-# and unlimited distribution.  Please see Copyright notice for non-US
-# Government use and distribution.
-
-# This Software includes and/or makes use of Third-Party Software each subject
-# to its own license.
-
-# DM24-0470
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
 
 [package]
 name = "jira-processor"
@@ -29,14 +26,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+polar-scudo.workspace = true
 async-global-executor = "3.1.0"
-cassini-backoff.workspace = true
-cassini-client.workspace = true
 cassini-types.workspace = true
+# Reads the time of an issue's last update into epoch milliseconds (issues.rs, updated_ms).
+chrono.workspace = true
 futures-lite.workspace = true
 jira_common.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
+polar-agent-builder.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true
@@ -46,6 +45,11 @@ url.workspace = true
 once_cell = "1"
 regex = "1"
 lazy_static = "1"
+
+[dev-dependencies]
+# The write path measured and tested against a real Neo4j (write_bench.rs).
+polar-test-graph.workspace = true
+proptest.workspace = true
 
 [[bin]]
 name = "jira-processor"

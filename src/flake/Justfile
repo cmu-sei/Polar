@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # src/flake/Justfile
 #
 # Dhall rendering for Polar container configurations.
@@ -24,22 +45,29 @@
 # Render the dev container config
 render-dev:
     @echo "Rendering container.dhall → container.nix..."
-    dhall-to-nix < container.dhall > container.nix
+    just _render container.dhall container.nix
     @echo "Done. Commit container.nix alongside container.dhall."
 
 # Render the agent container config
 render-agent:
     @echo "Rendering agent-container.dhall → agent-container.nix..."
-    dhall-to-nix < agent-container.dhall > agent-container.nix
+    just _render agent-container.dhall agent-container.nix
     @echo "Done. Commit agent-container.nix alongside agent-container.dhall."
 
 # Render the CI container config
 render-ci:
     @echo "Rendering ci-container.dhall → ci-container.nix..."
-    dhall-to-nix < ci-container.dhall > ci-container.nix
+    just _render ci-container.dhall ci-container.nix
     @echo "Done. Commit ci-container.nix alongside ci-container.dhall."
 
 # Render all three container configs
+# The rendered file opens with the license banner of the .dhall it comes from (its leading `--` comment, as `#` lines), so a
+# render cannot drop it.
+_render src out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    { sed -n '/^--/!q; s/^--/#/p' {{src}}; dhall-to-nix < {{src}}; } > {{out}}
+
 render-all: render-dev render-agent render-ci
     @echo "All container configs rendered."
 

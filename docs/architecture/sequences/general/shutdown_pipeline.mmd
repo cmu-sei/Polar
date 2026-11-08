@@ -1,0 +1,49 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    participant Trigger
+    participant Infra as InfrastructureSupervisor
+    participant Domain as domain supervisor
+    participant Children as domain children
+    participant InfraChildren as infra children
+    participant Process as process
+
+    autonumber
+    Note over Trigger,Domain: Triggers: health verdict (rejuvenation or hard deadline),<br/>unexpected death of health, router, Cassini client or crypto,<br/>SIGTERM or SIGINT from the kubelet
+    Trigger->>Infra: reason
+    Note over Infra: begin_shutdown(reason)<br/>log the reason, ignore repeats
+    Infra->>Infra: start watchdog (bounded budget)
+    Infra->>Domain: InfrastructureEvent::PrepareShutdown
+
+    Domain->>Children: stop and drain (bounded)
+    Children-->>Domain: stopped
+    Domain->>Infra: ProceedWithShutdown
+
+    Infra->>InfraChildren: stop (bounded)<br/>health, router, tcp client, crypto
+    InfraChildren-->>Infra: terminated
+    Infra->>Process: exit non-zero (never 0)
+    Note over Infra,Process: Job replaces the pod,<br/>polar-init issues fresh certs
+
+    alt domain supervisor never answers
+        Note over Infra: watchdog expires
+        Infra->>Process: exit 1
+    end

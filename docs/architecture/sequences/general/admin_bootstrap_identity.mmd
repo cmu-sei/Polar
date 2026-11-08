@@ -1,0 +1,67 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+ sequenceDiagram
+     autonumber
+     participant Admin as Administrator
+     participant GrantTool as polar-admin-grant<br/>(admin's local tool)
+     participant CredAgentObs as Credentials Agent<br/>(observer -- low trust)
+     participant Cassini as Cassini broker
+     participant CredAgentCon as Credentials Agent<br/>(consumer -- high trust)
+     participant CertIssuer as cert-issuer
+     participant CA as CA (in-process,<br/>part of cert-issuer)
+
+     Note over Admin,CA: One-time. A hard prerequisite for everything else --<br/>someone has to be first, with nothing else yet to vouch for them.<br/>No special carve-out from here on: this goes through the observer<br/>exactly like every other flow, using a Kubernetes credential<br/>instead of an IdP token. No grant lookup -- the Kubernetes<br/>credential itself is what authorizes this one exchange.
+
+     Admin->>GrantTool: Run tool
+     activate GrantTool
+     GrantTool->>GrantTool: Generate keypair locally (via csr-utils)<br/>(private key never leaves this machine)
+     GrantTool->>CredAgentObs: Send CSR + kubectl-admin-backed<br/>Kubernetes credential<br/>(correlation_id generated)
+     activate CredAgentObs
+     CredAgentObs->>CredAgentObs: Basic well-formedness check only --<br/>no credential validation, no trust decision
+     CredAgentObs->>Cassini: Forward, tagged with correlation_id
+     deactivate CredAgentObs
+     activate Cassini
+     Cassini->>CredAgentCon: Deliver
+     deactivate Cassini
+     activate CredAgentCon
+ 
+     CredAgentCon->>CertIssuer: Forward CSR + credential<br/>(direct, internal, core-to-core --<br/>both are trusted services)
+     activate CertIssuer
+     CertIssuer->>CertIssuer: Validate the admin's Kubernetes<br/>credential (existing trust path,<br/>no new IdP config for admins)
+     CertIssuer->>CA: Sign CSR
+     activate CA
+     CA-->>CertIssuer: Signed, ordinary Polar client cert<br/>(no more privileged than any agent's)
+     deactivate CA
+     CertIssuer-->>CredAgentCon: Signed certificate
+     deactivate CertIssuer
+ 
+     CredAgentCon->>Cassini: Reply (signed cert), tagged with<br/>the original correlation_id,<br/>including the Credentials Agent's<br/>current escrow public key
+     deactivate CredAgentCon
+     activate Cassini
+     Cassini->>CredAgentObs: Deliver correlated reply
+     deactivate Cassini
+     activate CredAgentObs
+     CredAgentObs->>GrantTool: Signed certificate +<br/>Credentials Agent's escrow public key
+     deactivate CredAgentObs
+ 
+     GrantTool->>GrantTool: Store cert + key locally<br/>(reused for every future grant/revoke)
+     deactivate GrantTool

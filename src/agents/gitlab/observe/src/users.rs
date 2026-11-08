@@ -1,24 +1,24 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 
 use crate::graphql_endpoint;
@@ -109,107 +109,101 @@ impl Actor for GitlabUserObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             GitlabObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetUsers(op) => {
-                        debug!("Sending query: {}", op.query);
+                if let Command::GetUsers(op) = command {
+                    debug!("Sending query: {}", op.query);
 
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                //forwrard to client
-                                match response.json::<GraphQlResponse<MultiUserQuery>>().await {
-                                    Ok(deserialized) => {
-                                        if let Some(errors) = deserialized.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            //forwrard to client
+                            match response.json::<GraphQlResponse<MultiUserQuery>>().await {
+                                Ok(deserialized) => {
+                                    if let Some(errors) = deserialized.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
 
-                                            error!("Failed to query instance! {errors}");
+                                        error!("Failed to query instance! {errors}");
 
-                                            if let Err(e) =
-                                                myself.send_message(GitlabObserverMessage::Backoff(
-                                                    BackoffReason::GraphqlError(errors),
-                                                ))
-                                            {
-                                                error!("{e}");
-                                                myself.stop(Some(e.to_string()))
-                                            }
-                                        } else if let Some(query) = deserialized.data {
-                                            if let Some(connection) = query.users {
-                                                info!("Found {} user(s)", connection.count);
-
-                                                let mut read_users: Vec<UserCoreFragment> =
-                                                    Vec::new();
-
-                                                if let Some(users) = connection.nodes {
-                                                    // Append nodes to the result list.
-                                                    read_users.extend(users.into_iter().filter_map(
-                                                    |option| {
-                                                        option.map(|user| {
-                                                            //extract user information during iteration
-                                                            user.project_memberships.as_ref().map(
-                                                                |connection| {
-
-                                                                    let data
-                                                                        = GitlabData::ProjectMembers(
-                                                                            ResourceLink {
-                                                                                resource_id: user
-                                                                                    .id
-                                                                                    .clone(),
-                                                                                connection: connection
-                                                                                    .clone(),
-                                                                            },
-                                                                        );
-
-                                                                    send_to_broker(state, data, USER_CONSUMER_TOPIC).map_err(|e| error!("{e}"))
-                                                                },
-                                                            );
-
-                                                            user
-                                                        })
-                                                    },
-                                                ));
-                                                }
-
-                                                let data = GitlabData::Users(read_users);
-
-                                                if let Err(e) =
-                                                    send_to_broker(state, data, USER_CONSUMER_TOPIC)
-                                                {
-                                                    return Err(e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to deserialize response from server! {e}");
-                                        myself
-                                            .send_message(GitlabObserverMessage::Backoff(
-                                                BackoffReason::FatalError(e.to_string()),
+                                        if let Err(e) =
+                                            myself.send_message(GitlabObserverMessage::Backoff(
+                                                BackoffReason::GraphqlError(errors),
                                             ))
-                                            .expect(MESSAGE_FORWARDING_FAILED);
+                                        {
+                                            error!("{e}");
+                                            myself.stop(Some(e.to_string()))
+                                        }
+                                    } else if let Some(query) = deserialized.data
+                                        && let Some(connection) = query.users
+                                    {
+                                        info!("Found {} user(s)", connection.count);
+
+                                        let mut read_users: Vec<UserCoreFragment> = Vec::new();
+
+                                        if let Some(users) = connection.nodes {
+                                            // Append nodes to the result list.
+                                            read_users.extend(users.into_iter().filter_map(
+                                                |option| {
+                                                    option.inspect(|user| {
+                                                        //extract user information during iteration
+                                                        user.project_memberships.as_ref().map(
+                                                            |connection| {
+                                                                let data =
+                                                                    GitlabData::ProjectMembers(
+                                                                        ResourceLink {
+                                                                            resource_id: user
+                                                                                .id
+                                                                                .clone(),
+                                                                            connection: connection
+                                                                                .clone(),
+                                                                        },
+                                                                    );
+
+                                                                send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    USER_CONSUMER_TOPIC,
+                                                                )
+                                                                .map_err(|e| error!("{e}"))
+                                                            },
+                                                        );
+                                                    })
+                                                },
+                                            ));
+                                        }
+
+                                        let data = GitlabData::Users(read_users);
+
+                                        send_to_broker(state, data, USER_CONSUMER_TOPIC)?;
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                warn!("Error observing data: {e}");
-                                myself
-                                    .send_message(GitlabObserverMessage::Backoff(
-                                        BackoffReason::GitlabUnreachable(e.to_string()),
-                                    ))
-                                    .expect(MESSAGE_FORWARDING_FAILED);
+                                Err(e) => {
+                                    error!("Failed to deserialize response from server! {e}");
+                                    myself
+                                        .send_message(GitlabObserverMessage::Backoff(
+                                            BackoffReason::FatalError(e.to_string()),
+                                        ))
+                                        .expect(MESSAGE_FORWARDING_FAILED);
+                                }
                             }
                         }
+                        Err(e) => {
+                            warn!("Error observing data: {e}");
+                            myself
+                                .send_message(GitlabObserverMessage::Backoff(
+                                    BackoffReason::GitlabUnreachable(e.to_string()),
+                                ))
+                                .expect(MESSAGE_FORWARDING_FAILED);
+                        }
                     }
-                    _ => (),
                 }
             }
             GitlabObserverMessage::Backoff(reason) => {

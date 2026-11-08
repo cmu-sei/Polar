@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! StorageClient wraps the AWS SDK S3 client configured for MinIO.
 //!
 //! # MinIO compatibility
@@ -11,7 +34,7 @@
 //!
 //! # Bucket layout
 //!
-//! All Cyclops artifacts live in a single configurable bucket.
+//! All build-orchestrator artifacts live in a single configurable bucket.
 //! Object keys are structured as:
 //!   builds/<build_id>/pipeline.log
 //!   builds/<build_id>/clone.log
@@ -28,9 +51,9 @@
 //! justified. If logs grow large enough to cause memory pressure, switch
 //! to multipart upload with a 5MB part size.
 
-use aws_config::Region;
-use aws_credential_types::Credentials;
+use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::{Client as S3Client, config::Builder as S3ConfigBuilder, primitives::ByteStream};
+use aws_smithy_http_client::{Builder as HttpClientBuilder, tls};
 use bytes::Bytes;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
@@ -58,13 +81,12 @@ pub struct StorageConfig {
     /// "us-east-1" is the conventional placeholder.
     pub region: String,
 
-    /// Bucket where all Cyclops build artifacts are stored.
-    /// Must exist before the orchestrator starts — the client does not
-    /// create buckets automatically.
+    /// Bucket where all build-orchestrator build artifacts are stored. The orchestrator makes it at start if it is
+    /// not there (`StorageClient::ensure_bucket`); a store that already has it is left as it is.
     pub bucket: String,
 }
 
-/// Thin async wrapper around the S3 client scoped to Cyclops artifact storage.
+/// Thin async wrapper around the S3 client scoped to build-orchestrator artifact storage.
 ///
 /// Clone is cheap — the inner client is Arc-wrapped by the SDK.
 #[derive(Clone)]
@@ -81,10 +103,18 @@ impl StorageClient {
             &config.secret_key,
             None, // session token — not used with MinIO static credentials
             None, // expiry
-            "cyclops-static",
+            "build-orchestrator-static",
         );
 
+        // The SDK's own default client is rustls over aws-lc-rs, which this workspace does not build: rustls over ring.
+        let http_client = HttpClientBuilder::new()
+            .tls_provider(tls::Provider::Rustls(
+                tls::rustls_provider::CryptoMode::Ring,
+            ))
+            .build_https();
+
         let s3_config = S3ConfigBuilder::new()
+            .http_client(http_client)
             .endpoint_url(&config.endpoint_url)
             .region(Region::new(config.region.clone()))
             .credentials_provider(credentials)
@@ -98,6 +128,30 @@ impl StorageClient {
         Self {
             s3: S3Client::from_conf(s3_config),
             bucket: config.bucket.clone(),
+        }
+    }
+
+    /// Make the bucket if the store does not have it. A failure to make it is not fatal here, since an
+    /// existing bucket the credentials may not create is the normal case on a managed store: it is
+    /// reported, and the first upload says whether the bucket is usable.
+    pub async fn ensure_bucket(&self) {
+        if self
+            .s3
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        match self.s3.create_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => tracing::info!(bucket = %self.bucket, "made the artifact bucket"),
+            Err(e) => tracing::warn!(
+                bucket = %self.bucket,
+                error = %aws_sdk_s3::error::DisplayErrorContext(&e),
+                "the artifact bucket is not there and could not be made"
+            ),
         }
     }
 

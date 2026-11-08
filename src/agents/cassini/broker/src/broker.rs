@@ -1,31 +1,52 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::{
-    BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
-    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR,
+    LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME, TOPIC_MANAGER_NAME,
+    UNEXPECTED_MESSAGE_STR,
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
+    pressure::{PressureManager, PressureManagerArgs, PressureMsg},
     session::{SessionManager, SessionManagerArgs},
     subscriber::{SubscriberManager, SubscriberManagerArgs},
     topic::{TopicManager, TopicManagerArgs},
 };
 
-use cassini_tracing::shutdown_tracing;
 use cassini_tracing::try_set_parent_otel;
 
-use cassini_types::{BrokerMessage, ShutdownPhase};
 use cassini_types::ControlOp;
 use cassini_types::DisconnectReason;
+use cassini_types::{BrokerMessage, ShutdownPhase};
 
-use polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar_agent_builder::{
+    Configured, InfrastructureEvent, InfrastructureSupervisorMessage, ServiceBuilder,
+};
 
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
-use ractor::OutputPort;
-
-use std::env;
-use std::sync::Arc;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // ============================== Broker Supervisor Actor Definition ============================== //
@@ -34,61 +55,86 @@ pub struct Broker;
 
 // State object containing references to worker actors
 pub struct BrokerState {
+    /// The builder's infrastructure: the broker asks it to begin the shutdown (which starts the
+    /// budget's watchdog), and it tells the broker when something else has decided it should end.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     listener_mgr: Option<ActorRef<BrokerMessage>>,
     session_mgr: Option<ActorRef<BrokerMessage>>,
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     control_mgr: Option<ActorRef<BrokerMessage>>,
 
-    /// Held to keep the HealthCheckActor alive. Communication is via OutputPort.
-    #[allow(dead_code)]
-    healthcheck: ActorRef<HealthCheckMessage>,
-
     is_shutting_down: bool,
+    /// The broker's pressure (the budget's alarm, and the stall checks): stopped when the drain begins, started
+    /// again if it ends otherwise.
+    pressure: Option<ActorRef<PressureMsg>>,
+    /// What it is started with.
+    bounds: crate::budget::Bounds,
+    budget_control: Option<crate::pressure::BudgetControl>,
 }
 
-/// Would-be configurations for the broker actor itself, as well its workers
-#[derive(Clone)]
+/// What the broker is started with: where it listens and with what certificate, and the
+/// configuration the builder judged, from which it builds its infrastructure.
 pub struct BrokerArgs {
     /// Socket address to listen for connections on
     pub bind_addr: String,
 
-    /// The amount of time (in seconds) before a session times out
-    /// Should be between 10 and 300 seconds
+    /// How long (in seconds) a session whose client has gone away is kept, with the messages held
+    /// for it, before it is ended. `None` is `DEFAULT_SESSION_RETENTION` (ten minutes).
     pub session_timeout: Option<u64>,
 
     pub server_cert_file: String,
-    pub private_key_file: String,
+    /// The certificate's key: a file, or the custody daemon's server slot.
+    pub server_key: polar_custody::client::ServerKey,
     pub ca_cert_file: String,
 
     /// Authorization token for shutdown operations
     pub shutdown_auth_token: Option<String>,
+
+    /// How long a connection keeps the broker's decision about a topic; zero keeps none.
+    pub decision_cache: Duration,
+
+    /// The memory budget, each connection's window, each subscriber's high water and the stall bound
+    /// (docs/architecture/cassini-backpressure.md).
+    pub bounds: crate::budget::Bounds,
+
+    /// The runtime budget (docs/architecture/cassini-backpressure.md, "Runtime budget"): the pressure manager sets the
+    /// budget's limit from it. None keeps the budget as `bounds` gives it (a test's broker).
+    pub budget_control: Option<crate::pressure::BudgetControl>,
+
+    /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
+    /// from which the broker builds its infrastructure (the health check, the signals, the
+    /// shutdown handshake with its budget and watchdog).
+    pub configured: Configured,
 }
 
 impl BrokerArgs {
-    fn required_env(var: &str) -> Result<String, BrokerConfigError> {
-        env::var(var).map_err(|e| BrokerConfigError::EnvVar {
-            var: var.to_string(),
-            source: e,
-        })
-    }
-
-    pub fn new() -> Result<Self, BrokerConfigError> {
-        let server_cert_file = BrokerArgs::required_env("TLS_SERVER_CERT_CHAIN")?;
-        let private_key_file = BrokerArgs::required_env("TLS_SERVER_KEY")?;
-        let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
-        let bind_addr =
-            env::var("CASSINI_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-
-        let shutdown_auth_token = env::var("CASSINI_SHUTDOWN_TOKEN").ok();
-
-        Ok(BrokerArgs {
-            bind_addr,
+    /// From the broker's settings and what `run` judged. Bounds that cannot work (a budget below one frame) are
+    /// refused, saying why: the broker does not start.
+    pub fn from_settings(
+        settings: crate::settings::BrokerSettings,
+        configured: Configured,
+    ) -> Result<Self, String> {
+        let bounds = settings.bounds()?;
+        let budget_control = Some(settings.budget_control()?);
+        info!(
+            budget = bounds.budget.limit(),
+            window = bounds.window(),
+            high_water = bounds.high_water(),
+            stall = ?bounds.stall,
+            "the broker's bounds"
+        );
+        Ok(Self {
+            bind_addr: settings.bind_addr,
             session_timeout: None,
-            server_cert_file,
-            private_key_file,
-            ca_cert_file,
-            shutdown_auth_token,
+            server_cert_file: settings.server_cert_file,
+            server_key: settings.server_key,
+            ca_cert_file: settings.ca_cert_file,
+            shutdown_auth_token: Some(settings.shutdown_auth_token),
+            decision_cache: settings.decision_cache,
+            bounds,
+            budget_control,
+            configured,
         })
     }
 }
@@ -106,84 +152,110 @@ impl Actor for Broker {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.supervision_event");
-        let _g = span.enter();
 
-        match msg {
-            SupervisionEvent::ActorStarted(actor_cell) => {
-                debug!(
-                    worker_name = ?actor_cell.get_name(),
-                    worker_id = ?actor_cell.get_id(),
-                    "Worker started"
-                );
-            }
+        async move {
+            match msg {
+                SupervisionEvent::ActorStarted(actor_cell) => {
+                    debug!(
+                        worker_name = ?actor_cell.get_name(),
+                        worker_id = ?actor_cell.get_id(),
+                        "Worker started"
+                    );
+                }
 
-            SupervisionEvent::ActorTerminated(actor_cell, _, _reason) => {
-                let span = trace_span!("cassini.broker.supervision_event.terminated");
-                let _g = span.enter();
+                SupervisionEvent::ActorTerminated(actor_cell, _, _reason) => {
+                    let span = trace_span!("cassini.broker.supervision_event.terminated");
+                    let mut restart_pressure = false;
+                    {
+                        let _g = span.enter();
 
-                warn!(
-                    worker_name = ?actor_cell.get_name(),
-                    worker_id = ?actor_cell.get_id(),
-                    "Worker terminated (no restart strategy implemented here)"
-                );
+                        warn!(
+                            worker_name = ?actor_cell.get_name(),
+                            worker_id = ?actor_cell.get_id(),
+                            "Worker terminated (no restart strategy implemented here)"
+                        );
 
-                if let Some(name) = actor_cell.get_name() {
-                    // Healthcheck actor terminating cleanly means rejuvenation
-                    // sequence completed — flush traces and exit for Job restart.
-                    if name == "cassini.healthcheck" {
-                        info!("HealthCheckActor terminated cleanly — rejuvenation complete, exiting");
-                        shutdown_tracing();
-                        std::process::exit(1);
+                        if let Some(name) = actor_cell.get_name() {
+                            match name.as_str() {
+                                crate::LISTENER_MANAGER_NAME => {
+                                    state.listener_mgr = None;
+                                    debug!("ListenerManager removed from state");
+                                }
+                                crate::SESSION_MANAGER_NAME => {
+                                    state.session_mgr = None;
+                                    debug!("SessionManager removed from state");
+                                }
+                                crate::TOPIC_MANAGER_NAME => {
+                                    state.topic_mgr = None;
+                                    debug!("TopicManager removed from state");
+                                }
+                                crate::SUBSCRIBER_MANAGER_NAME => {
+                                    state.subscriber_mgr = None;
+                                    debug!("SubscriberManager removed from state");
+                                }
+                                crate::CONTROL_MANAGER_NAME => {
+                                    state.control_mgr = None;
+                                    debug!("ControlManager removed from broker state");
+                                }
+                                crate::PRESSURE_MANAGER_NAME => {
+                                    state.pressure = None;
+                                    restart_pressure = !state.is_shutting_down;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if restart_pressure {
+                        Self::restart_pressure(&myself, state, "it ended").await;
                     }
 
-                    match name.as_str() {
-                        crate::LISTENER_MANAGER_NAME => {
-                            state.listener_mgr = None;
-                            debug!("ListenerManager removed from state");
-                        }
-                        crate::SESSION_MANAGER_NAME => {
-                            state.session_mgr = None;
-                            debug!("SessionManager removed from state");
-                        }
-                        crate::TOPIC_MANAGER_NAME => {
-                            state.topic_mgr = None;
-                            debug!("TopicManager removed from state");
-                        }
-                        crate::SUBSCRIBER_MANAGER_NAME => {
-                            state.subscriber_mgr = None;
-                            debug!("SubscriberManager removed from state");
-                        }
-                        crate::CONTROL_MANAGER_NAME => {
-                            state.control_mgr = None;
-                            debug!("ControlManager removed from broker state");
-                        }
-                        _ => {}
+                    if state.is_shutting_down {
+                        self.check_shutdown_completion(myself.clone(), state)
+                            .instrument(span)
+                            .await?;
                     }
                 }
 
-                if state.is_shutting_down {
-                    self.check_shutdown_completion(myself.clone(), state)
-                        .await?;
+                SupervisionEvent::ActorFailed(actor_cell, e)
+                    if actor_cell.get_name().as_deref() == Some(crate::PRESSURE_MANAGER_NAME) =>
+                {
+                    // It holds nothing a new one cannot see again at its first look: started again, unless the
+                    // broker is ending.
+                    error!(error = %e, "the pressure manager failed");
+                    state.pressure = None;
+                    if !state.is_shutting_down {
+                        Self::restart_pressure(&myself, state, &e.to_string()).await;
+                    }
                 }
+
+                SupervisionEvent::ActorFailed(actor_cell, e) => {
+                    // Today: the broker ends. Tomorrow: restart policy per worker type. It ends in
+                    // order: the infrastructure tells the broker to begin its shutdown, and its
+                    // watchdog ends the process if that does not finish within the budget.
+                    error!(
+                        worker_name = ?actor_cell.get_name(),
+                        worker_id = ?actor_cell.get_id(),
+                        error = %e,
+                        "Worker failed; ending the broker in order"
+                    );
+                    let _ =
+                        state
+                            .infrastructure
+                            .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                                reason: format!(
+                                    "the broker's worker {} failed: {e}",
+                                    actor_cell.get_name().unwrap_or_default()
+                                ),
+                            });
+                }
+
+                SupervisionEvent::ProcessGroupChanged(_) => (),
             }
 
-            SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // Today: fatal. Tomorrow: restart policy per worker type.
-                error!(
-                    worker_name = ?actor_cell.get_name(),
-                    worker_id = ?actor_cell.get_id(),
-                    error = %e,
-                    "Worker failed; stopping broker"
-                );
-                shutdown_tracing();
-                // Exit code 1 — unexpected failure, distinct from graceful rejuvenation (2).
-                std::process::exit(1);
-            }
-
-            SupervisionEvent::ProcessGroupChanged(_) => (),
+            Ok::<(), ActorProcessingErr>(())
         }
-
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn pre_start(
@@ -193,159 +265,207 @@ impl Actor for Broker {
     ) -> Result<Self::State, ActorProcessingErr> {
         // Parent span for startup; don't try to "carry" this across spawned actors.
         let span = trace_span!("cassini.broker.pre_start", bind_addr = %args.bind_addr);
-        let _g = span.enter();
 
-        debug!(actor = ?myself, "Broker starting");
+        async move {
+            debug!(actor = ?myself, "Broker starting");
 
-        // Build the OutputPort that HealthCheckActor fires when it wants
-        // to initiate the graceful shutdown sequence. We convert the ()
-        // signal into a PrepareForShutdown message with the auth token.
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        let shutdown_token = args.shutdown_auth_token.clone();
-        prepare_shutdown_port.subscribe(myself.clone(), move |()| {
-            Some(BrokerMessage::PrepareForShutdown {
-                auth_token: shutdown_token.clone(),
-            })
-        });
+            // The infrastructure: the health check, the signal listener and the shutdown handshake
+            // with its budget and watchdog, as every agent has, without a Cassini client (the broker
+            // is what a client connects to). It tells the broker when something has decided it
+            // should end: a health verdict, SIGTERM, a worker's death.
+            let shutdown_budget = args.configured.shutdown_budget();
+            let publisher = args
+                .configured
+                .config()
+                .read(&polar_agent_builder::environment::AUTHORITY_PUBLISHER)
+                .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+            let infrastructure = ServiceBuilder::new(myself.clone(), "cassini")
+                .into_configured(args.configured)
+                .build()
+                .await
+                .map_err(|e| {
+                    error!(error = ?e, "Broker startup failed: the infrastructure did not start");
+                    e
+                })?;
+            let token_for_infrastructure = args.shutdown_auth_token.clone();
+            infrastructure.infrastructure_events.subscribe(
+                myself.clone(),
+                move |event| match event {
+                    InfrastructureEvent::PrepareShutdown => {
+                        Some(BrokerMessage::PrepareForShutdown {
+                            auth_token: token_for_infrastructure.clone(),
+                        })
+                    }
+                },
+            );
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some("cassini.healthcheck".to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: false,
-                // 12-hour rejuvenation threshold — Cassini uses long-lived certs
-                // to minimize disruption to connected agents.
-                rejuvenation_threshold_secs: 300,
-                // No dep cert endpoints — cert-issuer is HTTP only.
-                // Availability is proven implicitly by successful cert issuance.
-                dep_cert_endpoints: vec![],
-                prepare_shutdown_port,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: HealthCheckActor failed to start");
-            ActorProcessingErr::from(e)
-        })?;
+            // Create SessionManager without listener manager (will set later)
+            let (session_mgr, _) = Actor::spawn_linked(
+                Some(SESSION_MANAGER_NAME.to_owned()),
+                SessionManager,
+                SessionManagerArgs {
+                    broker: myself.clone(),
+                    listener_mgr: None,
+                    retention: args
+                        .session_timeout
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or(crate::DEFAULT_SESSION_RETENTION),
+                },
+                myself.clone().into(),
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: SessionManager failed to start");
+                ActorProcessingErr::from(e)
+            })?;
 
-        // Cassini doesn't connect to itself, so manually signal CassiniConnected
-        // to kick off the tick loop. This is the equivalent of the Registered
-        // event that agent supervisors receive when they connect to Cassini.
-        let _ = healthcheck.cast(HealthCheckMessage::CassiniConnected);
+            let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
+                Some(SUBSCRIBER_MANAGER_NAME.to_string()),
+                SubscriberManager,
+                SubscriberManagerArgs {
+                    session_mgr: session_mgr.clone(),
+                    bounds: args.bounds.clone(),
+                },
+                myself.clone().into(),
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: SubscriberManager failed to start");
+                ActorProcessingErr::from(e)
+            })?;
 
-        // Create SessionManager without listener manager (will set later)
-        let (session_mgr, _) = Actor::spawn_linked(
-            Some(SESSION_MANAGER_NAME.to_owned()),
-            SessionManager,
-            SessionManagerArgs {
-                broker: myself.clone(),
-                listener_mgr: None,
-            },
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: SessionManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
+            // Wire the subscriber manager ref into session_mgr now that it
+            // exists -- SessionManager is spawned before SubscriberManager, so
+            // it can't receive this at construction time.
+            let _ = session_mgr.send_message(BrokerMessage::SetSubscriberManagerRef {
+                subscriber_mgr: subscriber_mgr.clone(),
+            });
 
-        // Now create ListenerManager, which needs the session manager
-        let listener_manager_args = ListenerManagerArgs {
-            bind_addr: args.bind_addr,
-            server_cert_file: args.server_cert_file,
-            private_key_file: args.private_key_file,
-            ca_cert_file: args.ca_cert_file,
-            session_mgr: session_mgr.clone(),
-            shutdown_auth_token: args.shutdown_auth_token.clone(),
-        };
+            // The broker's pressure: the budget's alarm, and the stall checks, through the subscriber manager to each
+            // subscriber.
+            let pressure = Self::start_pressure(
+                &myself,
+                &args.bounds,
+                args.budget_control.clone(),
+                subscriber_mgr.clone(),
+            )
+            .await?;
 
-        let (listener_mgr, _) = Actor::spawn_linked(
-            Some(LISTENER_MANAGER_NAME.to_owned()),
-            ListenerManager,
-            listener_manager_args,
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: ListenerManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
+            let topic_mgr_args = TopicManagerArgs {
+                topics: None,
+                subscriber_mgr: Some(subscriber_mgr.clone()),
+                bounds: args.bounds.clone(),
+            };
 
-        // Send listener manager ref to the existing session manager
-        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager {
-            listener_mgr: listener_mgr.clone(),
-        });
+            let (topic_mgr, _topic_handle) = Actor::spawn_linked(
+                Some(TOPIC_MANAGER_NAME.to_owned()),
+                TopicManager,
+                topic_mgr_args,
+                myself.clone().into(),
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: TopicManager failed to start");
+                ActorProcessingErr::from(e)
+            })?;
 
-        let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
-            Some(SUBSCRIBER_MANAGER_NAME.to_string()),
-            SubscriberManager,
-            SubscriberManagerArgs {
+            // Wire the topic manager ref into subscriber_mgr now that it exists
+            // -- SubscriberManager is spawned before TopicManager, so it can't
+            // receive this at construction time.
+            let _ = subscriber_mgr.send_message(BrokerMessage::SetTopicManagerRef {
+                topic_mgr: topic_mgr.clone(),
+            });
+
+            // Who may publish and subscribe to what: the credentials agent's authority, kept as every agent keeps it,
+            // and asked for through the topic manager. It exists before the first connection is accepted.
+            let authority = crate::authority::BrokerAuthority::spawn(
+                publisher,
+                &args.ca_cert_file,
+                myself.get_cell(),
+                topic_mgr.clone(),
+                args.decision_cache,
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: its authority did not start");
+                e
+            })?;
+
+            // The ListenerManager comes last of the workers that serve clients: it accepts connections at once, and
+            // each needs the session manager and the authority.
+            let listener_manager_args = ListenerManagerArgs {
+                bind_addr: args.bind_addr,
+                server_cert_file: args.server_cert_file,
+                server_key: args.server_key,
+                ca_cert_file: args.ca_cert_file,
                 session_mgr: session_mgr.clone(),
-            },
-            myself.clone().into(),
-        )
+                shutdown_auth_token: args.shutdown_auth_token.clone(),
+                authority,
+                bounds: args.bounds.clone(),
+            };
+
+            let (listener_mgr, _) = Actor::spawn_linked(
+                Some(LISTENER_MANAGER_NAME.to_owned()),
+                ListenerManager,
+                listener_manager_args,
+                myself.clone().into(),
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: ListenerManager failed to start");
+                ActorProcessingErr::from(e)
+            })?;
+
+            // Send listener manager ref to the existing session manager
+            let _ = session_mgr.send_message(BrokerMessage::SetListenerManager {
+                listener_mgr: listener_mgr.clone(),
+            });
+
+            let control_mgr_args = ControlManagerState {
+                topic_mgr: topic_mgr.clone(),
+                subscriber_mgr: subscriber_mgr.clone(),
+                listener_mgr: listener_mgr.clone(),
+                session_mgr: session_mgr.clone(),
+                shutdown_auth_token: args.shutdown_auth_token.clone(),
+                is_shutting_down: false,
+                current_shutdown_phase: None,
+                phase_completed: false,
+                phase_timeout_handle: None,
+                phase_timeout_token: CancellationToken::new(),
+                // The budget is shared by the five phases.
+                shutdown_timeout: (shutdown_budget / 5).max(Duration::from_millis(1)),
+                shutdown_completed: false,
+            };
+
+            let (control_mgr, _) = Actor::spawn_linked(
+                Some("CONTROL_MANAGER".to_owned()),
+                ControlManager,
+                control_mgr_args,
+                myself.clone().into(),
+            )
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: ControlManager failed to start");
+                ActorProcessingErr::from(e)
+            })?;
+
+            info!("Broker startup complete");
+
+            Ok::<BrokerState, ActorProcessingErr>(BrokerState {
+                listener_mgr: Some(listener_mgr),
+                session_mgr: Some(session_mgr),
+                topic_mgr: Some(topic_mgr),
+                subscriber_mgr: Some(subscriber_mgr),
+                control_mgr: Some(control_mgr),
+                infrastructure: infrastructure.infrastructure,
+                is_shutting_down: false,
+                pressure: Some(pressure),
+                bounds: args.bounds.clone(),
+                budget_control: args.budget_control.clone(),
+            })
+        }
+        .instrument(span)
         .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: SubscriberManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
-
-        let topic_mgr_args = TopicManagerArgs {
-            topics: None,
-            subscriber_mgr: Some(subscriber_mgr.clone()),
-        };
-
-        let (topic_mgr, _topic_handle) = Actor::spawn_linked(
-            Some(TOPIC_MANAGER_NAME.to_owned()),
-            TopicManager,
-            topic_mgr_args,
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: TopicManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
-
-        let control_mgr_args = ControlManagerState {
-            topic_mgr: topic_mgr.clone(),
-            subscriber_mgr: subscriber_mgr.clone(),
-            listener_mgr: listener_mgr.clone(),
-            session_mgr: session_mgr.clone(),
-            shutdown_auth_token: args.shutdown_auth_token.clone(),
-            is_shutting_down: false,
-            current_shutdown_phase: None,
-            phase_completed: false,
-            phase_timeout_handle: None,
-            phase_timeout_token: CancellationToken::new(),
-            shutdown_timeout: Duration::from_secs(30), // 30 seconds per phase max
-            shutdown_completed: false,
-        };
-
-        let (control_mgr, _) = Actor::spawn_linked(
-            Some("CONTROL_MANAGER".to_owned()),
-            ControlManager,
-            control_mgr_args,
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: ControlManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
-
-        info!("Broker startup complete");
-
-        Ok(BrokerState {
-            listener_mgr: Some(listener_mgr),
-            session_mgr: Some(session_mgr),
-            topic_mgr: Some(topic_mgr),
-            subscriber_mgr: Some(subscriber_mgr),
-            control_mgr: Some(control_mgr),
-            healthcheck,
-            is_shutting_down: false,
-        })
     }
 
     async fn post_start(
@@ -354,29 +474,28 @@ impl Actor for Broker {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!(actor = ?myself, "Broker started");
-        // Start periodic shutdown check (every 1s while shutting down)
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                if myself
-                    .send_message(BrokerMessage::CheckShutdownComplete)
-                    .is_err()
-                {
-                    // Broker is gone, exit loop
-                    break;
-                }
-                // Continue loop
-            }
-        });
+        // A periodic shutdown check (every 1s), the broker's own: it ends with the broker.
+        drop(myself.send_interval(Duration::from_secs(1), || {
+            BrokerMessage::CheckShutdownComplete
+        }));
         Ok(())
     }
 
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // The infrastructure is told it may come down, which also ends its watchdog.
+        let _ = state
+            .infrastructure
+            .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+        // The managers are this actor's children and nothing else stops them: left running they
+        // keep their names, and the listener keeps the address bound.
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await;
         debug!(actor = ?myself, "Broker stopped");
         Ok(())
     }
@@ -408,6 +527,8 @@ impl Actor for Broker {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
+                peer_instance,
             } => {
                 self.handle_registration_request(
                     myself,
@@ -415,6 +536,8 @@ impl Actor for Broker {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
+                    peer_instance,
                 )
                 .await?;
             }
@@ -440,6 +563,10 @@ impl Actor for Broker {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
+                published_instance,
+                id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -449,6 +576,10 @@ impl Actor for Broker {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
+                    published_instance,
+                    id,
+                    window,
                 )
                 .await?;
             }
@@ -457,9 +588,23 @@ impl Actor for Broker {
                 payload,
                 result,
                 trace_ctx,
+                published_by,
+                published_instance,
+                origin,
+                ..
             } => {
-                self.handle_publish_response(myself, state, topic, payload, result, trace_ctx)
-                    .await?;
+                self.handle_publish_response(
+                    myself,
+                    state,
+                    topic,
+                    payload,
+                    result,
+                    trace_ctx,
+                    published_by,
+                    published_instance,
+                    origin,
+                )
+                .await?;
             }
             BrokerMessage::ErrorMessage { error, .. } => {
                 self.handle_error_message(myself, state, error).await?;
@@ -536,6 +681,79 @@ impl Broker {
         Ok(())
     }
 
+    /// Starts the pressure manager under the broker, telling the subscriber manager its checks.
+    async fn start_pressure(
+        myself: &ActorRef<BrokerMessage>,
+        bounds: &crate::budget::Bounds,
+        control: Option<crate::pressure::BudgetControl>,
+        subscribers: ActorRef<BrokerMessage>,
+    ) -> Result<ActorRef<PressureMsg>, ActorProcessingErr> {
+        let (pressure, _) = Actor::spawn_linked(
+            Some(crate::PRESSURE_MANAGER_NAME.to_string()),
+            PressureManager,
+            PressureManagerArgs {
+                bounds: bounds.clone(),
+                subscribers: Some(subscribers),
+                control,
+                report_every: crate::budget_report::REPORT_EVERY,
+            },
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "the pressure manager failed to start");
+            ActorProcessingErr::from(e)
+        })?;
+        Ok(pressure)
+    }
+
+    /// The pressure manager ended while the broker runs (`why`): a new one is started, or, if there is no subscriber
+    /// manager to tell, the broker ends in order.
+    async fn restart_pressure(
+        myself: &ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        why: &str,
+    ) {
+        // Not while the broker itself ends: a new one would outlive it, holding its name.
+        if matches!(
+            myself.get_status(),
+            ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+        ) {
+            return;
+        }
+        // A new controller starts from the budget as it is, not from the floor.
+        let control = state.budget_control.clone().map(|mut control| {
+            control
+                .controller
+                .warm_start(crate::runtime_budget::WarmStart {
+                    budget: state.bounds.budget.limit() as u64,
+                    drain_rate: 0,
+                });
+            control
+        });
+        let started = match state.subscriber_mgr.clone() {
+            Some(subscribers) => Self::start_pressure(myself, &state.bounds, control, subscribers)
+                .await
+                .ok(),
+            None => None,
+        };
+        match started {
+            Some(pressure) => {
+                warn!(%why, "the pressure manager ended while the broker runs: a new one is started");
+                state.pressure = Some(pressure);
+            }
+            None => {
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                        reason: format!(
+                            "the pressure manager ended ({why}) and could not be started again"
+                        ),
+                    });
+            }
+        }
+    }
+
     async fn handle_initiate_shutdown_phase(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -546,6 +764,20 @@ impl Broker {
         let _g = span.enter();
 
         info!("Initiating shutdown phase: {:?}", phase);
+        if !state.is_shutting_down {
+            // The shutdown has begun. The infrastructure starts the budget's watchdog if nothing
+            // asked for the shutdown through it (a shutdown requested over the wire did not); if
+            // it has begun already this changes nothing.
+            let _ = state
+                .infrastructure
+                .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                    reason: "an orderly shutdown was requested".to_string(),
+                });
+            // The pressure manager ends: what the drain lets go of is the drain's.
+            if let Some(pressure) = &state.pressure {
+                let _ = pressure.cast(PressureMsg::Drain);
+            }
+        }
         state.is_shutting_down = true;
 
         match phase {
@@ -616,14 +848,15 @@ impl Broker {
         state: &mut BrokerState,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.check_shutdown_complete");
-        let _g = span.enter();
         if state.is_shutting_down {
             self.check_shutdown_completion(myself.clone(), state)
+                .instrument(span)
                 .await?;
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -631,6 +864,8 @@ impl Broker {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        peer_identity: Option<String>,
+        peer_instance: Option<cassini_types::Instance>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -645,6 +880,7 @@ impl Broker {
                     client_id,
                     result: Err("Broker is shutting down".to_string()),
                     trace_ctx: Some(span.context()),
+                    session: None,
                 })?;
             }
             return Ok(());
@@ -655,21 +891,14 @@ impl Broker {
                 registration_id: registration_id.clone(),
                 client_id: client_id.clone(),
                 trace_ctx: Some(span.context()),
+                peer_identity: peer_identity.clone(),
+                peer_instance,
             }) {
                 error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
             }
 
-            if let Some(sub_mgr) = &state.subscriber_mgr {
-                if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
-                    registration_id,
-                    client_id,
-                    trace_ctx: Some(span.context()),
-                }) {
-                    warn!(error = %e, "Failed to notify SubscriberManager about registration");
-                }
-            } else {
-                error!("SubscriberManager ActorRef missing in broker state");
-            }
+            // The session manager tells the subscriber manager itself, once a resumed session has
+            // its new connection. See SessionManager::handle_registration_request.
         } else {
             error!("SessionManager ActorRef missing in broker state; cannot process registration");
         }
@@ -692,14 +921,13 @@ impl Broker {
         // Reject new subscriptions during shutdown
         if state.is_shutting_down {
             warn!("Rejecting subscribe request during shutdown");
-            if let Some(session_mgr) = &state.session_mgr {
-                session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
-                    registration_id,
-                    topic,
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                })?;
-            }
+            // To the session, which forwards it to the client (the session manager had no use for it).
+            crate::topic::acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("Broker is shutting down".to_string()),
+                Some(span.context()),
+            );
             return Ok(());
         }
 
@@ -756,15 +984,20 @@ impl Broker {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
         state: &mut BrokerState,
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: cassini_types::Payload,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
+        id: cassini_types::MessageId,
+        window: cassini_types::Hold,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
@@ -776,31 +1009,55 @@ impl Broker {
         );
         trace!("Broker received publish request");
 
+        // A refusal that is the broker's state, not the publish's: the client keeps the publish and sends it again
+        // (`PublishRefusal::Unavailable`). Told to the publisher's session, which passes it on to its client.
+        let unavailable = |reply_to: &Option<ActorRef<BrokerMessage>>,
+                           topic: String,
+                           reason: String| {
+            let refusal = BrokerMessage::PublishResponse {
+                topic,
+                payload: Vec::new().into(),
+                result: Err(reason),
+                trace_ctx: Some(span.context()),
+                published_by: None,
+                published_instance: None,
+                origin: Some(id),
+                delivery_id: None,
+                refusal: Some(cassini_types::PublishRefusal::Unavailable),
+            };
+            let told = match reply_to {
+                Some(session) => session.send_message(refusal),
+                None => match &state.session_mgr {
+                    Some(session_mgr) => session_mgr.send_message(refusal),
+                    None => Ok(()),
+                },
+            };
+            if let Err(e) = told {
+                warn!(error = %e, "Failed to tell the publisher's session its publish was refused");
+            }
+        };
+
         // Reject new publishes during shutdown
         if state.is_shutting_down {
             warn!("Rejecting publish request during shutdown");
-            if let Some(session_mgr) = &state.session_mgr
-                && let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
-                    topic,
-                    payload: Vec::new().into(),
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                })
-            {
-                warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-            }
+            unavailable(&reply_to, topic, "Broker is shutting down".to_string());
             return Ok(());
         }
 
         if let Some(topic_mgr) = &state.topic_mgr {
             // Low-hanging fruit: don't clone payload unless we have to.
             // Move it into the forward message; only clone in the failure path.
+            let session = reply_to.clone();
             let forward = topic_mgr.send_message(BrokerMessage::PublishRequest {
                 registration_id: registration_id.clone(),
                 topic: topic.clone(),
                 payload,
                 reply_to, // pass through the reply_to from the incoming message
                 trace_ctx: Some(span.context()),
+                published_by,
+                published_instance,
+                id,
+                window,
             });
 
             if let Err(e) = forward {
@@ -808,44 +1065,31 @@ impl Broker {
 
                 // If forwarding fails, we need a payload for the failure response.
                 // We only have the length now; best we can do is return an error without echoing bytes.
-                if let Some(session_mgr) = &state.session_mgr {
-                    if let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
-                        topic,
-                        payload: Vec::new().into(),
-                        result: Err(format!("forward failed: {e}")),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-                    }
-                } else {
-                    error!(
-                        payload_bytes = payload_len,
-                        "SessionManager missing; publish failure can't be reported"
-                    );
-                }
+                debug!(
+                    payload_bytes = payload_len,
+                    "the publish is refused for now"
+                );
+                unavailable(&session, topic, format!("forward failed: {e}"));
             }
         } else {
             error!("TopicManager missing; cannot publish");
-            if let Some(session_mgr) = &state.session_mgr {
-                let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
-                    topic,
-                    payload: Vec::new().into(),
-                    result: Err("topic manager unavailable".to_string()),
-                    trace_ctx: Some(span.context()),
-                });
-            }
+            unavailable(&reply_to, topic, "topic manager unavailable".to_string());
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         _myself: ActorRef<BrokerMessage>,
         state: &mut BrokerState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: cassini_types::Payload,
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
+        origin: Option<cassini_types::MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_response", %topic, ok = result.is_ok(), payload_bytes = payload_len);
@@ -858,6 +1102,11 @@ impl Broker {
                 payload,
                 result,
                 trace_ctx: Some(span.context()),
+                published_by,
+                published_instance,
+                origin,
+                delivery_id: None,
+                refusal: None,
             }) {
                 error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
             }

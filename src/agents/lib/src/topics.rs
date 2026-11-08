@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Canonical Cassini topic names for the Polar system.
 //!
 //! Topics are named after the data they carry, not the agents that consume them.
@@ -10,7 +33,7 @@
 //!
 //! ## Current topology
 //!
-//! ```
+//! ```text
 //! polar.provenance.events     ← all agents publish, all consumers subscribe
 //! polar.provenance.discovery  ← observer agents publish, resolver subscribes
 //! polar.git.repositories      ← git observer publishes, git processor subscribes
@@ -23,9 +46,8 @@
 ///
 /// All agents that observe facts about the software supply chain publish here.
 /// This includes CI pipeline stages (nushell and Rust), the k8s observer,
-/// the GitLab observer, and the resolver. The build processor is the consumer:
-/// it projects every [`ProvenanceEvent`] variant into the graph. (The kube
-/// consumer gets resolutions for its pods on KUBERNETES_RESOLUTION_EVENTS.)
+/// the GitLab observer, and the resolver. All consumers — the build processor,
+/// the provenance linker — subscribe here and filter on [`ProvenanceEvent`] variant.
 ///
 /// Wire formats accepted on this topic:
 /// - rkyv-serialized [`ProvenanceEvent`] (Rust agents)
@@ -61,5 +83,5 @@ pub const GIT_REPOSITORY_EVENTS: &str = "polar.git.repositories.events";
 /// end. The agent processor subscribes and writes canonical `PolarAgent` nodes.
 pub const AGENT_LIFECYCLE_EVENTS: &str = "polar.agents.lifecycle";
 
-pub const KUBERNETES_RESOURCES_EVENTS: &str = "polar.kubernetes.cluster.resources";
+// TODO: Replace "cluster" with a cluster id. Chances are we won't get away wtih constants the moment someone wants to observe multiple clusters
 pub const KUBERNETES_RESOLUTION_EVENTS: &str = "polar.kubernetes.cluster.resolution";

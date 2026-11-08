@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Kubernetes consumer: projects observed cluster resources into the Polar
 //! knowledge graph.
 //!
@@ -42,13 +65,12 @@
 //! are converted at the boundary; observation times use `now_ms()`.
 //!
 //! Two property names, two meanings:
-//!   - `valid_from`   — when the fact became true according to the *source*
-//!                      (kubelet, controller condition). Falls back to
-//!                      observation time only when the source doesn't attest
-//!                      one, and that fallback is always commented at the
-//!                      call site.
-//!   - `observed_at`  — when this consumer ingested the fact. The delta from
-//!                      `valid_from` is observer lag, a diagnostic.
+//! - `valid_from` — when the fact became true according to the *source*
+//!   (kubelet, controller condition). Falls back to observation time only
+//!   when the source doesn't attest one, and that fallback is always
+//!   commented at the call site.
+//! - `observed_at` — when this consumer ingested the fact. The delta from
+//!   `valid_from` is observer lag, a diagnostic.
 //!
 //! NOTE: `GraphController::UpdateState` previously injected `valid_from`
 //! into state instances from the state key. This consumer now writes
@@ -243,6 +265,17 @@ fn handle_owner_refs(
 ) -> Result<(), ActorProcessingErr> {
     for owner in owners {
         if let Some(owner_key) = KubeNodeKey::from_owner_reference(owner, cluster_uid) {
+            // An owner nothing here projects is an anchor: the pod's owner reference is all that is known of it,
+            // so its name is written before the edge to it.
+            if owner_key.is_anchor_only() {
+                graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                    key: Box::new(owner_key.clone()),
+                    props: vec![Property(
+                        "name".into(),
+                        GraphValue::String(owner.name.clone()),
+                    )],
+                }))?;
+            }
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: owner_key.into_key(),
                 rel_type: "OWNS".into(),
@@ -287,4 +320,93 @@ fn project_deletion_state(
     }))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod owner_edge_tests {
+    use super::*;
+    use ractor::{Actor, ActorRef};
+    use std::sync::{Arc, Mutex};
+
+    /// Stands in for the graph controller and keeps what it is sent, as text.
+    struct Recorder;
+
+    #[ractor::async_trait]
+    impl Actor for Recorder {
+        type Msg = GraphControllerMsg;
+        type State = Arc<Mutex<Vec<String>>>;
+        type Arguments = Arc<Mutex<Vec<String>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(args)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            msg: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let GraphControllerMsg::Op(op) = msg {
+                state.lock().unwrap().push(format!("{op:?}"));
+            }
+            Ok(())
+        }
+    }
+
+    fn owner(kind: &str, name: &str) -> OwnerReference {
+        OwnerReference {
+            kind: kind.into(),
+            name: name.into(),
+            uid: "owner-uid".into(),
+            ..Default::default()
+        }
+    }
+
+    /// What the graph is sent for a pod with this one owner.
+    async fn sent_for(owner: OwnerReference) -> Vec<String> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (graph, handle) = Actor::spawn(None, Recorder, seen.clone()).await.unwrap();
+        let pod = KubeNodeKey::Pod {
+            uid: "pod-uid".into(),
+            cluster_uid: "c-1".into(),
+        };
+        handle_owner_refs(&[owner], pod, &graph, "c-1").unwrap();
+        // The recorder handles messages in order; stopping it after them means all have been seen.
+        graph.drain().unwrap();
+        handle.await.unwrap();
+
+        seen.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_job_owns_its_pod_and_nothing_else_is_written() {
+        let sent = sent_for(owner("Job", "build-1")).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(
+            sent[0].contains("EnsureEdge") && sent[0].contains("OWNS"),
+            "{sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_statefulset_owner_gets_its_name_written_and_then_the_edge() {
+        let sent = sent_for(owner("StatefulSet", "polar-neo4j")).await;
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(
+            sent[0].contains("UpsertNode") && sent[0].contains("polar-neo4j"),
+            "{sent:?}"
+        );
+        assert!(sent[1].contains("EnsureEdge"), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn an_owner_of_a_kind_the_graph_has_no_node_for_writes_nothing() {
+        let sent = sent_for(owner("Widget", "w")).await;
+        assert!(sent.is_empty(), "{sent:?}");
+    }
 }

@@ -1,5 +1,28 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use cassini_client::{
-    ClientEventForwarder, ClientEventForwarderArgs, RegistrationState, TCPClientConfig,
+    ClientEventForwarder, ClientEventForwarderArgs, ClientKey, RegistrationState, TCPClientConfig,
     cli::{IpcRequest, IpcResponse, OutputFormat, print_control_result},
 };
 use cassini_types::{ClientEvent as CassiniClientEvent, ControlResult, SessionDetails, SessionMap};
@@ -57,7 +80,7 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
             CassiniClientEvent::MessagePublished { topic, .. } => Some(MockMessage {
                 payload: format!("published:{topic}"),
             }),
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             CassiniClientEvent::Registered { registration_id } => Some(MockMessage {
@@ -70,6 +93,14 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
                 payload: format!("error:{reason}"),
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
+            CassiniClientEvent::RegistrationRefused { .. } => None,
+            CassiniClientEvent::SessionEnded { .. } => None,
+            CassiniClientEvent::SubscribeRefused { topic, reason }
+            | CassiniClientEvent::PublishRefused { topic, reason }
+            | CassiniClientEvent::PublishDropped { topic, reason }
+            | CassiniClientEvent::PublishDeferred { topic, reason } => Some(MockMessage {
+                payload: format!("refused:{topic}:{reason}"),
+            }),
         });
 
     // Spawn the ClientEventForwarder with the mock actor as target
@@ -88,6 +119,8 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
         topic: "test-topic".to_string(),
         payload: vec![1, 2, 3],
         trace_ctx: None,
+        published_by: None,
+        published_instance: None,
     })?;
 
     // Give the actor time to process the message
@@ -113,7 +146,7 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
             CassiniClientEvent::MessagePublished { topic, .. } => Some(MockMessage {
                 payload: format!("pub:{topic}"),
             }),
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             CassiniClientEvent::Registered { registration_id } => Some(MockMessage {
@@ -126,6 +159,14 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
                 payload: format!("err:{reason}"),
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
+            CassiniClientEvent::RegistrationRefused { .. } => None,
+            CassiniClientEvent::SessionEnded { .. } => None,
+            CassiniClientEvent::SubscribeRefused { topic, reason }
+            | CassiniClientEvent::PublishRefused { topic, reason }
+            | CassiniClientEvent::PublishDropped { topic, reason }
+            | CassiniClientEvent::PublishDeferred { topic, reason } => Some(MockMessage {
+                payload: format!("refused:{topic}:{reason}"),
+            }),
         });
 
     // Spawn the forwarder
@@ -144,10 +185,13 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
         topic: "topic1".to_string(),
         payload: vec![1],
         trace_ctx: None,
+        published_by: None,
+        published_instance: None,
     })?;
 
     forwarder_ref.send_message(CassiniClientEvent::PublishAcknowledged {
         topic: "topic2".to_string(),
+        id: cassini_types::MessageId { epoch: 1, seq: 1 },
     })?;
 
     forwarder_ref.send_message(CassiniClientEvent::Registered {
@@ -176,7 +220,7 @@ async fn test_client_event_forwarder_filters_events() -> Result<(), ActorProcess
     // Create a mapper that only forwards PublishAcknowledged events
     let mapper: Box<dyn Fn(CassiniClientEvent) -> Option<MockMessage> + Send + Sync + 'static> =
         Box::new(move |event| match event {
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             _ => None, // Filter out other events
@@ -198,11 +242,14 @@ async fn test_client_event_forwarder_filters_events() -> Result<(), ActorProcess
         topic: "test".to_string(),
         payload: vec![1],
         trace_ctx: None,
+        published_by: None,
+        published_instance: None,
     })?;
 
     // Send a PublishAcknowledged event (should pass through)
     forwarder_ref.send_message(CassiniClientEvent::PublishAcknowledged {
         topic: "filtered".to_string(),
+        id: cassini_types::MessageId { epoch: 1, seq: 2 },
     })?;
 
     // Give time to process
@@ -233,7 +280,10 @@ async fn test_tcp_client_config_from_values() {
     assert_eq!(config.server_name, "broker.example.com");
     assert_eq!(config.ca_certificate_path, "/path/to/ca.crt");
     assert_eq!(config.client_certificate_path, "/path/to/client.crt");
-    assert_eq!(config.client_key_path, "/path/to/client.key");
+    assert_eq!(
+        config.client_key,
+        ClientKey::File("/path/to/client.key".into())
+    );
 }
 
 #[tokio::test]
@@ -250,7 +300,7 @@ async fn test_tcp_client_config_from_values_empty_strings() {
     assert_eq!(config.server_name, "");
     assert_eq!(config.ca_certificate_path, "");
     assert_eq!(config.client_certificate_path, "");
-    assert_eq!(config.client_key_path, "");
+    assert_eq!(config.client_key, ClientKey::File(String::new()));
 }
 
 #[tokio::test]
@@ -267,7 +317,10 @@ async fn test_tcp_client_config_from_values_unicode() {
     assert_eq!(config.server_name, "пример.com");
     assert_eq!(config.ca_certificate_path, "/путь/к/сертификату.crt");
     assert_eq!(config.client_certificate_path, "/путь/к/клиенту.crt");
-    assert_eq!(config.client_key_path, "/путь/к/ключу.key");
+    assert_eq!(
+        config.client_key,
+        ClientKey::File("/путь/к/ключу.key".into())
+    );
 }
 
 // ===== Tests for RegistrationState variants =====

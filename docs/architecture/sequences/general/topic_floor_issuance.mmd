@@ -1,0 +1,52 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% From an agent's declared topics to the broker's decision (policy-enforcement.md, decisions of 2026-10-21). Built
+%% through issuance (stages 1 to 3, 2026-10-21, not yet run on a cluster); the broker's decision is designed (stage 5). Applying the catalog is the administrator's sign-off: there is no separate grants document.
+sequenceDiagram
+    autonumber
+    participant Code as the agent's code<br/>(PolarAgent::TOPICS)
+    participant Res as resolve.nu / render.nu
+    actor Admin as Administrator
+    participant K as Kubernetes API
+    participant CI as cert-issuer<br/>(floor)
+    participant CA as credentials agent<br/>(issuance floor)
+    participant Init as polar-init
+    participant Bk as Cassini broker
+
+    Res->>Code: IMAGE --scaffold, with POLAR_SERVED_WORKLOADS (a pod in a scratch namespace)
+    Code-->>Res: the full set: declared topics with their access, implied topics each with its rule
+    Res->>Res: the target's sets, the scheduler's family already exact (one per served agent),<br/>and a warning for each declared topic with no other side in the target
+    Note over Res: catalog-wide, infra/tests/catalog-topics.nu fails on a one-sided topic<br/>that gives no reason, from every agent built from the workspace
+    Res->>Res: write each workload's declared topics into the credentials agent's issuance floor,<br/>and the bootstrap services' into cert-issuer's floor
+    Admin->>K: apply the catalog (up.nu, or the signed publish Flux applies): the sign-off
+    K->>CA: the issuance floor (a ConfigMap)
+    K->>CI: cert-issuer's floor
+
+    Note over Init,CA: a workload's pod starts, or rejuvenates
+    Init->>CA: workload issuance (the sealed ServiceAccount token)
+    CA->>CA: identity from the token, then this workload's declared topics and groups from the floor
+    CA-->>Init: certificate: DNS identity, p:pub:topic and p:sub:topic for each declared topic,<br/>g:group for each group (implied topics are not written: they follow from the identity and the groups)
+    Note over CI: the bootstrap services are signed by cert-issuer, with the topics and groups of their own floor entry
+
+    Init->>Bk: (the agent) connect with that certificate, subscribe, publish
+    Bk->>Bk: Cedar first (permit and forbid both override), else the floor:<br/>implied from the identity and its g: groups (implied_topics), declared from the p: names, else refuse
+    Note over Admin,Bk: a change to an agent's topics is a change to the catalog, applied like any other:<br/>the agent has it with its next certificate (within the hour), and Cedar can act at once meanwhile

@@ -1,0 +1,69 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+[package]
+name = "credentials-agent-consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+polar-scudo.workspace = true
+cassini-backoff.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+cert-client = { path = "../../cert-issuer/client" }
+cert-issuer-common = { path = "../../cert-issuer/common" }
+credentials_agent_common.workspace = true
+credentials-agent-model.workspace = true
+jwt_utils.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
+polar-permissions.workspace = true
+polar-policy.workspace = true
+ractor.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rkyv.workspace = true
+rsa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+polar-signing = { workspace = true, features = ["testing"] }
+polar-router.workspace = true
+rcgen.workspace = true
+time.workspace = true
+wiremock.workspace = true
+x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
+
+[[bin]]
+name = "credentials-agent-consumer"
+path = "src/main.rs"

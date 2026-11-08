@@ -1,63 +1,34 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::graph::controller::{
-    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op,
+    CypherIdentifierError, DynamicNodeKey, GraphNodeKey, GraphOp, GraphValue, IntoGraphKey,
+    NodeIdentity, Property, handle_op, handle_query, validate_cypher_identifier,
 };
+use crate::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
+
 use neo4rs::{BoltType, Graph};
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
-use testcontainers_modules::neo4j::{Neo4j, Neo4jImage};
-
-// ── Shared fixture ─────────────────────────────────────────────────────────
-//
-// #[once] tells rstest to initialize this fixture exactly once for the
-// entire test binary and reuse the result for every test that requests it.
-// The return type must be Sync for this to work — Graph is Arc-backed so
-// it satisfies that. The ContainerAsync handle is held inside the struct
-// so it is never dropped while the fixture is alive.
-//
-// The fixture function is async — rstest handles the tokio runtime
-// integration automatically when the test functions are also async.
-
-pub struct Neo4jFixture {
-    _container: ContainerAsync<Neo4jImage>,
-    pub graph: Graph,
-}
-
-// Safety: ContainerAsync is not Sync by default but we never access it
-// concurrently — we only hold it to prevent Drop. The graph field is the
-// only thing tests interact with and Graph is Send + Sync.
-unsafe impl Sync for Neo4jFixture {}
-
-static NEO4J_FIXTURE: tokio::sync::OnceCell<Neo4jFixture> = tokio::sync::OnceCell::const_new();
-
-async fn neo4j() -> &'static Neo4jFixture {
-    NEO4J_FIXTURE
-        .get_or_init(|| async {
-            polar::init_logging("polar.graph.tests".to_string());
-
-            let container = Neo4j::default()
-                .start()
-                .await
-                .expect("failed to start Neo4j test container");
-
-            let config = neo4rs::ConfigBuilder::new()
-                .uri(format!(
-                    "bolt://{}:{}",
-                    container.get_host().await.expect("container host"),
-                    container.image().bolt_port_ipv4().expect("bolt port"),
-                ))
-                .user(container.image().user().expect("user"))
-                .password(container.image().password().expect("password"))
-                .build()
-                .expect("neo4rs config");
-
-            let graph = neo4rs::Graph::connect(config).expect("neo4rs connect");
-
-            Neo4jFixture {
-                _container: container,
-                graph,
-            }
-        })
-        .await
-}
+use polar_test_graph::{clear_graph, neo4j};
 
 // ── Graph assertion helpers ────────────────────────────────────────────────
 
@@ -73,8 +44,16 @@ async fn count_nodes(graph: &Graph, label: &str, where_clause: &str) -> i64 {
         .unwrap()
 }
 
-async fn count_edges(graph: &Graph, from_label: &str, rel: &str, to_label: &str) -> i64 {
-    let cypher = format!("MATCH (a:{from_label})-[:{rel}]->(b:{to_label}) RETURN count(*) AS c");
+async fn count_edges(
+    graph: &Graph,
+    from_label: &str,
+    rel: &str,
+    to_label: &str,
+    where_clause: &str,
+) -> i64 {
+    let cypher = format!(
+        "MATCH (a:{from_label})-[:{rel}]->(b:{to_label}) WHERE {where_clause} RETURN count(*) AS c"
+    );
     let mut result = graph.execute(neo4rs::Query::new(cypher)).await.unwrap();
     result
         .next()
@@ -85,16 +64,6 @@ async fn count_edges(graph: &Graph, from_label: &str, rel: &str, to_label: &str)
         .unwrap()
 }
 
-/// Wipe the graph between tests. Because the container is shared, tests
-/// would otherwise see each other's data. Call this at the start of any
-/// test that needs a known-clean slate rather than relying on test ordering.
-async fn clear_graph(graph: &Graph) {
-    graph
-        .run(neo4rs::Query::new("MATCH (n) DETACH DELETE n".to_string()))
-        .await
-        .unwrap();
-}
-
 // ── Test node keys ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -103,11 +72,10 @@ struct PodKey {
 }
 
 impl GraphNodeKey for PodKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_uid");
-        (
-            format!("({prefix}:Pod {{ uid: ${k} }})"),
-            vec![(k, BoltType::String(self.uid.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["Pod"],
+            vec![("uid", BoltType::String(self.uid.clone().into()))],
         )
     }
 }
@@ -118,11 +86,10 @@ struct BuildJobKey {
 }
 
 impl GraphNodeKey for BuildJobKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_build_id");
-        (
-            format!("({prefix}:BuildJob {{ build_id: ${k} }})"),
-            vec![(k, BoltType::String(self.build_id.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["BuildJob"],
+            vec![("build_id", BoltType::String(self.build_id.clone().into()))],
         )
     }
 }
@@ -134,14 +101,15 @@ struct BuildJobStateKey {
 }
 
 impl GraphNodeKey for BuildJobStateKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let id_k = format!("{prefix}_build_id");
-        let vf_k = format!("{prefix}_valid_from");
-        (
-            format!("({prefix}:BuildJobState {{ build_id: ${id_k}, valid_from: ${vf_k} }})"),
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["BuildJobState"],
             vec![
-                (id_k, BoltType::String(self.build_id.clone().into())),
-                (vf_k, BoltType::String(self.valid_from.clone().into())),
+                ("build_id", BoltType::String(self.build_id.clone().into())),
+                (
+                    "valid_from",
+                    BoltType::String(self.valid_from.clone().into()),
+                ),
             ],
         )
     }
@@ -153,11 +121,10 @@ struct StateTypeKey {
 }
 
 impl GraphNodeKey for StateTypeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        let k = format!("{prefix}_name");
-        (
-            format!("({prefix}:State {{ name: ${k} }})"),
-            vec![(k, BoltType::String(self.name.clone().into()))],
+    fn identity(&self) -> NodeIdentity {
+        NodeIdentity::fixed(
+            &["State"],
+            vec![("name", BoltType::String(self.name.clone().into()))],
         )
     }
 }
@@ -171,8 +138,134 @@ impl GraphNodeKey for StateTypeKey {
 // of relying on clear_graph.
 
 #[tokio::test]
+async fn validate_cypher_identifier_accepts_normal_identifiers() {
+    assert!(validate_cypher_identifier("JiraCustomField").is_ok());
+    assert!(validate_cypher_identifier("story_points").is_ok());
+    assert!(validate_cypher_identifier("field_1").is_ok());
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_empty() {
+    assert!(matches!(
+        validate_cypher_identifier(""),
+        Err(CypherIdentifierError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_leading_digit() {
+    assert!(matches!(
+        validate_cypher_identifier("1field"),
+        Err(CypherIdentifierError::StartsWithDigit(_))
+    ));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_injection_attempt() {
+    // The exact shape of attack this exists to prevent: a field name
+    // engineered to close the current Cypher clause and inject a
+    // destructive statement.
+    let err = validate_cypher_identifier("}) DETACH DELETE (n) //")
+        .expect_err("must reject Cypher-breaking characters");
+    assert!(matches!(err, CypherIdentifierError::InvalidCharacters(_)));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_reserved_keywords() {
+    assert!(matches!(
+        validate_cypher_identifier("DELETE"),
+        Err(CypherIdentifierError::ReservedKeyword(_))
+    ));
+    assert!(
+        matches!(
+            validate_cypher_identifier("merge"),
+            Err(CypherIdentifierError::ReservedKeyword(_))
+        ),
+        "keyword check must be case-insensitive"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_node_key_construction_rejects_unsafe_label() {
+    assert!(DynamicNodeKey::new("Valid", "key", "some value").is_ok());
+    assert!(DynamicNodeKey::new("}) DROP //", "key", "some value").is_err());
+    assert!(DynamicNodeKey::new("Valid", "}) DROP //", "some value").is_err());
+}
+
+#[tokio::test]
+async fn backend_job_identity_construction_rejects_unsafe_input() {
+    assert!(
+        BackendJobIdentity::new("GitLabRunner", vec![("runner_id".into(), "42".into())]).is_ok()
+    );
+    assert!(
+        BackendJobIdentity::new("}) DROP //", vec![("runner_id".into(), "42".into())]).is_err()
+    );
+    assert!(
+        BackendJobIdentity::new("GitLabRunner", vec![("}) DROP //".into(), "42".into())]).is_err()
+    );
+}
+
+#[tokio::test]
+async fn backend_job_upserts_with_runtime_determined_label() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    let identity = BackendJobIdentity::new(
+        "GitLabRunner",
+        vec![("runner_id".to_string(), "42".to_string())],
+    )
+    .expect("valid identifier");
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildNodeKey::BackendJob(identity).into_key(),
+            props: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "GitLabRunner", "n.runner_id = '42'").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn dynamic_node_key_upserts_with_runtime_determined_label() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    let key = DynamicNodeKey::new("JiraIssue_CustomField", "field_key", "field-value-001")
+        .expect("valid identifier");
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: key.into_key(),
+            props: vec![Property(
+                "label_text".into(),
+                GraphValue::String("some custom field value".into()),
+            )],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(
+            graph,
+            "JiraIssue_CustomField",
+            "n.field_key = 'field-value-001'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn upsert_node_creates_node_with_properties() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     handle_op(
@@ -217,7 +310,8 @@ async fn upsert_node_creates_node_with_properties() {
 
 #[tokio::test]
 async fn upsert_node_is_idempotent() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     for _ in 0..3 {
@@ -246,8 +340,131 @@ async fn upsert_node_is_idempotent() {
 }
 
 #[tokio::test]
+async fn upsert_nodes_creates_multiple_nodes_with_distinct_properties() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::UpsertNodes {
+            items: vec![
+                (
+                    BuildJobKey {
+                        build_id: "batch-001".into(),
+                    }
+                    .into_key(),
+                    vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/repo-a".into()),
+                    )],
+                ),
+                (
+                    BuildJobKey {
+                        build_id: "batch-002".into(),
+                    }
+                    .into_key(),
+                    vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/repo-b".into()),
+                    )],
+                ),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    // Deliberately checking each item ended up with *its own* property
+    // value, not a neighbor's -- this is exactly the failure mode a bug
+    // in the per-item parameter prefixing would produce (one item's
+    // property value silently overwriting another's under the same
+    // unprefixed $repo_url parameter name).
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-001'").await,
+        1
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-002'").await,
+        1
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (n:BuildJob { build_id: 'batch-001' }) RETURN n.repo_url AS url".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>("url").unwrap(),
+        "https://github.com/example/repo-a"
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (n:BuildJob { build_id: 'batch-002' }) RETURN n.repo_url AS url".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>("url").unwrap(),
+        "https://github.com/example/repo-b"
+    );
+}
+
+#[tokio::test]
+async fn upsert_nodes_is_idempotent() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    for _ in 0..3 {
+        handle_op(
+            graph,
+            &GraphOp::UpsertNodes {
+                items: vec![
+                    (
+                        BuildJobKey {
+                            build_id: "batch-idem-1".into(),
+                        }
+                        .into_key(),
+                        vec![Property(
+                            "repo_url".into(),
+                            GraphValue::String("https://github.com".into()),
+                        )],
+                    ),
+                    (
+                        BuildJobKey {
+                            build_id: "batch-idem-2".into(),
+                        }
+                        .into_key(),
+                        vec![Property(
+                            "repo_url".into(),
+                            GraphValue::String("https://gitlab.com".into()),
+                        )],
+                    ),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-idem-1'").await,
+        1,
+        "MERGE should produce exactly one node regardless of call count"
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-idem-2'").await,
+        1,
+        "MERGE should produce exactly one node regardless of call count"
+    );
+}
+
+#[tokio::test]
 async fn ensure_edge_cross_vocabulary() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     handle_op(
@@ -276,12 +493,23 @@ async fn ensure_edge_cross_vocabulary() {
         1
     );
     assert_eq!(count_nodes(graph, "Pod", "n.uid = 'pod-xvocab'").await, 1);
-    assert_eq!(count_edges(graph, "BuildJob", "RUNNING_IN", "Pod").await, 1);
+    assert_eq!(
+        count_edges(
+            graph,
+            "BuildJob",
+            "RUNNING_IN",
+            "Pod",
+            "a.build_id = 'build-xvocab' AND b.uid = 'pod-xvocab'"
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]
 async fn ensure_edge_is_idempotent() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     for _ in 0..3 {
@@ -305,7 +533,14 @@ async fn ensure_edge_is_idempotent() {
     }
 
     assert_eq!(
-        count_edges(graph, "BuildJob", "BUILT_BY", "Pod").await,
+        count_edges(
+            graph,
+            "BuildJob",
+            "BUILT_BY",
+            "Pod",
+            "a.build_id = 'build-eidem' AND b.uid = 'pod-eidem'"
+        )
+        .await,
         1,
         "MERGE on the edge should produce exactly one relationship"
     );
@@ -313,7 +548,8 @@ async fn ensure_edge_is_idempotent() {
 
 #[tokio::test]
 async fn update_state_creates_temporal_chain() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     handle_op(
@@ -353,19 +589,53 @@ async fn update_state_creates_temporal_chain() {
         1
     );
     assert_eq!(
-        count_edges(graph, "BuildJob", "TRANSITIONED_TO", "BuildJobState").await,
+        count_edges(
+            graph,
+            "BuildJob",
+            "TRANSITIONED_TO",
+            "BuildJobState",
+            "a.build_id = 'build-state'"
+        )
+        .await,
         1
     );
     assert_eq!(
-        count_edges(graph, "BuildJob", "HAS_STATE", "State").await,
+        count_edges(
+            graph,
+            "BuildJob",
+            "HAS_STATE",
+            "State",
+            "a.build_id = 'build-state'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count_edges(
+            graph,
+            "BuildJob",
+            "TRANSITIONED_TO",
+            "BuildJobState",
+            "a.build_id = 'build-state'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count_edges(
+            graph,
+            "BuildJob",
+            "HAS_STATE",
+            "State",
+            "a.build_id = 'build-state'"
+        )
+        .await,
         1
     );
 
     let mut result = graph
         .execute(neo4rs::Query::new(
-            "MATCH (:BuildJob { build_id: 'build-state' })-[:TRANSITIONED_TO]->(s:BuildJobState) \
-                 RETURN s.phase AS phase"
-                .to_string(),
+            "MATCH (:BuildJob { build_id: 'build-state' })-[:TRANSITIONED_TO]->(s:BuildJobState) RETURN s.phase AS phase".to_string(),
         ))
         .await
         .unwrap();
@@ -375,7 +645,8 @@ async fn update_state_creates_temporal_chain() {
 
 #[tokio::test]
 async fn update_state_moves_has_state_pointer_on_transition() {
-    let graph = &neo4j().await.graph;
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
     clear_graph(graph).await;
 
     for (phase, valid_from) in [
@@ -412,13 +683,27 @@ async fn update_state_moves_has_state_pointer_on_transition() {
         "both state instances must be preserved"
     );
     assert_eq!(
-        count_edges(graph, "BuildJob", "TRANSITIONED_TO", "BuildJobState").await,
+        count_edges(
+            graph,
+            "BuildJob",
+            "TRANSITIONED_TO",
+            "BuildJobState",
+            "a.build_id = 'build-tstate'"
+        )
+        .await,
         2
     );
 
     // HAS_STATE is replaced, not accumulated
     assert_eq!(
-        count_edges(graph, "BuildJob", "HAS_STATE", "State").await,
+        count_edges(
+            graph,
+            "BuildJob",
+            "HAS_STATE",
+            "State",
+            "a.build_id = 'build-tstate'"
+        )
+        .await,
         1,
         "HAS_STATE must point at exactly one current state"
     );
@@ -426,12 +711,302 @@ async fn update_state_moves_has_state_pointer_on_transition() {
     // HAS_STATE points at the latest state
     let mut result = graph
         .execute(neo4rs::Query::new(
-            "MATCH (:BuildJob { build_id: 'build-tstate' })-[:HAS_STATE]->(s:State) \
-                 RETURN s.name AS name"
-                .to_string(),
+            "MATCH (:BuildJob { build_id: 'build-tstate' })-[:HAS_STATE]->(s:State) RETURN s.name AS name".to_string(),
         ))
         .await
         .unwrap();
     let row = result.next().await.unwrap().unwrap();
     assert_eq!(row.get::<String>("name").unwrap(), "running");
+}
+
+#[tokio::test]
+async fn transaction_runs_mixed_ops_atomically() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::Transaction {
+            ops: vec![
+                GraphOp::UpsertNode {
+                    key: BuildJobKey {
+                        build_id: "txn-parent".into(),
+                    }
+                    .into_key(),
+                    props: vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/parent".into()),
+                    )],
+                },
+                GraphOp::UpsertNode {
+                    key: BuildJobKey {
+                        build_id: "txn-child".into(),
+                    }
+                    .into_key(),
+                    props: vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/child".into()),
+                    )],
+                },
+                GraphOp::EnsureEdge {
+                    from: BuildJobKey {
+                        build_id: "txn-parent".into(),
+                    }
+                    .into_key(),
+                    to: BuildJobKey {
+                        build_id: "txn-child".into(),
+                    }
+                    .into_key(),
+                    rel_type: "TRIGGERED".into(),
+                    props: vec![],
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'txn-parent'").await,
+        1
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'txn-child'").await,
+        1
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (:BuildJob { build_id: 'txn-parent' })-[r:TRIGGERED]->(:BuildJob { build_id: 'txn-child' }) RETURN count(r) AS c".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<i64>("c").unwrap(),
+        1,
+        "all three ops in the transaction should have committed together"
+    );
+}
+
+#[tokio::test]
+async fn ensure_edge_rejects_unsafe_rel_type_before_touching_the_graph() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    let result = handle_op(
+        graph,
+        &GraphOp::EnsureEdge {
+            from: BuildJobKey {
+                build_id: "reject-src".into(),
+            }
+            .into_key(),
+            to: BuildJobKey {
+                build_id: "reject-dst".into(),
+            }
+            .into_key(),
+            // The exact shape of attack this backstop exists to catch:
+            // a caller-supplied relationship type engineered to close
+            // the current Cypher clause and inject a destructive
+            // statement -- this is the same validate_cypher_identifier
+            // used everywhere else, now also protecting EnsureEdge
+            // callers that never validate their own rel_type.
+            rel_type: "X]->() DETACH DELETE (n) //".into(),
+            props: vec![],
+        },
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "an unsafe rel_type must be rejected, not silently reach a query"
+    );
+    // Confirm it was actually rejected pre-write, not partially applied.
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'reject-src'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn upsert_node_rejects_unsafe_property_name_before_touching_the_graph() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    let result = handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "reject-prop".into(),
+            }
+            .into_key(),
+            props: vec![Property(
+                "x`}) DETACH DELETE (n) //".into(),
+                GraphValue::String("whatever".into()),
+            )],
+        },
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "an unsafe property name must be rejected, not silently reach a query"
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'reject-prop'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn raw_merge_write_allows_its_real_documented_scope() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::RawMergeWrite {
+            cypher: "
+                MATCH (a:BuildJob { build_id: $a })
+                MERGE (b:BuildJob { build_id: $b })
+                MERGE (a)-[:DEPENDS_ON]->(b)
+            "
+            .to_string(),
+            params: vec![
+                ("a".to_string(), BoltType::String("raw-a".into())),
+                ("b".to_string(), BoltType::String("raw-b".into())),
+            ],
+        },
+    )
+    .await
+    .unwrap_or(0); // MATCH on a nonexistent "a" is a legitimate no-op, not an error
+
+    // Create "a" first, then confirm the real MATCH+MERGE+edge shape works.
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "raw-a".into(),
+            }
+            .into_key(),
+            props: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    handle_op(
+        graph,
+        &GraphOp::RawMergeWrite {
+            cypher: "
+                MATCH (a:BuildJob { build_id: $a })
+                MERGE (b:BuildJob { build_id: $b })
+                MERGE (a)-[:DEPENDS_ON]->(b)
+            "
+            .to_string(),
+            params: vec![
+                ("a".to_string(), BoltType::String("raw-a".into())),
+                ("b".to_string(), BoltType::String("raw-b".into())),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'raw-b'").await,
+        1
+    );
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (:BuildJob { build_id: 'raw-a' })-[r:DEPENDS_ON]->(:BuildJob { build_id: 'raw-b' }) RETURN count(r) AS c".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>("c").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn raw_merge_write_rejects_disallowed_keywords_before_touching_the_graph() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+
+    // DELETE, DETACH, DROP, REMOVE, CALL are all in the master
+    // vocabulary but none are in RawMergeWrite's own allowlist -- this
+    // is the real thing this whole redesign exists to guarantee: not
+    // just "the specific dangerous words we thought of," but "anything
+    // outside what this variant explicitly declares it needs."
+    for dangerous in [
+        "MATCH (n:BuildJob {build_id: 'raw-reject'}) DETACH DELETE n",
+        "MATCH (n:BuildJob {build_id: 'raw-reject'}) REMOVE n.build_id",
+        "CALL db.labels()",
+        "DROP INDEX ON :BuildJob(build_id)",
+    ] {
+        let result = handle_op(
+            graph,
+            &GraphOp::RawMergeWrite {
+                cypher: dangerous.to_string(),
+                params: vec![],
+            },
+        )
+        .await;
+        assert!(result.is_err(), "expected rejection for: {dangerous}");
+    }
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'raw-reject'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn query_returns_real_rows_from_a_real_actor() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "query-test-001".into(),
+            }
+            .into_key(),
+            props: vec![Property(
+                "repo_url".into(),
+                GraphValue::String("https://example.com/query-test".into()),
+            )],
+        },
+    )
+    .await
+    .unwrap();
+
+    let query = neo4rs::Query::new(
+        "MATCH (n:BuildJob { build_id: 'query-test-001' }) RETURN n.repo_url AS url".to_string(),
+    );
+
+    let rows = handle_query(graph, query).await.unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<String>("url").unwrap(),
+        "https://example.com/query-test"
+    );
+}
+
+#[tokio::test]
+async fn query_returns_empty_vec_for_no_matching_rows() {
+    let graph = neo4j();
+    let _guard = polar_test_graph::enter();
+    clear_graph(graph).await;
+
+    let query = neo4rs::Query::new(
+        "MATCH (n:BuildJob { build_id: 'definitely-does-not-exist' }) RETURN n.repo_url AS url"
+            .to_string(),
+    );
+
+    let rows = handle_query(graph, query).await.unwrap();
+
+    assert!(rows.is_empty());
 }

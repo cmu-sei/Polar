@@ -1,0 +1,59 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    autonumber
+    participant D as Domain actor
+    participant F as Facade + Outbox
+    participant Disk as Outbox file
+    participant T as Transport
+    participant B as Broker
+
+    Note over F,B: Online. 41 and 42 were sent, only 41 acknowledged.
+    T--xB: connection fails
+    T-->>F: ConnectionLost
+    F->>Disk: quiesce: write the unacknowledged entries (42) with their epoch and seq
+    F->>F: state = Offline
+    D->>F: Publish (43)
+    F->>F: append to the outbox
+    F->>Disk: append entry 43
+    F->>T: respawn the transport, with backoff
+    T->>B: connect and register (same registration id)
+    alt the broker still has the session
+        B-->>T: registered
+    else the broker lost the session
+        B-->>T: session mismatch
+        T-->>F: SessionInvalidated
+        T->>B: register fresh
+        B-->>T: registered (new id)
+    end
+    T-->>F: Connected(registration id)
+    F->>T: Subscribe for every remembered topic
+    B->>B: the old connection is fenced: whatever it delivers late is ignored
+    F->>T: retransmit the unacknowledged, in order: 42 then 43, same epoch and seq
+    T->>B: PublishRequest 42, 43
+    B->>B: 42 already accepted? acknowledge it again. 43 is new: accept it
+    B-->>T: PublishRequestAck(42) and PublishRequestAck(43), each for its own message
+    T-->>F: Acked(42), Acked(43)
+    F->>F: outbox empty
+    F->>Disk: remove the file
+    F->>F: state = Online
+    Note over B,T: If the broker restarted it also lost its record of 42, so it accepts 42 again.<br/>Subscribers drop that duplicate by the origin (publisher, epoch, seq) the message carries.

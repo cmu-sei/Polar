@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use std::collections::HashMap;
 
 use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
@@ -53,11 +76,11 @@ fn container_status_index(pod: &Pod) -> HashMap<String, ContainerStatus> {
 /// status. The valid_from source differs by state, and that difference is
 /// the point:
 ///
-///   - Running:    `state.running.started_at` — kubelet-attested. This is
-///                 the timestamp lead-time queries anchor t_final on.
-///   - Terminated: `state.terminated.finished_at` — kubelet-attested.
-///   - Waiting:    no attested transition time exists; observation time is
-///                 the honest fallback and the phase makes that legible.
+/// - Running: `state.running.started_at` — kubelet-attested. This is the timestamp lead-time queries anchor
+///   t_final on.
+/// - Terminated: `state.terminated.finished_at` — kubelet-attested.
+/// - Waiting: no attested transition time exists; observation time is the honest fallback and the phase makes
+///   that legible.
 fn container_lifecycle_state(cs: &ContainerStatus) -> (&'static str, i64, Vec<Property>) {
     if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
         (
@@ -257,7 +280,7 @@ impl GraphOperable for Pod {
         let pod_state_ms = now_ms();
         let new_state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
-            valid_from: pod_state_ms.to_string(),
+            valid_from: pod_state_ms,
             cluster_uid: cluster_uid.to_string(),
         };
 
@@ -624,7 +647,7 @@ impl GraphOperable for Pod {
                 let state_instance_key = KubeNodeKey::PodContainerState {
                     pod_uid: uid.clone(),
                     name: container.name.clone(),
-                    valid_from: valid_from_ms.to_string(),
+                    valid_from: valid_from_ms,
                     cluster_uid: cluster_uid.to_string(),
                 }
                 .into_key();
@@ -772,7 +795,7 @@ impl GraphOperable for Pod {
             },
             KubeNodeKey::PodState {
                 pod_uid: uid.clone(),
-                valid_from: now.to_string(),
+                valid_from: now,
                 cluster_uid: cluster_uid.to_string(),
             },
             now,

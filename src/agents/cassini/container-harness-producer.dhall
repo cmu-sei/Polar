@@ -1,11 +1,46 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
 -- src/agents/cassini/container-harness-producer.dhall
 
 let Lib = ../../containers/container-lib.dhall
+
 let defaults = Lib.defaults
+
+-- A builder agent, run as a Job: its liveness probe is polar-healthcheck, and it reads its certificate as every
+-- agent does.
+let healthcheckLayer =
+  Lib.customLayer "polar-healthcheck-bin"
+    [ Lib.flakePackage "polar-healthcheck" "default"
+    ]
 
 in defaults.minimalContainer //
   { name       = "harness-producer"
   , entrypoint = Some "harness-producer"
   , staticUid  = Some 1000
   , staticGid  = Some 1000
+  , packageLayers = defaults.minimalContainer.packageLayers # [ healthcheckLayer ]
+  , extraEnv   =
+      [ Lib.buildEnv "SSL_CERT_FILE"      "/etc/ssl/certs/ca-bundle.crt"
+      , Lib.buildEnv "SSL_CERT_DIR"       "/etc/ssl/certs"
+      , Lib.buildEnv "POLAR_HEALTH_CERTS" "/etc/tls/certs/cert.pem"
+      ]
   }

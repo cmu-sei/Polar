@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 [package]
 name = "cassini-broker"
 version.workspace = true
@@ -5,9 +26,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+polar-scudo.workspace = true
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
 polar-health = { workspace = true }
+polar-agent-builder.workspace = true
+# The authority topics' types: the broker keeps the credentials agent's authority to decide by.
+credentials_agent_common.workspace = true
+# The CA the credentials agent's authority key is believed under.
+polar-signing.workspace = true
+# A certificate's serial, written as the ledger writes it: the broker refuses and ends a revoked one's sessions.
+cert-issuer-common = { path = "../../cert-issuer/common" }
+polar-custody.workspace = true
+polar-env.workspace = true
 async-trait.workspace = true
 ractor.workspace = true
 tokio.workspace = true
@@ -25,10 +56,30 @@ opentelemetry.workspace = true
 tracing-opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+x509-parser.workspace = true
+
+[features]
+# Hooks for the broker's own tests (`cassini_broker::testing`): a point where a test holds the broker, so that an
+# order the scheduler otherwise decides is the same on every run. Never enabled in a build that ships.
+testing = []
 
 [[bin]]
 name = "cassini-server"
 path = "src/main.rs"
 
 [dev-dependencies]
+# The crate's own tests use its testing hooks.
+cassini-broker = { path = ".", features = ["testing"] }
+# The custody daemon's custodian session, end to end with the broker (docs/architecture/key-custody.md, step 5).
+polar-custody-daemon.workspace = true
+polar-router.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
+cassini-client.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+# A test signs the credentials agent's authority, and gives the broker's policy actor a policy.
+polar-policy.workspace = true
+rand.workspace = true
+rsa.workspace = true

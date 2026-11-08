@@ -1,0 +1,3387 @@
+{
+  "format": 1,
+  "workloads": [
+    {
+      "workload": "cassini",
+      "identity": "cassini.polar.serviceaccount.cluster.local",
+      "issuer": "cert-issuer",
+      "bootstrap": true,
+      "instances": "one",
+      "groups": [],
+      "topics": []
+    },
+    {
+      "workload": "cert-issuer",
+      "identity": "cert-issuer.polar.serviceaccount.cluster.local",
+      "issuer": "cert-issuer",
+      "bootstrap": true,
+      "instances": "one",
+      "groups": [
+        "cassini-client"
+      ],
+      "topics": [
+        {
+          "name": "agent.cert-issuer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.cert-issuer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cert-issuer-held-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent's answers to the requests it holds"
+        },
+        {
+          "name": "cert-issuer-held-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a bootstrap service's request it holds, offered to the credentials agent to vouch for",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/issue"
+            },
+            {
+              "kind": "topic",
+              "name": "cert-issuer-record-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-record-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a page of the record, in answer",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "cert-issuer-record-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-record-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent asking for the record, after the last entry it holds"
+        },
+        {
+          "name": "cert-issuer-successor-tickets",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent's successor ticket, left as its orderly ending begins"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.cert-issuer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.cert-issuer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "credentials-agent",
+      "identity": "credentials-agent.polar.serviceaccount.cluster.local",
+      "issuer": "cert-issuer",
+      "bootstrap": true,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.credentials-agent.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.credentials-agent.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cert-issuer-held-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "this agent's answer to a request cert-issuer holds: vouched for, or refused",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "cert-issuer-held-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-held-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a bootstrap service's request cert-issuer holds, from cert-issuer alone"
+        },
+        {
+          "name": "cert-issuer-record-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a page of cert-issuer's record, from cert-issuer alone"
+        },
+        {
+          "name": "cert-issuer-record-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "asking cert-issuer for its record, after the last entry the ledger holds",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "timer",
+              "name": "record"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-successor-tickets",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "this agent's successor ticket, left for cert-issuer as its orderly ending begins",
+          "unprompted": "as its orderly ending begins: a rejuvenation, or a SIGTERM's drain"
+        },
+        {
+          "name": "credentials-account-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the answer to an account request",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-account-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-account-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "an account request, relayed by the observer"
+        },
+        {
+          "name": "credentials-admin-action-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the answer to an administrator action",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-admin-action-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-admin-action-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a signed administrator action, relayed by the observer"
+        },
+        {
+          "name": "credentials-agent-escrow-issuance-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an issued escrow keypair, or why not",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-agent-escrow-issuance-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-agent-escrow-issuance-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a custodian asking for its workload's escrow keypair to be issued",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
+        },
+        {
+          "name": "credentials-agent-escrow-key-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "another agent's escrow public key",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-agent-escrow-key-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-agent-escrow-key-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a request for another agent's escrow public key"
+        },
+        {
+          "name": "credentials-certificate-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the answer to a certificate lookup",
+          "waits": "nothing in the catalog asks for a certificate lookup yet, so nothing reads the answer",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-certificate-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-certificate-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a certificate lookup",
+          "waits": "nothing in the catalog publishes it yet"
+        },
+        {
+          "name": "credentials-custodian-issuance-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a custodian's workload's certificate, or why not",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-custodian-issuance-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-custodian-issuance-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a custodian asking for one of its workload's certificates",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
+        },
+        {
+          "name": "credentials-decrypt-on-behalf-of-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the answer to a decryption on behalf of an agent",
+          "waits": "nothing in the catalog asks for a decryption on behalf of an agent yet, so nothing reads the answer",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-decrypt-on-behalf-of-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-decrypt-on-behalf-of-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a decryption on behalf of an agent",
+          "waits": "nothing in the catalog publishes it yet"
+        },
+        {
+          "name": "credentials-escrow-key-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "its escrow public key",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-escrow-key-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-escrow-key-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a request for its escrow public key"
+        },
+        {
+          "name": "credentials-identity-normalization-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a normalized identity, or why not",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-identity-normalization-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-identity-normalization-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "an identity to normalize, relayed by the observer"
+        },
+        {
+          "name": "credentials-issuance-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an issued certificate, or why not",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-issuance-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-issuance-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a certificate issuance request, relayed by the observer"
+        },
+        {
+          "name": "credentials-retrieve-agent-escrow-keypair-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an agent's escrow keypair, or the refusal",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-retrieve-agent-escrow-keypair-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-retrieve-agent-escrow-keypair-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a custodian's request for its workload's escrow keypair",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
+        },
+        {
+          "name": "credentials-retrieve-secret-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a secret, encrypted to the requester, or the refusal",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-retrieve-secret-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-retrieve-secret-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a request for a stored secret, decided by policy"
+        },
+        {
+          "name": "credentials-store-secret-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "whether a secret was stored",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-store-secret-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-store-secret-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a secret to store, from its owner"
+        },
+        {
+          "name": "credentials-workload-issuance-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a workload's certificate, or why not",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-workload-issuance-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-workload-issuance-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a workload's certificate request, relayed by the observer"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the signed current policy and permissions, on request, at start and every half hour",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-authority-snapshot-requests"
+            },
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "timer",
+              "name": "republish"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "an agent asking for the current policy and permissions"
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a signed change of policy, groups or revoked serials",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.credentials-agent.configuration"
+            },
+            {
+              "kind": "topic",
+              "name": "credentials-admin-action-requests"
+            },
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.credentials-agent.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.credentials-agent.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.credentials-agent",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.credentials-agent",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "credentials-agent-observer",
+      "identity": "credentials-agent-observer.polar.serviceaccount.cluster.local",
+      "issuer": "cert-issuer",
+      "bootstrap": true,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.credentials-agent-observer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.credentials-agent-observer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "credentials-account-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to an account request it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/account"
+            }
+          ]
+        },
+        {
+          "name": "credentials-account-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an account request from HTTP (/account)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/account"
+            }
+          ]
+        },
+        {
+          "name": "credentials-admin-action-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to an administrator action it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/admin-action"
+            }
+          ]
+        },
+        {
+          "name": "credentials-admin-action-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a signed administrator action from HTTP (/admin-action)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/admin-action"
+            }
+          ]
+        },
+        {
+          "name": "credentials-agent-escrow-key-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to an escrow key lookup it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/agent-escrow-key"
+            }
+          ]
+        },
+        {
+          "name": "credentials-agent-escrow-key-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an agent's escrow public key, asked for over HTTP (/agent-escrow-key)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/agent-escrow-key"
+            }
+          ]
+        },
+        {
+          "name": "credentials-identity-normalization-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to a normalization it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/identity"
+            }
+          ]
+        },
+        {
+          "name": "credentials-identity-normalization-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "an identity to normalize, from HTTP (/identity)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/identity"
+            }
+          ]
+        },
+        {
+          "name": "credentials-issuance-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to an issuance it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/issue"
+            }
+          ]
+        },
+        {
+          "name": "credentials-issuance-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a certificate request from HTTP (POST /issue)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/issue"
+            }
+          ]
+        },
+        {
+          "name": "credentials-workload-issuance-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the answer to a workload's request it relayed",
+          "answers": [
+            {
+              "kind": "http",
+              "name": "/workload/session"
+            },
+            {
+              "kind": "http",
+              "name": "/workload/issue"
+            }
+          ]
+        },
+        {
+          "name": "credentials-workload-issuance-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "polar-init's workload session and issuance (/workload/session, /workload/issue)",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/workload/session"
+            },
+            {
+              "kind": "http",
+              "name": "/workload/issue"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.credentials-agent-observer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.credentials-agent-observer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.credentials-agent-observer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.credentials-agent-observer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "git-repo-controller",
+      "identity": "git-repo-controller.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.git-repo-controller.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.git-repo-controller.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "git.repo.config.events",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the whole set of repositories to observe, for the observer",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-controller.configuration"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-proposal-observe-repo"
+            },
+            {
+              "kind": "timer",
+              "name": "republish"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-controller.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-controller.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-proposal-observe-repo",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a proposal that a repository be observed, with its evidence",
+          "waits": "no catalog agent proposes repositories yet: the gitlab and jira consumers are to (docs/architecture/git-controller.md); discover_repo, a test harness, does"
+        },
+        {
+          "name": "polar.git.proposals.decisions",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "what it decided about each proposal, and why",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-proposal-observe-repo"
+            }
+          ]
+        },
+        {
+          "name": "selftest.git-repo-controller",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.git-repo-controller",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "git-repo-observer",
+      "identity": "git-repo-observer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "encryption",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.git-repo-observer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.git-repo-observer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "credentials-agent-escrow-key-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-agent-escrow-key-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-escrow-key-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-escrow-key-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-retrieve-secret-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-retrieve-secret-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-store-secret-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-store-secret-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "git.repo.config.events",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the set of repositories to observe, from the controller"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-observer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-observer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar.git.observation.status",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "how each attempt to observe a repository went",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "git.repo.config.events"
+            },
+            {
+              "kind": "timer",
+              "name": "observe"
+            }
+          ]
+        },
+        {
+          "name": "polar.git.repositories.events",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the commits and ref updates it finds",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "git.repo.config.events"
+            },
+            {
+              "kind": "timer",
+              "name": "observe"
+            }
+          ]
+        },
+        {
+          "name": "selftest.git-repo-observer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.git-repo-observer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "git-repo-processor",
+      "identity": "git-repo-processor.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.git-repo-processor.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.git-repo-processor.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-processor.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.git-repo-processor.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar.git.observation.status",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's status for each repository, written to the graph"
+        },
+        {
+          "name": "polar.git.proposals.decisions",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the controller's decisions, written to the graph"
+        },
+        {
+          "name": "polar.git.repositories.events",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's commits and ref updates, written to the graph"
+        },
+        {
+          "name": "selftest.git-repo-processor",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.git-repo-processor",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "harness-producer",
+      "identity": "harness-producer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "many",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.harness-producer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.harness-producer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cassini.harness.lane.0",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.1",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.2",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.3",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.4",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.5",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.6",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "cassini.harness.lane.7",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the run's messages, when this producer's index puts it on this lane",
+          "unprompted": "a load test sends the messages its run gives it, from its start"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.harness-producer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.harness-producer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.harness-producer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.harness-producer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "harness-sink",
+      "identity": "harness-sink.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.harness-sink.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.harness-sink.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cassini.harness.lane.0",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.1",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.2",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.3",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.4",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.5",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.6",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "cassini.harness.lane.7",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the run's messages, when this sink's index puts it on this lane"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.harness-sink.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.harness-sink.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.harness-sink",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.harness-sink",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "jira-observer",
+      "identity": "jira-observer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.jira-observer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.jira-observer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "jira:consumer:groups",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the groups it reads from Jira",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "poll"
+            }
+          ]
+        },
+        {
+          "name": "jira:consumer:issues",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the issues it reads from Jira",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "poll"
+            }
+          ]
+        },
+        {
+          "name": "jira:consumer:projects",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the projects it reads from Jira",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "poll"
+            }
+          ]
+        },
+        {
+          "name": "jira:consumer:users",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "the users it reads from Jira",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "poll"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.jira-observer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.jira-observer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.jira-observer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.jira-observer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "jira-processor",
+      "identity": "jira-processor.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.jira-processor.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.jira-processor.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "jira:consumer:groups",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's groups, written to the graph"
+        },
+        {
+          "name": "jira:consumer:issues",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's issues, written to the graph"
+        },
+        {
+          "name": "jira:consumer:projects",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's projects, written to the graph"
+        },
+        {
+          "name": "jira:consumer:users",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's users, written to the graph"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.jira-processor.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.jira-processor.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.jira-processor",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.jira-processor",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "kube-consumer",
+      "identity": "kube-consumer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "encryption",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.kube-consumer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.kube-consumer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "credentials-agent-escrow-key-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-agent-escrow-key-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-escrow-key-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-escrow-key-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-retrieve-secret-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-retrieve-secret-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "credentials-store-secret-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)"
+        },
+        {
+          "name": "credentials-store-secret-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "encryption",
+          "why": "the agent needs encryption (its crypto actor)",
+          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
+        },
+        {
+          "name": "kubernetes.cluster.consumer.Pod",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's resource changes, projected into the graph"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.kube-consumer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.kube-consumer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar.kubernetes.cluster.resolution",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "what the resolver found for a container's image, joined to the container"
+        },
+        {
+          "name": "polar.provenance.discovery",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "each container image it meets, for the resolver to resolve",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "kubernetes.cluster.consumer.Pod"
+            }
+          ]
+        },
+        {
+          "name": "selftest.kube-consumer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.kube-consumer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "kube-observer",
+      "identity": "kube-observer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.kube-observer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.kube-observer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "kubernetes.cluster.consumer.Pod",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "every change it sees to a watched resource, of any kind, as a RawKubeEvent (JSON)",
+          "causes": [
+            {
+              "kind": "outside",
+              "name": "the Kubernetes API"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.kube-observer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.kube-observer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "selftest.kube-observer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.kube-observer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "polar-git-server",
+      "identity": "polar-git-server.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.polar-git-server.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.polar-git-server.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-git-server.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-git-server.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-git-repo-changed",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "each push it accepted (repository, ref, old and new commit, pusher), when it has a broker",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/:repo/git-receive-pack"
+            }
+          ]
+        },
+        {
+          "name": "selftest.polar-git-server",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.polar-git-server",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "polar-scheduler",
+      "identity": "polar-scheduler.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.credentials-agent-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "credentials-agent-observer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.credentials-agent.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "credentials-agent",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-controller.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-controller",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-observer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-processor.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-processor",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.harness-producer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "harness-producer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.harness-sink.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "harness-sink",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.jira-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "jira-observer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.jira-processor.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "jira-processor",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.kube-consumer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "kube-consumer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.kube-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "kube-observer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.oci-registry-resolver.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "oci-registry-resolver",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-git-server.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-git-server",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-scheduler-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-scheduler-observer",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-scheduler.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.polar-scheduler.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-scheduler",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-scheduler.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.secret-harness-intruder.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "secret-harness-intruder",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "agent.secret-harness-owner.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "secret-harness-owner",
+          "purpose": "a signed document for the workload, forwarded untouched for it to verify",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "scheduler.in"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-scheduler.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-scheduler.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "each agent's outcome for a configuration document, recorded in the graph"
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "scheduler.in",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the observer's schedule changes"
+        },
+        {
+          "name": "selftest.polar-scheduler",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.polar-scheduler",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "workload": "polar-scheduler-observer",
+      "identity": "polar-scheduler-observer.polar.serviceaccount.cluster.local",
+      "issuer": "credentials-agent",
+      "bootstrap": false,
+      "instances": "one",
+      "groups": [
+        "cassini-client",
+        "self-test"
+      ],
+      "topics": [
+        {
+          "name": "agent.credentials-agent-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "credentials-agent-observer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.credentials-agent.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "credentials-agent",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-controller.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-controller",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-observer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.git-repo-processor.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "git-repo-processor",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.harness-producer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "harness-producer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.harness-sink.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "harness-sink",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.jira-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "jira-observer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.jira-processor.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "jira-processor",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.kube-consumer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "kube-consumer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.kube-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "kube-observer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.oci-registry-resolver.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "oci-registry-resolver",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-git-server.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-git-server",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-scheduler-observer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.polar-scheduler-observer.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-scheduler-observer",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.polar-scheduler-observer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.polar-scheduler.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "polar-scheduler",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.secret-harness-intruder.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "secret-harness-intruder",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "agent.secret-harness-owner.configuration",
+          "access": "publish",
+          "from": "family",
+          "pattern": "agent.{workload}.configuration",
+          "workload": "secret-harness-owner",
+          "purpose": "the documents held for the workload, replayed when it asks",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-configuration-replay"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-scheduler-observer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.polar-scheduler-observer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "an agent asking for the documents held for it"
+        },
+        {
+          "name": "polar-git-repo-changed",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a push to the schedules repository, which starts a sync"
+        },
+        {
+          "name": "scheduler.in",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "each schedule created, changed or deleted in the checkout",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "polar-git-repo-changed"
+            },
+            {
+              "kind": "timer",
+              "name": "pull"
+            }
+          ]
+        },
+        {
+          "name": "selftest.polar-scheduler-observer",
+          "access": "publish",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "causes": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        },
+        {
+          "name": "selftest.polar-scheduler-observer",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "self_test",
+          "why": "the agent's self-test is on",
+          "answers": [
+            {
+              "kind": "timer",
+              "name": "self-test"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

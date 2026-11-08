@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::{
     BackoffReason, Command, GitlabObserverMessage, graphql_endpoint, handle_backoff,
     handle_graphql_errors, init_observer_state, send_to_broker,
@@ -53,23 +76,20 @@ impl MetaObserver {
                     Ok(deserialized) => {
                         if let Some(errors) = deserialized.errors {
                             handle_graphql_errors(errors, actor_ref.clone());
-                        } else if let Some(query_result) = deserialized.data {
-                            if let Some(metadata) = query_result.metadata {
-                                //package and send
+                        } else if let Some(query_result) = deserialized.data
+                            && let Some(metadata) = query_result.metadata
+                        {
+                            //package and send
 
-                                //TODO: Get base url w/o api
-                                let instance = GitlabInstance {
-                                    base_url: state.gitlab_endpoint.clone(),
-                                    metadata,
-                                };
+                            //TODO: Get base url w/o api
+                            let instance = GitlabInstance {
+                                base_url: state.gitlab_endpoint.clone(),
+                                metadata,
+                            };
 
-                                let data = GitlabData::Instance(instance);
+                            let data = GitlabData::Instance(instance);
 
-                                if let Err(e) = send_to_broker(state, data, METADATA_CONSUMER_TOPIC)
-                                {
-                                    return Err(e);
-                                }
-                            }
+                            send_to_broker(state, data, METADATA_CONSUMER_TOPIC)?;
                         }
                     }
                     Err(e) => actor_ref
@@ -112,22 +132,15 @@ impl MetaObserver {
                     Ok(deserialized) => {
                         if let Some(errors) = deserialized.errors {
                             handle_graphql_errors(errors, actor_ref.clone());
-                            return Ok(());
+                            Ok(())
                         } else if let Some(query_result) = deserialized.data {
                             query_result.license_history_entries.map(|connection| {
                                 //package and send
                                 let mut read_licenses: Vec<LicenseHistoryEntry> = Vec::new();
 
-                                connection.nodes.map(|licenses| {
-                                    read_licenses.extend(licenses.into_iter().filter_map(
-                                        |option| {
-                                            option.map(|license| {
-                                                //extract license information during iteration
-                                                license
-                                            })
-                                        },
-                                    ));
-                                });
+                                if let Some(licenses) = connection.nodes {
+                                    read_licenses.extend(licenses.into_iter().flatten());
+                                }
 
                                 let data = GitlabData::Licenses(read_licenses);
 
@@ -197,12 +210,12 @@ impl Actor for MetaObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GitlabObserverMessage::Tick(command) => match command {
-                Command::GetMetadata => {
+            GitlabObserverMessage::Tick(command) => {
+                if matches!(command, Command::GetMetadata) {
                     MetaObserver::get_metadata(state, myself).await.unwrap();
                 }
-                _ => (), // ignore other messages
-            },
+                // other commands are ignored
+            }
             GitlabObserverMessage::Backoff(reason) => {
                 // cancel old event loop and start a new one with updated state, if observer hasn't stopped
                 if let Some(handle) = &state.task_handle {

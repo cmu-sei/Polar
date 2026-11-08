@@ -1,4 +1,26 @@
 #!/usr/bin/env nu
+
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # infra/layers/1-platform/infra/storage/main.nu
 #
 # Chart entrypoint for storage infrastructure.
@@ -18,6 +40,10 @@
 #   <output_dir>/storage-class.yaml
 #   <output_dir>/local-path-provisioner.yaml
 
+use ../../../../dhall-render.nu [dhall_yaml]
+use ../../../../registry.nu [node_registry, target_cluster]
+use ../../../../cluster-registry.nu [storage_images]
+
 def main [context_nuon: string] {
     let context = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -29,13 +55,16 @@ def main [context_nuon: string] {
     let src = ($chart_dir | path join "storage-class.dhall")
     let out = ($output_dir | path join "storage-class.yaml")
     print $"  rendering storage-class.dhall -> storage-class.yaml"
-    dhall-to-yaml --documents --file $src | save --force $out
+    dhall_yaml $src ["--documents"] | save --force $out
 
     # Copy the local-path-provisioner manifest verbatim
     let provisioner_src = ($chart_dir | path join "local-path-provisioner.yaml")
     let provisioner_out = ($output_dir | path join "local-path-provisioner.yaml")
-    print $"  copying local-path-provisioner.yaml"
-    cp $provisioner_src $provisioner_out
+    # The manifest names its images with the placeholder node-registry.invalid; the registry the nodes use is put in as it is copied.
+    # A target whose registry is in the cluster takes them from upstream instead: the registry's own volume comes from this provisioner.
+    let in_cluster = ((target_cluster ($context.target_dir | path basename)).registry_in_cluster? | default null) != null
+    print $"  copying local-path-provisioner.yaml, images from (if $in_cluster { 'upstream, by digest' } else { 'the node registry' })"
+    storage_images (open --raw $provisioner_src) (node_registry) $in_cluster | save --force $provisioner_out
 
     print $"  storage: done"
 }

@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Projects real events against a real Neo4j (the deployed 5.26.2) through the
 //! same path the agent uses: `project()` → `compile_graph_op` → execute.
 //!
@@ -18,7 +41,9 @@ use testcontainers_modules::neo4j::Neo4j;
 /// Project and execute one event, stamped `observed_at`.
 async fn apply(graph: &Graph, event: ProvenanceEvent, observed_at: &str) {
     for op in project(event, observed_at).unwrap() {
-        graph.run(compile_graph_op(&op)).await.unwrap();
+        for query in compile_graph_op(&op).unwrap() {
+            graph.run(query).await.unwrap();
+        }
     }
 }
 

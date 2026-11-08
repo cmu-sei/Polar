@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 /// Tests for BuildState transition logic and BuildRecord mutation semantics.
 ///
 /// These are pure unit tests with no I/O, no actors, no backends.
@@ -214,7 +237,6 @@ mod build_state_transitions {
 /// Tests for OrchestratorConfig::pipeline_image_for lookup semantics.
 #[cfg(test)]
 mod config_image_lookup {
-    use orchestrator_backend_podman::backend::PodmanConfig;
 
     use crate::client::StorageConfig;
     use crate::config::{BackendConfig, OrchestratorConfig, RepoMapping};
@@ -222,22 +244,22 @@ mod config_image_lookup {
     fn config_with_mappings(mappings: Vec<RepoMapping>) -> OrchestratorConfig {
         OrchestratorConfig {
             backend: BackendConfig {
-                driver: "podman".to_string(),
+                driver: "kubernetes".to_string(),
                 command: vec!["ls".to_string()],
                 job_env: Default::default(),
                 kubernetes: None,
-                podman: PodmanConfig::rootless_default().into(),
             },
 
             repo_mappings: mappings,
 
             storage: StorageConfig {
                 endpoint_url: "http://localhost:9000".to_string(),
-                bucket: "cyclops-artifacts".to_string(),
+                bucket: "build-artifacts".to_string(),
                 region: "us-east-1".to_string(),
                 access_key: "abcdefghijklmnop".to_string(),
                 secret_key: "abcdefghijklmnop".to_string(),
             },
+            max_concurrent_builds: 1,
         }
     }
 
@@ -246,6 +268,7 @@ mod config_image_lookup {
         let config = config_with_mappings(vec![RepoMapping {
             repo_url: "https://gitlab.example.com/polar/myapp".to_string(),
             pipeline_image: Some("registry.example.com/builds/myapp@sha256:deadbeef".to_string()),
+            ..Default::default()
         }]);
 
         assert_eq!(
@@ -269,10 +292,60 @@ mod config_image_lookup {
         let config = config_with_mappings(vec![RepoMapping {
             repo_url: "https://gitlab.example.com/polar/myapp".to_string(),
             pipeline_image: None,
+            ..Default::default()
         }]);
 
         assert_eq!(
             config.pipeline_image_for("https://gitlab.example.com/polar/myapp"),
+            None
+        );
+    }
+
+    fn request(
+        source: orchestrator_core::types::SourceRef,
+        image: Option<&str>,
+    ) -> orchestrator_core::types::BuildRequest {
+        orchestrator_core::types::BuildRequest {
+            build_id: uuid::Uuid::nil(),
+            source,
+            pipeline_image: image.map(Into::into),
+            requested_by: "test".into(),
+            requested_at: chrono::Utc::now(),
+            target_registry: String::new(),
+            metadata: Default::default(),
+            command: vec![],
+        }
+    }
+
+    #[test]
+    fn a_git_build_runs_its_mappings_image_and_never_the_requests() {
+        use crate::actors::build_job::resolve_pipeline_image;
+        use orchestrator_core::types::SourceRef;
+
+        let url = "https://gitlab.example.com/polar/myapp";
+        let mapped = format!("reg/mapped@sha256:{}", "a".repeat(64));
+        let asked = format!("reg/asked@sha256:{}", "b".repeat(64));
+        let git = || SourceRef::Git {
+            url: url.to_string(),
+            commit_sha: "c".repeat(40),
+        };
+        let config = config_with_mappings(vec![RepoMapping {
+            repo_url: url.to_string(),
+            pipeline_image: Some(mapped.clone()),
+            ..Default::default()
+        }]);
+
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), Some(&asked)), &config),
+            Some(mapped.clone())
+        );
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), None), &config),
+            Some(mapped)
+        );
+        // No mapping: nothing to run, whatever the request names.
+        assert_eq!(
+            resolve_pipeline_image(&request(git(), Some(&asked)), &config_with_mappings(vec![])),
             None
         );
     }
@@ -282,6 +355,7 @@ mod config_image_lookup {
         let config = config_with_mappings(vec![RepoMapping {
             repo_url: "https://gitlab.example.com/polar/myapp".to_string(),
             pipeline_image: Some("registry.example.com/builds/myapp@sha256:abc".to_string()),
+            ..Default::default()
         }]);
 
         // A prefix of the registered URL should not match.

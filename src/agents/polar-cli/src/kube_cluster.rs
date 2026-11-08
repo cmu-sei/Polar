@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! The real cluster: kube-rs against the named kubeconfig context, and no other.
 
 use crate::cluster::{Applied, Cluster, Deleted};
@@ -37,15 +60,28 @@ impl KubeCluster {
     pub async fn connect(context: &str) -> Result<KubeCluster> {
         let kubeconfig = Kubeconfig::read().context("cannot read the kubeconfig")?;
         if !kubeconfig.contexts.iter().any(|c| c.name == context) {
-            let have: Vec<_> = kubeconfig.contexts.iter().map(|c| c.name.as_str()).collect();
-            bail!("no kube context named '{context}' (the kubeconfig has: {})", have.join(", "));
+            let have: Vec<_> = kubeconfig
+                .contexts
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            bail!(
+                "no kube context named '{context}' (the kubeconfig has: {})",
+                have.join(", ")
+            );
         }
-        let options = KubeConfigOptions { context: Some(context.to_string()), ..KubeConfigOptions::default() };
+        let options = KubeConfigOptions {
+            context: Some(context.to_string()),
+            ..KubeConfigOptions::default()
+        };
         let config = Config::from_custom_kubeconfig(kubeconfig, &options)
             .await
             .with_context(|| format!("cannot use the kube context '{context}'"))?;
         let client = Client::try_from(config)?;
-        Ok(KubeCluster { client, kinds: Mutex::new(HashMap::new()) })
+        Ok(KubeCluster {
+            client,
+            kinds: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn client(&self) -> &Client {
@@ -53,28 +89,43 @@ impl KubeCluster {
     }
 
     /// The API for a kind, or `None` if the cluster does not serve it (yet).
-    async fn resolve(&self, api_version: &str, kind: &str) -> Result<Option<(ApiResource, ApiCapabilities)>> {
+    async fn resolve(
+        &self,
+        api_version: &str,
+        kind: &str,
+    ) -> Result<Option<(ApiResource, ApiCapabilities)>> {
         let key = (api_version.to_string(), kind.to_string());
         if let Some(found) = self.kinds.lock().unwrap().get(&key) {
             return Ok(Some(found.clone()));
         }
         let (group, version) = split(api_version);
-        match discovery::pinned_kind(&self.client, &GroupVersionKind::gvk(group, version, kind)).await {
+        match discovery::pinned_kind(&self.client, &GroupVersionKind::gvk(group, version, kind))
+            .await
+        {
             Ok(found) => {
                 self.kinds.lock().unwrap().insert(key, found.clone());
                 Ok(Some(found))
             }
             Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
             Err(kube::Error::Discovery(_)) => Ok(None),
-            Err(e) => Err(anyhow!(e).context(format!("cannot look up {kind} ({api_version}) on the cluster"))),
+            Err(e) => Err(anyhow!(e).context(format!(
+                "cannot look up {kind} ({api_version}) on the cluster"
+            ))),
         }
     }
 
-    fn api(&self, resource: &ApiResource, capabilities: &ApiCapabilities, namespace: Option<&str>) -> Result<Api<DynamicObject>> {
+    fn api(
+        &self,
+        resource: &ApiResource,
+        capabilities: &ApiCapabilities,
+        namespace: Option<&str>,
+    ) -> Result<Api<DynamicObject>> {
         Ok(match capabilities.scope {
             Scope::Cluster => Api::all_with(self.client.clone(), resource),
             Scope::Namespaced => {
-                let namespace = namespace.ok_or_else(|| anyhow!("{} is namespaced but names no namespace", resource.kind))?;
+                let namespace = namespace.ok_or_else(|| {
+                    anyhow!("{} is namespaced but names no namespace", resource.kind)
+                })?;
                 Api::namespaced_with(self.client.clone(), namespace, resource)
             }
         })
@@ -90,7 +141,11 @@ fn patch_params(dry_run: bool) -> PatchParams {
 impl Cluster for KubeCluster {
     async fn install_crd(&self, dry_run: bool) -> Result<()> {
         let crd = PolarAgent::crd();
-        let name = crd.metadata.name.clone().ok_or_else(|| anyhow!("the CRD has no name"))?;
+        let name = crd
+            .metadata
+            .name
+            .clone()
+            .ok_or_else(|| anyhow!("the CRD has no name"))?;
         let crds: Api<CustomResourceDefinition> = Api::all(self.client.clone());
         crds.patch(&name, &patch_params(dry_run), &Patch::Apply(&crd))
             .await
@@ -100,7 +155,11 @@ impl Cluster for KubeCluster {
         }
         // Applying it is not serving it: wait until the cluster does.
         for _ in 0..60 {
-            if self.resolve("polar.sei.cmu.edu/v1alpha1", "PolarAgent").await?.is_some() {
+            if self
+                .resolve("polar.sei.cmu.edu/v1alpha1", "PolarAgent")
+                .await?
+                .is_some()
+            {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -109,12 +168,18 @@ impl Cluster for KubeCluster {
     }
 
     async fn apply(&self, object: &Object, dry_run: bool) -> Result<Applied> {
-        let id = object.id().ok_or_else(|| anyhow!("an object with no identity"))?;
+        let id = object
+            .id()
+            .ok_or_else(|| anyhow!("an object with no identity"))?;
         let Some((resource, capabilities)) = self.resolve(&id.api_version, &id.kind).await? else {
             if dry_run {
                 return Ok(Applied::UnknownKind);
             }
-            bail!("the cluster does not know the kind {} ({}); is its CRD installed by an earlier stage?", id.kind, id.api_version);
+            bail!(
+                "the cluster does not know the kind {} ({}); is its CRD installed by an earlier stage?",
+                id.kind,
+                id.api_version
+            );
         };
         let api = self.api(&resource, &capabilities, id.namespace.as_deref())?;
         api.patch(&id.name, &patch_params(dry_run), &Patch::Apply(&object.0))
@@ -141,12 +206,16 @@ impl Cluster for KubeCluster {
         };
         let api = self.api(&resource, &capabilities, id.namespace.as_deref())?;
         match api.get_opt(&id.name).await {
-            Ok(found) => Ok(found.map(|o| serde_json::to_value(o)).transpose()?),
+            Ok(found) => Ok(found.map(serde_json::to_value).transpose()?),
             Err(e) => Err(anyhow!(e).context(format!("cannot read {id}"))),
         }
     }
 
-    async fn secret(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
+    async fn secret(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<BTreeMap<String, String>>> {
         let secrets: Api<KubeSecret> = Api::namespaced(self.client.clone(), namespace);
         match secrets.get_opt(name).await {
             Ok(None) => Ok(None),
@@ -155,7 +224,9 @@ impl Cluster for KubeCluster {
                     .data
                     .unwrap_or_default()
                     .into_iter()
-                    .filter_map(|(key, ByteString(bytes))| String::from_utf8(bytes).ok().map(|text| (key, text)))
+                    .filter_map(|(key, ByteString(bytes))| {
+                        String::from_utf8(bytes).ok().map(|text| (key, text))
+                    })
                     .collect(),
             )),
             // A namespace that is not there yet holds no secrets.
@@ -175,15 +246,25 @@ impl Cluster for KubeCluster {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
-                labels: Some(BTreeMap::from([("app.kubernetes.io/managed-by".to_string(), MANAGER.to_string())])),
+                labels: Some(BTreeMap::from([(
+                    "app.kubernetes.io/managed-by".to_string(),
+                    MANAGER.to_string(),
+                )])),
                 ..ObjectMeta::default()
             },
-            string_data: Some(data.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).collect()),
+            string_data: Some(
+                data.iter()
+                    .map(|(k, v)| (k.clone(), v.expose().to_string()))
+                    .collect(),
+            ),
             type_: Some("Opaque".to_string()),
             ..KubeSecret::default()
         };
         let secrets: Api<KubeSecret> = Api::namespaced(self.client.clone(), namespace);
-        let params = PostParams { dry_run, ..PostParams::default() };
+        let params = PostParams {
+            dry_run,
+            ..PostParams::default()
+        };
         secrets
             .create(&params, &secret)
             .await
@@ -200,7 +281,11 @@ impl Cluster for KubeCluster {
         }
     }
 
-    async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
+    async fn config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<BTreeMap<String, String>>> {
         let config_maps: Api<KubeConfigMap> = Api::namespaced(self.client.clone(), namespace);
         match config_maps.get_opt(name).await {
             Ok(found) => Ok(found.map(|c| c.data.unwrap_or_default())),
@@ -221,7 +306,10 @@ impl Cluster for KubeCluster {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
-                labels: Some(BTreeMap::from([("app.kubernetes.io/managed-by".to_string(), MANAGER.to_string())])),
+                labels: Some(BTreeMap::from([(
+                    "app.kubernetes.io/managed-by".to_string(),
+                    MANAGER.to_string(),
+                )])),
                 ..ObjectMeta::default()
             },
             data: Some(data.clone()),
@@ -240,7 +328,9 @@ impl Cluster for KubeCluster {
         match config_maps.delete(name, &DeleteParams::default()).await {
             Ok(_) => Ok(Deleted::Removed),
             Err(kube::Error::Api(e)) if e.code == 404 => Ok(Deleted::Absent),
-            Err(e) => Err(anyhow!(e).context(format!("cannot delete configmap {namespace}/{name}"))),
+            Err(e) => {
+                Err(anyhow!(e).context(format!("cannot delete configmap {namespace}/{name}")))
+            }
         }
     }
 }

@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # src/agents/git/package.nix
 { pkgs
 , craneLib
@@ -12,20 +33,21 @@
 let
   observer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-observer";
-    cargoExtraArgs = "--bin git-repo-observer --locked";
+    # The harness proposes a repository to the controller, to try the admission rules from inside the cluster.
+    cargoExtraArgs = "--bin git-repo-observer --bin git-discovery-harness --locked";
     src = workspaceFileset ./git/observe;
   });
 
   consumer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-processor";
     cargoExtraArgs = "--bin git-repo-processor --locked";
-    src = workspaceFileset ./git/consume;
+    src = workspaceFileset ./git/process;
   });
 
-  scheduler = craneLib.buildPackage (crateArgs // {
-    pname = "scheduler";
-    cargoExtraArgs = "--bin scheduler --locked";
-    src = workspaceFileset ./git/scheduler;
+  controller = craneLib.buildPackage (crateArgs // {
+    pname = "git-repo-controller";
+    cargoExtraArgs = "--bin git-repo-controller --locked";
+    src = workspaceFileset ./git/controller;
   });
 
   healthcheckInputs = inputs // {
@@ -48,16 +70,16 @@ let
     extraDerivations = [ consumer ];
   };
 
-  schedulerContainer = nix-container-lib.lib.${system}.mkContainer {
+  controllerContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs;
     inputs = healthcheckInputs;
-    configNixPath    = ./container-scheduler.nix;
-    extraDerivations = [ scheduler ];
+    configNixPath    = ./container-controller.nix;
+    extraDerivations = [ controller ];
   };
 in
 {
-  inherit observer consumer scheduler;
+  inherit observer consumer controller;
   observerImage  = observerContainer.image;
   processorImage = consumerContainer.image;
-  schedulerImage = schedulerContainer.image;
+  controllerImage = controllerContainer.image;
 }

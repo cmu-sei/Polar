@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # ---------------------------------------------------------------------------
 # OCI image utilities
 # Reusable functions for building, scanning, and uploading OCI images.
@@ -33,24 +54,27 @@ use ./events.nu [emit-container-image-created emit-artifact-produced]
 #   .#polarPkgs.cassini.cassiniImage
 #
 # `link_name` is the result symlink name, e.g. "cassini"
-export def nix-build-image [flake_ref: string, link_name: string]: nothing -> record {
+export def nix-build-image [
+    flake_ref: string
+    link_name: string
+]: nothing -> record {
     log-info $"Building ($link_name) from ($flake_ref)" --component oci
 
-    let result = nix build --quiet $flake_ref -o $link_name | complete
+    let result = (nix build --quiet $flake_ref -o $link_name | complete)
 
     if $result.exit_code != 0 {
-        let msg = $result.stderr? | default $result.stdout | str trim
+        let msg = ($result.stderr? | default $result.stdout | str trim)
         log-warn $"nix build failed for ($link_name): ($msg)" --component oci
         return {
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: ""
-            oci_metadata: {success: false}
+            tarball: "",
+            oci_metadata: { success: false}
         }
     }
 
-    let tarball = readlink -f $link_name | str trim
+    let tarball = (readlink -f $link_name | str trim)
 
     if ($tarball | path exists) != true {
         log-warn $"nix build produced no output for ($link_name)" --component oci
@@ -58,8 +82,8 @@ export def nix-build-image [flake_ref: string, link_name: string]: nothing -> re
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: ""
-            oci_metadata: {success: false}
+            tarball: "",
+            oci_metadata: { success: false}
         }
     }
 
@@ -99,7 +123,7 @@ export def registry-login [credentials: list<record>]: nothing -> nothing {
         }
         $args = ($args | append $cred.registry)
 
-        let result = skopeo ...$args | complete
+        let result = (skopeo ...$args | complete)
         if $result.exit_code != 0 {
             error make {msg: $"Failed to log into ($cred.registry): ($result.stderr? | default $result.stdout | str trim)"}
         }
@@ -125,18 +149,18 @@ export def upload-image [
     --insecure
 ]: nothing -> record {
     let label = if ($name | is-not-empty) { $name } else { $remote_ref }
-    let real_path = readlink -f $tarball_path | str trim
+    let real_path = (readlink -f $tarball_path | str trim)
     log-info $"Uploading ($label) -> ($remote_ref)" --component oci
 
     mut copy_args = [copy $"docker-archive:($real_path)" $remote_ref]
     if $insecure {
         log-warn "Uploading images to insecure registry!" --component oci
-        $copy_args = ($copy_args | append "--dest-tls-verify=false")
+        $copy_args = ($copy_args | append "--tls-verify=false")
     }
 
-    let copy_result = skopeo ...$copy_args | complete
+    let copy_result = (skopeo ...$copy_args | complete)
     if $copy_result.exit_code != 0 {
-        let msg = $copy_result.stderr? | default $copy_result.stdout | str trim
+        let msg = ($copy_result.stderr? | default $copy_result.stdout | str trim)
         log-error $"skopeo copy failed for ($label): ($msg)" --component oci
         error make {msg: $"Upload failed for ($label): ($msg)"}
     }
@@ -144,7 +168,7 @@ export def upload-image [
     mut inspect_args = [inspect $remote_ref]
     if $insecure { $inspect_args = ($inspect_args | append "--tls-verify=false") }
 
-    let inspect_result = skopeo ...$inspect_args | complete
+    let inspect_result = (skopeo ...$inspect_args | complete)
     let digest = if $inspect_result.exit_code == 0 {
         $inspect_result.stdout | from json | get -o Digest | default ""
     } else {
@@ -163,8 +187,12 @@ export def upload-image [
 # registry (cosign's default behavior).
 #
 # Returns a record with the signature status.
-export def sign-image [remote_ref: string, --key: string = "", --name: string = ""]: nothing -> record {
-    let label = if ($name | is-not-empty) { $name } else { $remote_ref }
+export def sign-image [
+    remote_ref: string
+    --key: string = ""
+    --name: string = ""
+]: nothing -> record {
+    let label       = if ($name | is-not-empty) { $name } else { $remote_ref }
     let signing_key = if ($key | is-not-empty) { $key } else { ($env.COSIGN_KEY? | default "") }
 
     if ($signing_key | is-empty) {
@@ -174,10 +202,10 @@ export def sign-image [remote_ref: string, --key: string = "", --name: string = 
 
     log-info $"Signing ($label)" --component oci
 
-    let result = cosign sign --key $signing_key --yes $remote_ref | complete
+    let result = (cosign sign --key $signing_key --yes $remote_ref | complete)
 
     if $result.exit_code != 0 {
-        let msg = $result.stderr? | default $result.stdout | str trim
+        let msg = ($result.stderr? | default $result.stdout | str trim)
         log-warn $"cosign sign failed for ($label): ($msg)" --component oci
         return {success: false, reason: $msg}
     }
@@ -214,7 +242,7 @@ export def sign-image [remote_ref: string, --key: string = "", --name: string = 
 # The `diff_id_to_order` map joins syft's layer attributions (keyed on
 # uncompressed diff_id) with the ordered layer stack.
 export def extract-oci-metadata [tarball_path: path]: nothing -> record {
-    let real_path = readlink -f $tarball_path | str trim
+    let real_path = (readlink -f $tarball_path | str trim)
     log-debug $"Extracting OCI metadata from ($real_path)" --component oci
 
     let manifest_json = try {
@@ -224,13 +252,13 @@ export def extract-oci-metadata [tarball_path: path]: nothing -> record {
         return {success: false}
     }
 
-    let manifest_entry = $manifest_json | first | default null
+    let manifest_entry = ($manifest_json | first | default null)
     if $manifest_entry == null {
         log-warn $"Empty manifest.json in ($tarball_path)" --component oci
         return {success: false}
     }
 
-    let config_filename = $manifest_entry.Config? | default ""
+    let config_filename = ($manifest_entry.Config? | default "")
     if ($config_filename | is-empty) {
         log-warn $"No Config entry in manifest.json for ($tarball_path)" --component oci
         return {success: false}
@@ -247,8 +275,8 @@ export def extract-oci-metadata [tarball_path: path]: nothing -> record {
         tar -xf $real_path -O $config_filename | hash sha256 | $"sha256:($in)"
     } catch { "" }
 
-    let diff_ids = $config.rootfs?.diff_ids? | default []
-    let layer_paths = $manifest_entry.Layers? | default []
+    let diff_ids    = ($config.rootfs?.diff_ids? | default [])
+    let layer_paths = ($manifest_entry.Layers? | default [])
 
     let layers = ($diff_ids | enumerate | each {|entry| {
         order:    $entry.index
@@ -262,15 +290,15 @@ export def extract-oci-metadata [tarball_path: path]: nothing -> record {
     }
 
     {
-        success: true
-        config_digest: $config_digest
-        layers: $layers
+        success:          true
+        config_digest:    $config_digest
+        layers:           $layers
         diff_id_to_order: $diff_id_to_order
-        repo_tags: ($manifest_entry.RepoTags? | default [])
-        os: ($config.os? | default linux)
-        arch: ($config.architecture? | default "")
-        created: ($config.created? | default "")
-        entrypoint: ($config.config?.Entrypoint? | default [] | str join " ")
-        cmd: ($config.config?.Cmd? | default [] | str join " ")
+        repo_tags:        ($manifest_entry.RepoTags? | default [])
+        os:               ($config.os? | default linux)
+        arch:             ($config.architecture? | default "")
+        created:          ($config.created? | default "")
+        entrypoint:       ($config.config?.Entrypoint? | default [] | str join " ")
+        cmd:              ($config.config?.Cmd? | default [] | str join " ")
     }
 }

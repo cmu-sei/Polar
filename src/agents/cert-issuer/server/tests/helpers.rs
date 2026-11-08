@@ -1,3 +1,27 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+#![allow(dead_code)] // shared by several test binaries, each of which uses some of it
 //! Test infrastructure: keypair generation, JWT minting, JWKS
 //! encoding, and a counting fake `JwksSource`.
 //!
@@ -25,7 +49,7 @@ pub const SECONDARY_KID: &str = "test-key-2";
 pub fn ensure_crypto_provider() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        if let Err(_e) = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default() {
+        if let Err(_e) = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default() {
             println!("Crypto provider already configured")
         }
     });
@@ -36,7 +60,7 @@ pub fn ensure_crypto_provider() {
 pub fn primary_keypair() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         // 2048 bits is the minimum sane RSA size today and is
         // fast enough for test setup.
         RsaPrivateKey::new(&mut rng, 2048).expect("rsa keypair generation")
@@ -47,7 +71,7 @@ pub fn primary_keypair() -> &'static RsaPrivateKey {
 pub fn secondary_keypair() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         RsaPrivateKey::new(&mut rng, 2048).expect("rsa keypair generation")
     })
 }
@@ -57,8 +81,8 @@ pub fn secondary_keypair() -> &'static RsaPrivateKey {
 /// what we sign with in tests.
 pub fn jwk_for(kid: &str, key: &RsaPrivateKey) -> serde_json::Value {
     let public: RsaPublicKey = key.to_public_key();
-    let n = public.n().to_bytes_be();
-    let e = public.e().to_bytes_be();
+    let n = public.n().to_be_bytes_trimmed_vartime();
+    let e = public.e().to_be_bytes_trimmed_vartime();
     serde_json::json!({
         "kty": "RSA",
         "kid": kid,

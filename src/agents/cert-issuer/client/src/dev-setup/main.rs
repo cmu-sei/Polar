@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! One-shot dev environment setup for local testing without Kubernetes.
 //!
 //! Run once before starting the cert issuer and Cassini:
@@ -11,7 +34,7 @@
 //!   4. Mints three tokens:
 //!      - dev/token-cassini  — Cassini broker (server cert, serverAuth + clientAuth EKU)
 //!      - dev/token-neo4j    — Neo4j database (server cert, serverAuth + clientAuth EKU)
-//!                             issued with extra SANs for the in-cluster Service DNS names)
+//!        issued with extra SANs for the in-cluster Service DNS names)
 //!      - dev/token-agent    — generic agent stand-in (client cert, clientAuth EKU only)
 //!   5. Writes dev/config.json
 //!   6. Prints exact commands and env vars to run the full local stack
@@ -87,7 +110,7 @@ fn main() {
     // ---- Step 2: OIDC signing keypair -------------------------------------
 
     println!("--- Step 2: generating OIDC issuer signing keypair ---");
-    let mut rng = rsa::rand_core::OsRng;
+    let mut rng = rand::rng();
     let oidc_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA keypair generation");
     let oidc_public_key = oidc_private_key.to_public_key();
 
@@ -95,8 +118,8 @@ fn main() {
 
     println!("--- Step 3: writing JWKS ---");
     let kid = "dev-key-1";
-    let n = URL_SAFE_NO_PAD.encode(oidc_public_key.n().to_bytes_be());
-    let e = URL_SAFE_NO_PAD.encode(oidc_public_key.e().to_bytes_be());
+    let n = URL_SAFE_NO_PAD.encode(oidc_public_key.n().to_be_bytes_trimmed_vartime());
+    let e = URL_SAFE_NO_PAD.encode(oidc_public_key.e().to_be_bytes_trimmed_vartime());
     let jwks = serde_json::json!({
         "keys": [{
             "kty": "RSA",
@@ -136,9 +159,7 @@ fn main() {
         "ca": {
             "ca_cert_path": "./dev/tmp/ca.crt",
             "ca_key_path": "./dev/tmp/ca.key",
-            "default_lifetime": { "secs": 7200, "nanos": 0 },
-            "server_lifetime": { "secs": 7200, "nanos": 0 },
-            "identity_lifetime_overrides": {}
+            "default_lifetime": { "secs": 7200, "nanos": 0 }
         },
         "issuer": {
             "issuer": ISSUER,
@@ -316,3 +337,7 @@ fn mint_token(kid: &str, key: &rsa::RsaPrivateKey, subject: &str) -> String {
 
     encode(&header, &claims, &encoding_key).expect("encode JWT")
 }
+
+// Every Polar binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
+#[global_allocator]
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;

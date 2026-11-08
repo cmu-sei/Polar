@@ -1,0 +1,67 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+[package]
+name = "polar-agent-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# The broker reads a floor from the certificate the TLS handshake gives as DER; the extractors read PEM.
+base64.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+credentials_agent_common.workspace = true
+cert-issuer-common = { path = "../cert-issuer/common" }
+polar.workspace = true
+polar-crypto.workspace = true
+polar-env = { workspace = true, features = ["document"] }
+serde.workspace = true
+polar-health = { path = "../polar-health" }
+polar-router.workspace = true
+polar-permissions.workspace = true
+polar-policy.workspace = true
+polar-scheduler-common.workspace = true
+# The state agent's questions and answers, which the state actor asks and hears (state.rs).
+soft-state-common.workspace = true
+polar-signing.workspace = true
+# What `--version` prints and the scaffold carries as `agent.version`.
+polar-version.workspace = true
+rand.workspace = true
+rsa.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+polar-signing = { workspace = true, features = ["testing"] }
+polar-health = { path = "../polar-health", features = ["virtual-time"] }
+proptest.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

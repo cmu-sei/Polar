@@ -1,17 +1,35 @@
-use git_repo_observer::{SERVICE_NAME, supervisor::RootSupervisor};
-use ractor::Actor;
+/*
+   ACE Tool
 
-#[tokio::main]
-async fn main() {
-    polar::init_logging(SERVICE_NAME.to_string());
+   Copyright 2026 Carnegie Mellon University.
 
-    //introspect invironment to generate args
-    let (_agent, handle) = Actor::spawn(
-        Some(format!("{SERVICE_NAME}.supervisor")),
-        RootSupervisor,
-        (),
-    )
-    .await
-    .expect("Expected agent to start");
-    handle.await.unwrap();
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+use git_repo_observer::agent::GitObserver;
+use std::process::ExitCode;
+
+// The one `main` every agent has: it answers `--help`, `--scaffold` and `--check`, judges the
+// configuration, and starts the observer. An agent that ends has failed, so it exits 1.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<GitObserver>()
 }
+
+// Every Polar binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
+#[global_allocator]
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;

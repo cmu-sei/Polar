@@ -1,0 +1,524 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! How an agent ends: the decisions, without the actors.
+//!
+//! The InfrastructureSupervisor owns the shutdown pipeline, and every reason to end
+//! an agent goes through one entry point: a health verdict, the unexpected death of
+//! a child, a signal from Kubernetes. This module holds the rules those share, as
+//! plain values and functions, so each can be tested without starting an actor:
+//!
+//! - [`ShutdownMachine`]: where the agent is in its shutdown, and what a second
+//!   trigger does (nothing).
+//! - [`on_child_death`]: what to do about each kind of child dying in each phase.
+//! - [`budget`]: how long the domain supervisor has to drain before the process
+//!   exits regardless.
+//! - [`spawn_signal_listener`]: SIGTERM and SIGINT become a shutdown request.
+
+use crate::environment;
+use crate::infrastructure::InfrastructureSupervisorMessage;
+use polar_env::Env;
+use ractor::ActorRef;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// The deployment's shutdown budget in whole seconds. The catalog derives it, and
+/// derives `terminationGracePeriodSeconds` from the same value.
+pub const SHUTDOWN_BUDGET_ENV: &str = environment::SHUTDOWN_BUDGET_SECS.name();
+
+/// How long the domain supervisor gets to drain when nothing says otherwise.
+pub const DEFAULT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+
+/// Works out the shutdown budget.
+///
+/// The code says what it needs and the deployment says what it provides, and the two
+/// must agree, as they do for capabilities:
+///
+/// - `declared` is the budget the agent's own code says it needs to drain
+///   (`AgentBuilder::with_shutdown_budget`). It is a requirement, not a preference.
+/// - `env` is what the deployment provides, `POLAR_SHUTDOWN_BUDGET_SECS`, which also
+///   sizes the pod's termination grace period.
+///
+/// A deployment may give an agent more than it needs, which is only a longer
+/// ceiling. It may not give it less: the drain would be cut short, so that is an
+/// error, and the message says where each number is set. Lowering what the code needs
+/// is a change to the code, which is the point. An agent that declared nothing is
+/// taking the default (20 s) as a guess, not a requirement, so the deployment may
+/// set it freely.
+///
+/// A set value that is not a whole number of seconds, at least 1, is an error.
+pub fn budget(declared: Option<Duration>, env: &dyn Env) -> Result<Duration, String> {
+    let provided = environment::SHUTDOWN_BUDGET_SECS
+        .read(env)
+        .map_err(|error| error.to_string())?;
+    let Some(secs) = provided else {
+        return Ok(declared.unwrap_or(DEFAULT_SHUTDOWN_BUDGET));
+    };
+    let provided = Duration::from_secs(secs);
+
+    if let Some(needed) = declared
+        && provided < needed
+    {
+        return Err(format!(
+            "{SHUTDOWN_BUDGET_ENV} is {secs}s, but this agent needs at least {}s to drain \
+             (declared in its code with with_shutdown_budget). The deployment must give it \
+             at least that: raise `shutdown.budget_secs` for this workload in the catalog. \
+             If the agent really can drain faster, lower the declaration in its supervisor \
+             instead, as a change someone reviews.",
+            needed.as_secs()
+        ));
+    }
+    Ok(provided)
+}
+
+/// Ends the process. A value, so a test can watch for the call instead of dying.
+pub(crate) type ProcessExit = Arc<dyn Fn(i32) + Send + Sync>;
+
+pub(crate) fn real_process_exit() -> ProcessExit {
+    Arc::new(|code| std::process::exit(code))
+}
+
+// ---------------------------------------------------------------------------
+// The shutdown machine
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Phase {
+    /// Nothing has asked the agent to end.
+    Running,
+    /// The domain supervisor has been told to stop its own work. Infrastructure
+    /// stays up for it until it says it is done.
+    Draining { reason: String },
+    /// The domain supervisor is done; infrastructure is coming down.
+    Stopping { reason: String },
+}
+
+#[derive(Debug)]
+pub(crate) struct ShutdownMachine {
+    phase: Phase,
+}
+
+impl ShutdownMachine {
+    pub(crate) fn new() -> Self {
+        Self {
+            phase: Phase::Running,
+        }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.phase == Phase::Running
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase(&self) -> &Phase {
+        &self.phase
+    }
+
+    /// Why the shutdown began, once it has.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match &self.phase {
+            Phase::Running => None,
+            Phase::Draining { reason } | Phase::Stopping { reason } => Some(reason),
+        }
+    }
+
+    /// A reason to end has turned up. Returns whether this one started the
+    /// shutdown; any later one finds it already under way and changes nothing.
+    pub(crate) fn begin(&mut self, reason: &str) -> bool {
+        if self.is_running() {
+            self.phase = Phase::Draining {
+                reason: reason.to_string(),
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The domain supervisor has finished. Returns whether infrastructure should
+    /// now come down (false if it already is).
+    pub(crate) fn proceed(&mut self) -> bool {
+        match &self.phase {
+            Phase::Stopping { .. } => false,
+            Phase::Draining { reason } => {
+                self.phase = Phase::Stopping {
+                    reason: reason.clone(),
+                };
+                true
+            }
+            Phase::Running => {
+                self.phase = Phase::Stopping {
+                    reason: "the domain supervisor released the infrastructure unprompted"
+                        .to_string(),
+                };
+                true
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What to do when a child dies
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Child {
+    Health,
+    TcpClient,
+    /// The router, the crypto actor, or anything else, by name.
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Death {
+    /// It stopped, with whatever reason it gave.
+    Terminated(Option<String>),
+    /// It failed: an error or a panic.
+    Failed(String),
+}
+
+impl Death {
+    fn detail(&self) -> String {
+        match self {
+            Death::Terminated(Some(reason)) => reason.clone(),
+            Death::Terminated(None) => "no reason given".to_string(),
+            Death::Failed(error) => error.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Action {
+    /// Expected: the children are being stopped as part of the shutdown.
+    Ignore,
+    /// An orderly shutdown, for this reason.
+    Shutdown(String),
+}
+
+/// What the supervisor does when one of its children ends.
+///
+/// While the agent is running, any child ending is a reason to shut down. The Cassini
+/// connection is not one of them: the client front keeps it up itself, bringing a new
+/// transport when one dies, so what ends here is the front, which only happens when it
+/// cannot go on. Once the shutdown is under way the children are being stopped on purpose,
+/// so nothing they do matters.
+pub(crate) fn on_child_death(running: bool, child: &Child, death: &Death) -> Action {
+    if !running {
+        return Action::Ignore;
+    }
+    match (child, death) {
+        (Child::TcpClient, _) => Action::Shutdown(format!(
+            "the Cassini client ended unexpectedly ({}); it keeps its own connection up, so \
+             this is the client itself failing",
+            death.detail()
+        )),
+        (Child::Health, _) => Action::Shutdown(format!(
+            "the health actor ended unexpectedly ({}); it reports a verdict and stays alive, \
+             so this is a fault in the health actor itself",
+            death.detail()
+        )),
+        (Child::Other(name), _) => {
+            Action::Shutdown(format!("{name} ended unexpectedly ({})", death.detail()))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+/// Turns SIGTERM and SIGINT into a request for an orderly shutdown.
+///
+/// Kubernetes sends SIGTERM for `kubectl delete`, a rollout, a node drain, and a
+/// failed liveness probe. An agent that is PID 1 and has no handler ignores it, so
+/// the container is killed outright when the grace period ends and nothing it
+/// should have done on the way out gets done. A second signal while a shutdown is
+/// already under way is logged and ignored.
+pub(crate) fn spawn_signal_listener(supervisor: ActorRef<InfrastructureSupervisorMessage>) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (mut term, mut int) = match (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) {
+        (Ok(term), Ok(int)) => (term, int),
+        (term, int) => {
+            tracing::error!(
+                "InfrastructureSupervisor: could not listen for SIGTERM/SIGINT (term: {:?}, \
+                 int: {:?}); this pod will not shut down in an orderly way when Kubernetes \
+                 asks it to",
+                term.err(),
+                int.err()
+            );
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            let name = tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = int.recv() => "SIGINT",
+            };
+            let sent = supervisor.cast(InfrastructureSupervisorMessage::BeginShutdown {
+                reason: format!("received {name}"),
+            });
+            if sent.is_err() {
+                // The supervisor is gone; nothing left to ask.
+                return;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `budget` with the deployment value given as text, or not at all.
+    fn budget_with(declared: Option<Duration>, env: Option<&str>) -> Result<Duration, String> {
+        let value = env.map(String::from);
+        budget(declared, &move |_: &str| value.clone())
+    }
+
+    // -- the budget -----------------------------------------------------------
+
+    #[test]
+    fn the_budget_defaults_to_twenty_seconds() {
+        assert_eq!(budget_with(None, None).unwrap(), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_budget_the_agent_declares_replaces_the_default() {
+        assert_eq!(
+            budget_with(Some(Duration::from_secs(50)), None).unwrap(),
+            Duration::from_secs(50)
+        );
+    }
+
+    #[test]
+    fn the_deployment_may_give_an_agent_more_than_it_declared_it_needs() {
+        let declared = Some(Duration::from_secs(50));
+        assert_eq!(
+            budget_with(declared, Some("90")).unwrap(),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            budget_with(declared, Some("50")).unwrap(),
+            Duration::from_secs(50)
+        );
+    }
+
+    #[test]
+    fn the_deployment_may_not_give_an_agent_less_than_it_declared_it_needs() {
+        // The code says what it needs to drain. A deployment that gives less would
+        // cut the drain short, so the agent refuses to start, and the message says
+        // which number to change and where.
+        let err = budget_with(Some(Duration::from_secs(50)), Some("30")).unwrap_err();
+        assert!(err.contains(SHUTDOWN_BUDGET_ENV), "{err}");
+        assert!(
+            err.contains("30s"),
+            "the deployment's value is shown: {err}"
+        );
+        assert!(err.contains("50s"), "the declared need is shown: {err}");
+        assert!(
+            err.contains("with_shutdown_budget"),
+            "where the need is declared: {err}"
+        );
+        assert!(
+            err.contains("budget_secs"),
+            "where the deployment sets it: {err}"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_declared_nothing_accepts_whatever_the_deployment_gives() {
+        // The default is a guess, not a requirement.
+        assert_eq!(
+            budget_with(None, Some("5")).unwrap(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            budget_with(None, Some("300")).unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn a_blank_deployment_value_means_nothing_was_set() {
+        assert_eq!(
+            budget_with(None, Some("  ")).unwrap(),
+            DEFAULT_SHUTDOWN_BUDGET
+        );
+        assert_eq!(
+            budget_with(None, Some("")).unwrap(),
+            DEFAULT_SHUTDOWN_BUDGET
+        );
+    }
+
+    #[test]
+    fn a_bad_deployment_value_is_an_error_that_names_the_variable() {
+        for bad in ["soon", "1.5", "-3", "0", "20s"] {
+            let err = budget_with(None, Some(bad)).unwrap_err();
+            assert!(err.contains(SHUTDOWN_BUDGET_ENV), "{bad}: {err}");
+            assert!(err.contains(bad), "{bad}: {err}");
+        }
+    }
+
+    // -- the machine ------------------------------------------------------------
+
+    #[test]
+    fn a_new_machine_is_running() {
+        let m = ShutdownMachine::new();
+        assert!(m.is_running());
+        assert_eq!(m.reason(), None);
+    }
+
+    #[test]
+    fn the_first_reason_starts_the_shutdown_and_later_ones_change_nothing() {
+        let mut m = ShutdownMachine::new();
+        assert!(m.begin("health verdict"));
+        assert!(!m.is_running());
+        assert_eq!(m.reason(), Some("health verdict"));
+
+        assert!(
+            !m.begin("received SIGTERM"),
+            "a second trigger starts nothing"
+        );
+        assert_eq!(
+            m.reason(),
+            Some("health verdict"),
+            "and keeps the first reason"
+        );
+        assert_eq!(
+            m.phase(),
+            &Phase::Draining {
+                reason: "health verdict".into()
+            }
+        );
+    }
+
+    #[test]
+    fn proceeding_moves_a_draining_machine_to_stopping_once() {
+        let mut m = ShutdownMachine::new();
+        m.begin("why");
+        assert!(m.proceed());
+        assert_eq!(
+            m.phase(),
+            &Phase::Stopping {
+                reason: "why".into()
+            }
+        );
+        assert!(
+            !m.proceed(),
+            "a second release does not stop everything twice"
+        );
+    }
+
+    #[test]
+    fn a_trigger_after_stopping_has_begun_changes_nothing() {
+        let mut m = ShutdownMachine::new();
+        m.begin("why");
+        m.proceed();
+        assert!(!m.begin("again"));
+        assert_eq!(m.reason(), Some("why"));
+    }
+
+    #[test]
+    fn an_unprompted_release_still_stops_and_says_so() {
+        let mut m = ShutdownMachine::new();
+        assert!(m.proceed());
+        assert!(m.reason().unwrap().contains("unprompted"));
+    }
+
+    // -- child deaths -------------------------------------------------------------
+
+    fn terminated() -> Death {
+        Death::Terminated(Some("stopped".into()))
+    }
+
+    fn failed() -> Death {
+        Death::Failed("boom".into())
+    }
+
+    fn shutdown_reason(action: Action) -> String {
+        match action {
+            Action::Shutdown(reason) => reason,
+            other => panic!("expected a shutdown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nothing_a_child_does_matters_once_the_shutdown_is_under_way() {
+        for child in [
+            Child::Health,
+            Child::TcpClient,
+            Child::Other("router".into()),
+        ] {
+            for death in [terminated(), failed(), Death::Terminated(None)] {
+                assert_eq!(
+                    on_child_death(false, &child, &death),
+                    Action::Ignore,
+                    "{child:?} {death:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_cassini_client_ending_is_a_shutdown_whichever_way_it_goes() {
+        for death in [terminated(), failed(), Death::Terminated(None)] {
+            let reason = shutdown_reason(on_child_death(true, &Child::TcpClient, &death));
+            assert!(reason.contains("Cassini client"), "{reason}");
+        }
+        let reason = shutdown_reason(on_child_death(true, &Child::TcpClient, &failed()));
+        assert!(reason.contains("boom"), "{reason}");
+    }
+
+    #[test]
+    fn the_health_actor_dying_is_a_shutdown_whichever_way_it_goes() {
+        for death in [terminated(), failed(), Death::Terminated(None)] {
+            let reason = shutdown_reason(on_child_death(true, &Child::Health, &death));
+            assert!(reason.contains("health actor"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn any_other_child_dying_is_a_shutdown_that_names_it() {
+        for death in [terminated(), failed()] {
+            let reason =
+                shutdown_reason(on_child_death(true, &Child::Other("router".into()), &death));
+            assert!(reason.contains("router"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_missing_reason_is_said_plainly() {
+        let reason = shutdown_reason(on_child_death(
+            true,
+            &Child::Other("crypto".into()),
+            &Death::Terminated(None),
+        ));
+        assert!(reason.contains("no reason given"), "{reason}");
+    }
+}

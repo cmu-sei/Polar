@@ -1,0 +1,349 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
+# Runbook: the git observer clones a private repository
+
+Written 2026-10-15. The first time the whole credential path runs on a cluster: a signed `credentials` document
+delivers a token to the git observer, a signed `repositories` document tells the controller to watch a private
+repository, and the observer clones it and publishes its commits. Everything below the "Expect" lines has been
+tested in pieces with fakes and has **not** been seen on a cluster, so this runbook says what each step should show
+and what to look at when it does not.
+
+Commands are for fish, run from the repository root unless a step says otherwise.
+Nothing here prints a secret. The token goes from its Kubernetes Secret into `polar-sign` through a pipe.
+
+## What you need
+
+- A Kubernetes cluster whose pods can resolve and reach the internet (see "If the cluster cannot resolve names"), with `kubectl` pointed at it.
+- A GitHub token that can read `example-org/private-repo` (any private GitHub repository will do), kept in the Secret `git-observer-credentials`
+  (keys `username` and `token`) in the `polar` namespace. Use a fine-grained, read-only token, and create the Secret yourself.
+- A connection fast enough for the image builds (Step 1).
+
+```fish
+sudo modprobe pkcs8_key_parser                                   # the agents' escrow key custody needs it
+just registry-status                                             # the registry the images are pushed to must be up
+set -x KUBECONFIG <path to your kubeconfig>
+kubectl get nodes                                                # Expect: one node, Ready
+```
+
+## Step 1. Build every image, together
+
+The wire formats changed (the escrow-key reply, `RepoObservationConfig`, `StoreSecretRequest`), so the credentials
+agent, the observer, the controller and every agent that holds a CryptoActor (the git observer, `kube-consumer`, the secret harness)
+must be rebuilt and pushed in one go.
+`up.nu --dev` builds exactly what the target's manifests use, and does the whole bring-up (Step 2) after it. To build
+first and bring up later:
+
+```fish
+just images-push git-observer git-controller git-processor credentials-agent-consumer credentials-agent-observer kube-consumer secret-harness-owner secret-harness-intruder
+nu infra/images.nu list                                          # every image name, if one of those is not right
+```
+
+Expect: each image ends pushed to `localhost:5000`. A failing image does not stop the others; the stage ends with a
+summary and a non-zero exit. Do not go on with a failure. (The first Nix build of the controller took about an
+hour cold; later ones reuse the store.)
+
+## Step 2. Bring the cluster up
+
+```fish
+nu infra/up.nu local-minimal --dev --user alice --email alice@example.org
+```
+
+It is resumable: after a failure or a pause, run the same command. It stops for you only where a person is needed:
+
+- **The browser step**, if Librewolf does not hold this cluster's CA and your certificate: close the browser, let
+  it import (`just user-cert-install alice`).
+- **The Neo4j password**, only if Neo4j is still on its factory password. The `nix-neo4j` image applies
+  `NEO4J_AUTH` on first start, so normally there is no step.
+
+Your account's identity on this cluster (the first DNS name in your certificate) is new to the git server, and a reset gives a
+new one. `up.nu` handles it: at the seed step it records the identity in `infra/targets/<target>/cluster-inputs.nuon` (not
+committed; a reset discards it), renders the layers again, and the git server restarts with it before the seed pushes. You
+need to be an administrator of the git server to push in Step 6, and now you are. If the seed still stops with "the Polar git
+server does not know `<uuid>` as an administrator", look at that file and at whether the `polar-git-server` pod restarted
+after the publish (`kubectl -n polar get pods`).
+
+`up.nu` moves `~/.config/polar-admin` aside when it holds another cluster's certificates (`~/.config/polar-admin.old*`).
+That is why the scaffolds are exported in Step 4, after this.
+
+```fish
+kubectl -n polar get pods
+```
+
+Expect, Running: `cassini-broker`, `credentials-agent` (consumer and observer), `cert-issuer`, `polar-git-server`,
+`polar-scheduler-observer`, `polar-scheduler`, `git-repo-observer`, `git-repo-controller`, `git-repo-processor`. The
+old `git-repo-scheduler` should not exist; if a cluster still has it: `kubectl -n polar delete job git-repo-scheduler`
+and its ServiceAccount.
+
+Expect at the end of `up.nu`: a line saying a pod can reach the outside (the DNS fix). If it says it cannot, stop:
+the clone in Step 7 cannot work. See "If the cluster cannot resolve names" below.
+
+## Step 3. Check the pieces this path depends on, before using them
+
+```fish
+just port-forwards-up observer git                               # local 8081 (the credentials agent's gateway), 8443 (git server)
+```
+
+**3a. The observer has an escrow certificate, and the gateway serves it.** Without one there is nothing to encrypt to.
+
+```fish
+curl -s -X POST localhost:8081/agent-escrow-key -H 'content-type: application/json' \
+  -d '{"identity":"git-repo-observer.polar.serviceaccount.cluster.local"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["Found"]["certificate_pem"])' \
+  | openssl x509 -noout -subject -issuer -ext subjectAltName,keyUsage
+```
+
+Expect: a certificate issued by `Polar Internal CA`, key usage `Key Encipherment`, and a DNS name
+`git-repo-observer.polar.serviceaccount.cluster.local`.
+
+- `"NotFound"` (the body says so): the observer has not completed its escrow-identity issuance. Look at its init container and
+  at `kubectl -n polar logs -l job-name=git-repo-observer --all-containers --tail=80`.
+- A 404 with an empty body: the credentials-agent-observer image is older than the tool and has no such route (Step 1).
+- A different DNS name: remember it, and pass it in Steps 5 and 6 as `--escrow-identity <that name>`.
+- Connection refused: the forward is down (`cat /tmp/pf-credentials-observer.log`).
+- A timeout (the gateway answers 504): the consumer did not answer. Either the Cassini broker refuses the gateway
+  publishing on `credentials-agent-escrow-key-requests` (no rule for that topic was found in the repo, so this is
+  the first thing a cluster can show) or the consumer is down. `kubectl -n polar logs -l job-name=credentials-agent --all-containers`.
+
+**3b. The test credential exists.** Names only; do not print values.
+
+```fish
+kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data}' | python3 -c 'import sys,json; print(sorted(json.load(sys.stdin)))'
+```
+
+Expect: `['token', 'username']`.
+
+## Step 4. Give `polar-sign` the agents' scaffolds
+
+```fish
+nu infra/resolve.nu scaffolds ~/.config/polar-admin/scaffolds --target local-minimal
+ls ~/.config/polar-admin/scaffolds | grep -E 'git-repo-(observer|controller)'
+```
+
+Expect: `git-repo-controller.json` and `git-repo-observer.json` among the files. (The scaffolds come from the agents'
+images, asked on the cluster, so this needs KUBECONFIG and the images in the registry.)
+
+```fish
+nu infra/tools.nu install ~/.local/bin          # once: copies polar-sign and the other tools out of the polar-tools image
+fish_add_path ~/.local/bin
+polar-sign template git-repo-observer           # lists the sections it takes
+```
+
+(`polar-sign` is a static binary: nothing is compiled, and it needs only `git` on your `PATH`. The image comes from
+the registry in `POLAR_REGISTRY`; `--from` takes any `skopeo` reference to it. With a Rust toolchain and no image you
+can build it from this checkout instead: `cargo build --release -p polar-sign` in `src/agents`.)
+
+## Step 5. The repository, first (so the observer has to wait)
+
+Putting the repository first shows the wait-and-retry behaviour: the controller announces a repository whose
+credential the observer does not have yet.
+
+```fish
+polar-sign template git-repo-controller repositories --out /tmp/repos.json
+$EDITOR /tmp/repos.json
+```
+
+Fill in one entry (leave `version` at 1 on a fresh cluster; it must rise with every later document):
+
+```
+"url": "https://github.com/example-org/private-repo.git",
+"credential": "private-repo",
+```
+
+(`credential` is commented out in the template; delete the slashes. Leave `refs` out to observe the default branch.)
+Then:
+
+```fish
+set host polar-git-server.polar.svc.cluster.local
+polar-sign sign /tmp/repos.json --user alice \
+  --repo https://$host:8443/polar-schedules.git \
+  --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
+```
+
+Expect: `pushed permanent/git-repo-controller/repositories.dhall (repositories for git-repo-controller, version 1, 0
+secret(s) sealed)`. It needs no gateway, because there is no secret.
+
+- `nothing was signed: N problem(s)`: each problem is printed with the field. Fix the file.
+- `403` on the push: your identity is not an administrator of the git server (Step 2).
+- Certificate or CA errors on the push: the tool clears `GIT_SSL_CAINFO` and `SSL_CERT_FILE` for its git commands and
+  gives git your Polar certificate and `ca.pem` itself; check `~/.config/polar-admin/ca.pem` is this cluster's CA.
+- `cannot read the scaffold`: Step 4.
+
+Within about a minute, look:
+
+```fish
+kubectl -n polar logs -l job-name=git-repo-controller --tail=40 | grep -iE 'repositories section|does not read'
+kubectl -n polar logs -l job-name=git-repo-observer --tail=60 | grep -iE 'waiting for the credential|not observed|could not be cloned'
+```
+
+Expect: the controller logs `repositories section loaded` with `repositories=1` (it then announces the set every 60 s,
+without a log line each time); the observer logs that `https_github.com_example-org_private-repo` (the repository's
+id) `is waiting for the credential it names`, and no clone is attempted.
+
+## Step 6. The credential
+
+```fish
+polar-sign template git-repo-observer credentials --out /tmp/creds.json
+$EDITOR /tmp/creds.json
+```
+
+One entry. The username is in the Secret (it is not secret; read it with
+`kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data.username}' | base64 -d`):
+
+```
+"name": "private-repo",              <- the name the repository gave in Step 5
+"host_pattern": "github.com",
+"kind": "token",
+"secret": "-",                         <- read from standard input
+"username": "<the username>",          <- uncomment it
+```
+
+Then pipe the token in; it is never typed, shown or written:
+
+```fish
+kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data.token}' | base64 -d \
+  | polar-sign sign /tmp/creds.json --user alice \
+    --repo https://$host:8443/polar-schedules.git \
+    --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
+```
+
+Expect: `pushed permanent/git-repo-observer/credentials.dhall (credentials for git-repo-observer, version 1, 1
+secret(s) sealed)`. The tool asked the gateway once (`/tmp/pf-credentials-observer.log` is not where to look; the
+request shows in `kubectl -n polar logs -l job-name=credentials-agent-observer --tail=20`).
+
+- `the escrow certificate for ... cannot be believed: the certificate does not name ...`: use `--escrow-identity <the DNS name from 3a>`.
+- `... does not lead to a CA this verifier trusts`: your `~/.config/polar-admin/ca.pem` is another cluster's. Step 2
+  moves a stale one aside; check `openssl x509 -in ~/.config/polar-admin/ca.pem -noout -fingerprint` against
+  `kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' | openssl x509 -noout -fingerprint`.
+- `cannot reach the credentials agent's gateway`: `just port-forwards-up observer`.
+
+Do not reuse a file that has already been signed with a lower or equal version: a document with a version no higher than
+the last applied is refused. Edit the version first.
+
+## Step 7. Watch it work
+
+```fish
+kubectl -n polar logs -l job-name=git-repo-observer --tail=100 | grep -iE 'credentials section|secret registered|escrowed|waiting|not observed|cloned|Forwarding event'
+```
+
+Expect, in this order, within about a minute of the push:
+
+1. `credentials section applied` (with `registered=1 failed=0 withdrawn=0`) and `secret registered`.
+2. `secret escrowed with the credentials agent` (a copy of the credential is kept with the binding).
+3. The repository's wait ends (the section change wakes it at once): a clone, then `Forwarding event to topic ...` lines
+   for the commits and the ref update.
+
+Then, in the graph (Neo4j browser, `https://localhost:7473`; you hold the password):
+
+```cypher
+MATCH (r:GitRepository) RETURN r.id
+MATCH (c:GitCommit) RETURN count(c)
+```
+
+Expect: the repository, and commits (the first walk covers up to 100 per ref). The processor logs the writes:
+`kubectl -n polar logs -l job-name=git-repo-processor --tail=40`.
+
+What the observer is doing with each repository (needs the observer and processor images that publish status):
+
+```cypher
+MATCH (r:GitRepository)
+RETURN r.id, r.observation_state, r.observation_reason, r.observation_consecutive_failures,
+       r.observation_last_success, r.observation_checked_at
+```
+
+`observation_state` is `observing`, `pending-credential` (the repository names a credential the observer does not
+have yet) or `failing`, and then `observation_reason` says why: `the credential cannot be used: …`,
+`the clone failed: …` or `the fetch failed: …`. The times are milliseconds since the epoch
+(`date -d @$((ms/1000))`). A repository the observer has not yet reported has none of these properties.
+
+What agents have proposed, and what became of it (needs the controller and processor images that publish and read decisions):
+
+```cypher
+MATCH (p:GitProposal)
+RETURN p.url, p.proposer, p.state, p.rule, p.reason, p.announcements, p.evidence
+ORDER BY p.decided_at DESC
+```
+
+`state` is `accepted`, `rejected` (`rule` says which rule refused it), `pending` (`rule` says what it waits for: `no admission rules`, `awaiting
+approval`, `no credential`, `name resolution`) or `expired` (its proposer stopped announcing it). An accepted one is linked to its repository:
+`MATCH (p:GitProposal {state: 'accepted'})-[:PROPOSES]->(r:GitRepository) RETURN p.url, r.observation_state`. A proposal the controller refused
+outright (an unreadable URL, an identity the rules do not list) is only in the controller's log:
+`kubectl -n polar logs job/git-repo-controller -c git-repo-controller | grep 'proposal of'`.
+
+Each signed document also has an outcome node in the graph (`ConfigurationOutcome`, linked with `HAD_OUTCOME`); a
+refused document is there with the reason and signer.
+
+### Things worth trying once it works
+
+- **Withdraw it.** Sign a `credentials` document at version 2 with `"credentials": []`. The observer logs
+  `withdrawn=1`; the repository stops being fetched successfully (`is waiting for the credential it names`).
+- **A wrong host.** Change `host_pattern` to `gitlab.com` at version 3. The repository must not be cloned, and the
+  observer must say its credential is not bound to this host.
+- **See each state.** With no `credentials` document the repository is `pending-credential`. With `host_pattern`
+  `gitlab.com` it is `failing` with `the credential cannot be used: …`. With the right one it becomes `observing`
+  and the reason is gone. (Each appears within a minute of the document being applied; no pod restart is needed.)
+- **A change of settings.** `polar-sign template git-repo-controller --settings`, uncomment
+  `POLAR_GIT_CONTROLLER_REPUBLISH_SECS`, give it `15`, sign and push; the controller's announcements speed up.
+
+## If something does not appear
+
+| What you see | Where to look | Likely cause |
+|---|---|---|
+| Nothing changes after a push | `kubectl -n polar logs -l job-name=polar-scheduler-observer --tail=60` | it has not pulled yet (give it a minute), or it cannot read the repository |
+| `...refused` / `version` in the observer's or controller's log | the `ConfigurationOutcome` node, and the agent's log | a version not higher than the last; a signer without `c:update-runtime`; a signature that does not verify (stale `ca.pem`) |
+| The controller never says `repositories section loaded` | its log; `kubectl -n polar logs -l job-name=polar-scheduler --tail=60` | the document is addressed to `git-repo-controller` and was not delivered; the controller registers and asks for a replay |
+| `could not register the credential` in the observer | its log (the reason is printed, never the value) | the secret does not open under this context: wrong version in the file than was signed, or encrypted to another key |
+| `the credential ... is not bound to this repository's host` | observer log | `host_pattern` does not match the repository's host |
+| `is not observed: a credential is only used for an https repository` | observer log | the repository URL is not plain `https://host/...` (no login, no `http`) |
+| `could not be cloned` | observer log | DNS or the network (below), or the token cannot read the repository (401/403 in the message) |
+| The clone works but no commits in the graph | processor log | the graph connection (Neo4j password), not this path |
+
+### If the cluster cannot resolve names
+
+A pod that cannot reach `github.com` shows up as `could not be cloned` with a name-resolution error. Check from inside
+the cluster, and fix it in the cluster's own DNS (this is not a Polar setting):
+
+```fish
+kubectl run dnscheck --rm -it --restart=Never --image=docker.io/library/busybox:latest -- nslookup github.com
+```
+
+Common causes: a node resolver that points at a DNS server pods cannot reach, or a DNS search domain on the node that
+makes every lookup slow (remove it from the node's resolver). CoreDNS forwarding to a resolver that is only
+reachable from the host is another.
+
+## Afterwards
+
+- Note which of the "Expect" lines held and which did not, with the log line (not the value) for any that did not.
+- Delete what holds nothing secret but is no longer needed: `rm /tmp/repos.json /tmp/creds.json`,
+  and the tool's clone `rm -rf ~/.cache/polar-sign/schedules` (it holds only signed documents and ciphertext).
+- The documents in `polar-schedules` are ciphertext, but ciphertext in git history stays there: change the token's
+  value in GitHub once the observer has stored it (`docs/architecture/signed-configuration.md`, "A property to keep
+  in mind").
+- Record what the cluster showed in `remaining-work.md` (GIT CREDENTIAL PATH 1) and tick what is now seen.
+
+## What this runbook does not cover
+
+Path 2 (proposals from other agents and their approval), the removal of a repository from a later version of
+`repositories` (the observer keeps observing it until its pod restarts), the GitLab discovery flow (dropped until
+proposals) and the observer's network guard (private addresses are not yet refused). The controller does not read
+the status events yet.

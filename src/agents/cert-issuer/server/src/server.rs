@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Axum HTTP server module.
 //!
 //! Wraps the `Handler` in HTTP transport. The handler itself is
@@ -19,87 +42,17 @@
 //! from a colocated orchestrator — without rewriting the
 //! validation logic.
 
-use crate::handler::{Handler, HandlerBody, HandlerResponse};
-use crate::health::HealthState;
+use crate::handler::{
+    Handler, HandlerBody, HandlerResponse, ValidateHandlerBody, ValidateHandlerResponse,
+};
 use axum::Router;
-use axum::extract::{Json, State};
+use axum::extract::{Extension, Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use cert_issuer_common::{IssueError, IssueOutcome, IssueRequest};
+use cert_issuer_common::{InternalIssueRequest, IssueError, IssueOutcome, IssueRequest};
 use std::sync::Arc;
 use tracing::error;
-
-/// `GET /liveness`
-///
-/// Answers exactly one question: is this process alive and able to
-/// serve HTTP? No dependency checks — not the CA, not JWKS, nothing.
-/// If this handler is reachable at all, it returns 200.
-///
-/// This is deliberately trivial. A liveness probe that checks
-/// dependencies risks Kubernetes restarting a perfectly healthy
-/// process because an *upstream* dependency (the Kubernetes API
-/// server's JWKS endpoint) is having a bad moment — restarting this
-/// process does nothing to fix that, it just adds churn and resets
-/// any in-memory cache that was otherwise still useful.
-async fn liveness() -> StatusCode {
-    StatusCode::OK
-}
-
-/// `GET /readiness`
-///
-/// Answers: would sending an issuance request to this instance
-/// reasonably be expected to succeed? Backed entirely by
-/// `HealthState::readiness()`, which is a pure read of
-/// already-tracked state — this handler makes no network calls and
-/// triggers no JWKS fetch. See `health.rs` module docs for the full
-/// rationale.
-///
-/// Returns 200 with the readiness report when ready, 503 with the
-/// same report when not — the body is included on both success and
-/// failure so an operator curling this endpoint during an incident
-/// can see exactly which condition is failing without needing to
-/// correlate with logs.
-async fn readiness(State(health): State<Arc<HealthState>>) -> (StatusCode, Json<ReadinessBody>) {
-    let report = health.readiness();
-    let status = if report.is_ready() {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (status, Json(ReadinessBody::from(report)))
-}
-
-/// Wire response body for `/readiness`. A thin wrapper around
-/// `ReadinessReport` — kept separate so the wire shape can evolve
-/// independently of the internal health state representation.
-#[derive(serde::Serialize)]
-struct ReadinessBody {
-    ready: bool,
-    ca_loaded: bool,
-    jwks_usable: bool,
-}
-
-impl From<crate::health::ReadinessReport> for ReadinessBody {
-    fn from(report: crate::health::ReadinessReport) -> Self {
-        Self {
-            ready: report.is_ready(),
-            ca_loaded: report.ca_loaded,
-            jwks_usable: report.jwks_usable,
-        }
-    }
-}
-
-/// Add health check routes to the existing router. Called from
-/// wherever the router is assembled in `main.rs` — merge this into
-/// the existing `/issue` route rather than standing up a second
-/// server, so both share the same bind address and port.
-pub fn health_routes(health: Arc<HealthState>) -> Router {
-    Router::new()
-        .route("/liveness", get(liveness))
-        .route("/readiness", get(readiness))
-        .with_state(health)
-}
 
 /// Build the Axum router for the cert issuer.
 ///
@@ -110,8 +63,25 @@ pub fn health_routes(health: Arc<HealthState>) -> Router {
 pub fn build_router(handler: Arc<Handler>) -> Router {
     Router::new()
         .route("/issue", post(issue))
+        .route("/validate", post(validate))
+        .route("/internal/issue", post(internal_issue))
+        .route(cert_issuer_common::held::HELD_ROUTE, get(held_list))
+        .route("/internal/held/:id", post(held_answer))
+        .route("/ca", get(ca_certificate))
         .with_state(handler)
 }
+
+/// The verified mTLS peer identity (the SAN of the client certificate
+/// the connection presented) for the connection a request arrived on.
+///
+/// Attached to each request as an extension by the TLS accept loop,
+/// from the completed handshake, and by nothing else -- it must never be
+/// derived from a header, a query parameter or the request body, all of
+/// which the caller controls. A request with no such extension came in
+/// without a verified client certificate, and `handle_internal_issue`
+/// refuses it.
+#[derive(Debug, Clone)]
+pub struct PeerIdentity(pub String);
 
 /// Handler for `POST /issue`.
 ///
@@ -133,6 +103,7 @@ pub fn build_router(handler: Arc<Handler>) -> Router {
 ///   automatically; it returns 400 before our handler runs.
 async fn issue(
     State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
     headers: HeaderMap,
     Json(request): Json<IssueRequest>,
 ) -> Response {
@@ -143,8 +114,121 @@ async fn issue(
         }
     };
 
-    let result = handler.handle(&bearer, request).await;
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler.handle(peer_identity, &bearer, request).await;
     handler_response_to_axum(result)
+}
+
+/// Handler for `GET /ca`.
+///
+/// Returns the CA certificate PEM. Unauthenticated on purpose: it is
+/// public, and its whole job is to be fetchable by a caller that has
+/// no credential and no trust root yet.
+async fn ca_certificate(State(handler): State<Arc<Handler>>) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/x-pem-file")],
+        handler.ca_cert_pem.clone(),
+    )
+        .into_response()
+}
+
+/// Handler for `POST /internal/issue`.
+///
+/// No bearer token: the caller is authenticated by its mTLS peer
+/// identity, which the accept loop attaches as a `PeerIdentity`
+/// extension. A missing extension means no verified client certificate,
+/// and the handler refuses it with `CallerNotAuthorized`. A body that
+/// isn't valid JSON is rejected by the `Json` extractor before the
+/// allowlist is consulted, the same as `/issue`.
+async fn internal_issue(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+    Json(request): Json<InternalIssueRequest>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler.handle_internal_issue(peer_identity, request).await;
+    handler_response_to_axum(result)
+}
+
+/// Handler for `GET /internal/held`: the held requests the credentials agent has not answered, while its Cassini
+/// session is lost (docs/architecture/core-restarts.md, "3 in detail"). By its mTLS identity alone.
+async fn held_list(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    match handler.held_list(peer_identity) {
+        Ok(list) => (StatusCode::OK, Json(list)).into_response(),
+        Err(detail) => reject(IssueOutcome::CallerNotAuthorized, detail),
+    }
+}
+
+/// Handler for `POST /internal/held/<id>`: the credentials agent's answer to a held request, over mTLS. Answers 200
+/// with whether it was taken.
+async fn held_answer(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(decision): Json<cert_issuer_common::held::HeldDecision>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let reply = cert_issuer_common::held::HeldReply { id, decision };
+    match handler.held_answer(peer_identity, &reply) {
+        Ok(taken) => (StatusCode::OK, Json(serde_json::json!({ "taken": taken }))).into_response(),
+        Err(detail) => reject(IssueOutcome::CallerNotAuthorized, detail),
+    }
+}
+
+/// Handler for `POST /validate`.
+///
+/// OIDC validation only, no CSR, no signing -- exists specifically
+/// for credentials-agent's two-call issuance flow. Same header
+/// extraction as `/issue`; the only difference is there's no request
+/// body to parse at all, since there's no CSR involved yet at this
+/// point.
+async fn validate(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let bearer = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(detail) => {
+            return reject(IssueOutcome::InvalidToken, detail);
+        }
+    };
+
+    // Body is genuinely optional -- existing callers (the issuance
+    // flow's own internal /validate call) send none at all, and must
+    // keep working unchanged. An empty body defaults to
+    // ValidateRequest::default() (include_normalized_identity: false),
+    // a non-empty body must still parse as valid JSON.
+    let request = if body.is_empty() {
+        cert_issuer_common::ValidateRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                let status = StatusCode::from_u16(crate::handler::status_for_outcome(
+                    IssueOutcome::InvalidCsr,
+                ))
+                .unwrap_or(StatusCode::BAD_REQUEST);
+                let body = IssueError {
+                    outcome: IssueOutcome::InvalidCsr,
+                    detail: format!("malformed request body: {e}"),
+                };
+                return (status, Json(body)).into_response();
+            }
+        }
+    };
+
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler
+        .handle_validate(peer_identity, &bearer, request)
+        .await;
+    validate_response_to_axum(result)
 }
 
 /// Extract the bearer token from the `Authorization: Bearer <token>`
@@ -197,6 +281,18 @@ fn handler_response_to_axum(resp: HandlerResponse) -> Response {
     match resp.body {
         HandlerBody::Success(success) => (status, Json(success)).into_response(),
         HandlerBody::Error(error) => (status, Json(error)).into_response(),
+    }
+}
+
+fn validate_response_to_axum(resp: ValidateHandlerResponse) -> Response {
+    let status = StatusCode::from_u16(resp.status).unwrap_or_else(|_| {
+        error!(status = resp.status, "handler produced invalid status");
+        StatusCode::INTERNAL_SERVER_ERROR
+    });
+
+    match resp.body {
+        ValidateHandlerBody::Success(success) => (status, Json(success)).into_response(),
+        ValidateHandlerBody::Error(error) => (status, Json(error)).into_response(),
     }
 }
 

@@ -1,63 +1,53 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% A client connects and registers, as built (2026-10-21, docs/architecture/cassini-broker.md), with the identity
+%% check on resuming a session that is designed (docs/architecture/policy-enforcement.md, stage 0) and not built yet.
 sequenceDiagram
-    participant Client
+    autonumber
+    participant Client as Agent (TcpClientActor)
+    participant LM as ListenerManager
     participant Listener
     participant Broker
-    participant SessionManager
-    participant SessionAgent
-    participant SubscriberManager
+    participant SM as SessionManager
+    participant SA as SessionAgent
 
-    Note right of Client: Client sends a registration request
-    Client->>Listener: RegistrationRequest(registration_id)
+    Client->>LM: TCP connect, mutual TLS (the cluster's CA)
+    LM->>LM: identity = the leaf's first DNS SAN (none: fails open, identity unset)<br/>designed: keep the leaf, for its p: names
+    LM->>Listener: spawn, one per connection, with the identity
+    Client->>Listener: RegistrationRequest(registration_id or none)
+    Listener->>Broker: RegistrationRequest(client_id, registration_id, identity)
+    Broker->>SM: handle_registration_request
 
-    Note right of Listener: Forwarding request to Broker
-    Listener->>Broker: RegistrationRequest(client_id, registration_id)
-    
-    activate Broker
-    Note right of Broker: Checking session existence
-    Broker->>SessionManager: Lookup session(registration_id)
-
-    alt Session exists
-        Broker->>SessionManager: Resume existing session
-        SessionManager->>Listener: RegistrationResponse(success)
-        Listener->>Client: RegistrationResponse(success)
-    else Session does not exist
-        Note right of Broker: Requesting new session creation
-        Broker->>SessionManager: Register new session(client_id)
-
-        activate SessionManager
-        Note right of SessionManager: Generating new registration ID
-        SessionManager->>SessionAgent: Spawn new SessionAgent(registration_id)
-        
-        alt SessionAgent starts successfully
-            Note right of SessionManager: Saving session reference
-            SessionManager->>Broker: Session created(registration_id)
-            Broker->>Listener: RegistrationResponse(success)
-
-            Note right of Listener: Sending registration response to Client
-            Listener->>Client: RegistrationResponse(success)
-        else SessionAgent creation fails
-            Note right of SessionManager: ❌ PROBLEM: No explicit handling if SessionAgent fails! <br> Should notify Broker or retry?
-            SessionManager->>Broker: Session creation failed
-            Broker->>Listener: RegistrationResponse(failure)
-            Listener->>Client: RegistrationResponse(failure)
+    alt a registration_id that names a live or detached session
+        rect rgb(235, 219, 178)
+        Note over SM: DESIGNED: the connection's identity must be the session's,<br/>else this is a new session (a registration id is not a bearer token)
         end
-        deactivate SessionManager
+        SM->>SA: resume, attach this connection
+    else new
+        SM->>SA: spawn SessionAgent(registration_id), Session { identity }
+        SM->>SM: supersede older sessions of the same identity
     end
-    deactivate Broker
-
-    alt Client disconnects before registration completes
-        Note right of Listener: ❌ PROBLEM: No guarantee that SessionManager will cancel session creation in time. <br> What happens if the SessionAgent is already partially initialized?
-        Listener->>SessionManager: DisconnectRequest(client_id)
-        Listener->>SubscriberManager: Cancel subscription restoration
-    end
-
-    alt SubscriberManager restoring subscriptions
-        Note right of SubscriberManager: Gathering existing subscriptions
-        SubscriberManager->>SubscriberManager: Restore subscriptions
-        Note right of SubscriberManager: ❌ PROBLEM: Possible race condition! <br> If the Client starts sending messages before restoration completes, messages could be lost.
-    end
-
-    alt SessionManager fails to notify Broker of session timeout
-        Note right of SessionManager: ❌ PROBLEM: If a session times out, Broker may not be notified correctly. <br> Possible session leak?
-        SessionManager->>Broker: TimeoutMessage(registration_id)
-    end
+    SM-->>Listener: RegistrationResponse(registration_id)
+    Listener->>Listener: remember registration_id and the session's address
+    Listener-->>Client: RegistrationResponse(Ok registration_id)
+    Client->>Client: ClientEvent::Registered, the builder sends every subscription again
+    Note right of Client: every subscribe and publish is then decided at the Listener<br/>(client_subscription, client_publish)

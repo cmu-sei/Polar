@@ -1,0 +1,67 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    actor Admin
+    participant Proposer as Jira consumer
+    participant Cassini
+    participant Controller as Git controller
+    participant Observer as Git observer
+    participant Processor as Scheduler processor
+    participant Graph as Neo4j
+    participant Creds as Credentials agent
+
+    Note over Admin,Controller: Admission rules first: a signed runtime document, section admission
+    Admin->>Processor: signed runtime document for the controller
+    Processor-)Cassini: document on the controller's configuration topic
+    Cassini-)Controller: document
+    Controller->>Controller: verify for itself, until then accept nothing
+
+    Note over Proposer,Graph: A proposal
+    Proposer-)Cassini: Proposal kind, subject, evidence
+    Cassini-)Processor: Proposal, publisher named by the broker
+    Processor->>Graph: write a Proposal node
+    Cassini-)Controller: Proposal, publisher named by the broker
+    Controller->>Controller: normalise, then apply the rules in order
+    alt rejected
+        Controller-)Cassini: ProposalDecision rejected and the rule
+    else pending
+        Controller-)Cassini: ProposalDecision pending and what for
+    else accepted
+        Controller-)Cassini: ProposalDecision accepted
+        Controller-)Observer: repository to observe, naming its credential
+        Observer->>Creds: RetrieveSecret for that credential, if it does not hold it
+        Creds-->>Observer: re-encrypted to the agent's own escrow key
+        Observer->>Observer: host binding and network guard, then clone
+    end
+    Cassini-)Processor: ProposalDecision
+    Processor->>Graph: write a decision node, linked to the proposal
+
+    Note over Admin,Observer: Approval and credentials are signed edits
+    Admin->>Processor: a new admission section (an approval), or a credentials document for the observer
+    Processor-)Cassini: document
+    Cassini-)Controller: admission section, re-evaluate every pending proposal
+    Cassini-)Observer: credentials section, decrypt and escrow with StoreSecret
+
+    Note over Processor,Controller: A restarted controller gets them again
+    Processor-)Cassini: replay the documents and the kind's proposals
+    Cassini-)Controller: documents, then proposals
+    Controller->>Controller: re-evaluate against the current rules

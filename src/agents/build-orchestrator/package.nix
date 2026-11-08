@@ -1,4 +1,30 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact
+# permission@sei.cmu.edu for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # src/agents/build-orchestrator/package.nix
+#
+# build-orchestrator and its image. The binary is built with crane from the fork's workspace like every other agent;
+# the image has what the operator needs of an agent: the binary, and polar-healthcheck, which the liveness probe runs.
+# (Public Polar's copy of this port was a workspace of its own and wrapped a cargo-built binary in image.nix; it is
+# a member of this workspace now, so that route is not needed.)
 { pkgs
 , craneLib
 , crateArgs
@@ -9,194 +35,29 @@
 , healthcheckDrv
 , ...
 }:
+
 let
   orchestrator = craneLib.buildPackage (crateArgs // {
-    cargoExtraArgs = "--bin build-orchestrator";
-    src            = workspaceFileset ./.;
-    doCheck        = false;
+    pname = "build-orchestrator";
+    cargoExtraArgs = "--bin build-orchestrator --locked";
+    src = workspaceFileset ./.;
+    doCheck = false;
   });
-
-  # Graph-driven work queue for the orchestrator's analysis jobs.
-  analysisScheduler = craneLib.buildPackage (crateArgs // {
-    cargoExtraArgs = "--bin analysis-scheduler";
-    src            = workspaceFileset ./.;
-    doCheck        = false;
-  });
-
-  healthcheckInputs = inputs // {
-    polar-healthcheck = {
-      packages.${system}.default = healthcheckDrv;
-    };
-  };
-
-  gitCloneEntrypoint = pkgs.writeShellApplication {
-    name = "git-clone-entrypoint";
-    runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.curl pkgs.gnutar pkgs.gzip ];
-    text = ''
-      set -euo pipefail
-
-      # CYCLOPS_SOURCE_KIND is set by the orchestrator (see SourceRef::fetch_env).
-      # Unset means git, for orchestrators that predate archive sources.
-      source_kind="''${CYCLOPS_SOURCE_KIND:-git}"
-
-      if [[ "$source_kind" == "archive" ]]; then
-        for var in CYCLOPS_ARCHIVE_URL CYCLOPS_ARCHIVE_SHA256 CYCLOPS_WORKSPACE; do
-          if [[ -z "''${!var:-}" ]]; then
-            echo "[fetch] ERROR: required environment variable $var is not set" >&2
-            exit 1
-          fi
-        done
-
-        if ! [[ "$CYCLOPS_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-          echo "[fetch] ERROR: CYCLOPS_ARCHIVE_SHA256 must be a 64-character lowercase hex digest" >&2
-          exit 1
-        fi
-        if [[ "$CYCLOPS_ARCHIVE_URL" != https://* ]]; then
-          echo "[fetch] ERROR: CYCLOPS_ARCHIVE_URL must be https, got: $CYCLOPS_ARCHIVE_URL" >&2
-          exit 1
-        fi
-
-        echo "[fetch] purl:    ''${CYCLOPS_SOURCE_PURL:-<none>}"
-        echo "[fetch] archive: $CYCLOPS_ARCHIVE_URL"
-        echo "[fetch] sha256:  $CYCLOPS_ARCHIVE_SHA256"
-        echo "[fetch] dest:    $CYCLOPS_WORKSPACE"
-
-        archive="$(mktemp /tmp/cyclops-archive.XXXXXX)"
-        curl --fail --silent --show-error --location --proto '=https' \
-          --output "$archive" "$CYCLOPS_ARCHIVE_URL"
-
-        # Verify before extracting: nothing from an unverified archive ever
-        # reaches the workspace.
-        actual="$(sha256sum "$archive" | cut -d' ' -f1)"
-        if [[ "$actual" != "$CYCLOPS_ARCHIVE_SHA256" ]]; then
-          echo "[fetch] ERROR: sha256 mismatch: expected $CYCLOPS_ARCHIVE_SHA256, got $actual" >&2
-          rm -f "$archive"
-          exit 1
-        fi
-        echo "[fetch] sha256 verified"
-
-        # Registry archives (crates.io, npm, PyPI sdists) wrap their contents
-        # in one top-level directory; strip it so /workspace is the package root.
-        mkdir -p "$CYCLOPS_WORKSPACE"
-        tar --extract --gzip --file "$archive" \
-          --directory "$CYCLOPS_WORKSPACE" \
-          --strip-components=1 \
-          --no-same-owner --no-same-permissions
-        rm -f "$archive"
-
-        echo "[fetch] done — workspace ready at $CYCLOPS_WORKSPACE"
-        exit 0
-      fi
-
-      if [[ "$source_kind" != "git" ]]; then
-        echo "[clone] ERROR: unknown CYCLOPS_SOURCE_KIND: $source_kind" >&2
-        exit 1
-      fi
-
-      required_vars=(
-        CYCLOPS_REPO_URL
-        CYCLOPS_COMMIT_SHA
-        CYCLOPS_WORKSPACE
-      )
-      for var in "''${required_vars[@]}"; do
-        if [[ -z "''${!var:-}" ]]; then
-          echo "[clone] ERROR: required environment variable $var is not set" >&2
-          exit 1
-        fi
-      done
-
-      if ! [[ "$CYCLOPS_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-        echo "[clone] ERROR: CYCLOPS_COMMIT_SHA must be a full 40-character SHA, got: $CYCLOPS_COMMIT_SHA" >&2
-        exit 1
-      fi
-
-      echo "[clone] repo:   $CYCLOPS_REPO_URL"
-      echo "[clone] commit: $CYCLOPS_COMMIT_SHA"
-      echo "[clone] dest:   $CYCLOPS_WORKSPACE"
-
-      export GIT_CONFIG_NOSYSTEM=1
-      export HOME=/tmp
-
-      git config --global --add safe.directory "$CYCLOPS_WORKSPACE"
-
-      mkdir -p "$CYCLOPS_WORKSPACE"
-
-      # A private repository: the orchestrator mounts the credential as files, and git is told to ask this
-      # script for it, so it is in no URL, no environment variable and no process argument. The script holds
-      # no secret itself; it reads the files when git asks.
-      if [[ -n "''${CYCLOPS_GIT_CREDENTIALS_DIR:-}" ]]; then
-        askpass="$(mktemp /tmp/git-askpass.XXXXXX)"
-        cat > "$askpass" <<'ASKPASS'
-#!${pkgs.bash}/bin/bash
-case "$1" in
-  Username*) cat "$CYCLOPS_GIT_CREDENTIALS_DIR/username" ;;
-  *) cat "$CYCLOPS_GIT_CREDENTIALS_DIR/password" ;;
-esac
-ASKPASS
-        chmod 700 "$askpass"
-        export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
-        echo "[clone] using the build's credential"
-      fi
-
-      echo "[clone] cloning (partial)..."
-      git clone \
-        --no-checkout \
-        --filter=blob:none \
-        --depth=1 \
-        "$CYCLOPS_REPO_URL" \
-        "$CYCLOPS_WORKSPACE"
-
-      cd "$CYCLOPS_WORKSPACE"
-
-      echo "[clone] fetching commit $CYCLOPS_COMMIT_SHA..."
-      git fetch \
-        --depth=1 \
-        origin \
-        "$CYCLOPS_COMMIT_SHA" \
-        || {
-          echo "[clone] direct SHA fetch unsupported — fetching full default branch..."
-          git fetch --unshallow origin
-        }
-
-      echo "[clone] checking out $CYCLOPS_COMMIT_SHA..."
-      git checkout "$CYCLOPS_COMMIT_SHA"
-
-      # The source is pinned content, so its history goes. An instrumented pipeline records which commit and tree
-      # it built and needs the repository, so the orchestrator asks for it to stay.
-      if [[ "''${CYCLOPS_KEEP_GIT:-}" == "1" ]]; then
-        echo "[clone] keeping .git for the pipeline"
-      else
-        rm -rf "$CYCLOPS_WORKSPACE/.git"
-      fi
-
-      echo "[clone] done — workspace ready at $CYCLOPS_WORKSPACE"
-    '';
-  };
 
   orchestratorContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs;
-    inputs           = healthcheckInputs;
-    configNixPath    = ./container-orchestrator.nix;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
+    configNixPath    = ./container.nix;
     extraDerivations = [ orchestrator ];
   };
-
-  schedulerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs;
-    inputs           = healthcheckInputs;
-    configNixPath    = ./container-scheduler.nix;
-    extraDerivations = [ analysisScheduler ];
-  };
-
-  cloneContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
-    configNixPath    = ./container.nix;
-    extraDerivations = [ gitCloneEntrypoint ];
-  };
-
 in
 {
-  inherit orchestrator analysisScheduler gitCloneEntrypoint;
-  orchestratorImage  = orchestratorContainer.image;
-  schedulerImage     = schedulerContainer.image;
-  cloneImage         = cloneContainer.image;
+  inherit orchestrator;
+  image = orchestratorContainer.image;
+  # An S3-compatible store for the jobs' logs, for a cluster that has none.
+  objectStoreImage = import ./object-store-image.nix { inherit pkgs; };
 }

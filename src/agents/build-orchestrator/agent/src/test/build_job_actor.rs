@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 /// Integration tests for BuildJobActor.
 ///
 /// These tests exercise the full actor lifecycle using a controllable mock
@@ -63,7 +86,7 @@ mod build_job_actor {
 
         fn fixed_handle() -> BackendJobHandle {
             BackendJobHandle {
-                name: "cyclops-build-test".to_string(),
+                name: "build-test".to_string(),
                 uid: "test-container-id-0000".to_string(),
             }
         }
@@ -185,14 +208,15 @@ mod build_job_actor {
             repo_mappings: vec![RepoMapping {
                 repo_url: repo_url.to_string(),
                 pipeline_image: Some(image.to_string()),
-            }],
+            ..Default::default()
+        }],
             log: LogConfig {
                 format: "json".to_string(),
                 level: "info".to_string(),
             },
             storage: StorageConfig {
                 endpoint: "http://localhost:9000".to_string(),
-                bucket: "cyclops-artifacts".to_string(),
+                bucket: "build-artifacts".to_string(),
                 region: "us-east-1".to_string(),
             },
         })
@@ -238,6 +262,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -286,6 +311,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -328,6 +354,7 @@ mod build_job_actor {
             publisher: Arc::new(MockPublisher::new()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -371,6 +398,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -423,6 +451,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -481,7 +510,7 @@ mod build_job_actor {
             },
             storage: StorageConfig {
                 endpoint: "http://localhost:9000".to_string(),
-                bucket: "cyclops-artifacts".to_string(),
+                bucket: "build-artifacts".to_string(),
                 region: "us-east-1".to_string(),
             },
         });
@@ -493,6 +522,7 @@ mod build_job_actor {
             publisher: Arc::new(MockPublisher::new()),
             config,
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)

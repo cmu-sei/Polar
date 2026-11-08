@@ -1,0 +1,378 @@
+#!/usr/bin/env nu
+
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/tests/charts.nu
+#
+# What the hand-written service charts tell their pods: Neo4j's server certificate and the ACE job's
+# client certificate come from the credentials agent, not from cert-issuer. Neither is a bootstrap identity,
+# so cert-issuer will not sign either on its token alone once the floor is enforced
+# (docs/architecture/cert-issuer-isolation.md). And cert-issuer's own chart gives it what the agent builder
+# needs: its declared settings, its own token, the probe. Rendered the way render.nu renders them.
+#
+#   nu infra/tests/charts.nu
+
+use std/assert
+use ../registry.nu [node_registry]
+
+const INFRA = (path self | path dirname | path dirname)
+const OBSERVER = "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+# Not the default, so a chart that has it from anywhere but its context is found out.
+const CREDENTIALS_AGENT = "credentials-agent.polar-test.serviceaccount.cluster.local"
+
+def render [chart: string, extra: record] {
+    let out = (mktemp --directory)
+    let context = ({
+        chart_dir: ($INFRA | path join "layers/2-services" $chart)
+        output_dir: $out
+        overrides: ($INFRA | path join "targets/local-minimal/overrides.dhall")
+        target_dir: ($INFRA | path join "targets/local-minimal")
+        enable_tls: true
+        polarInitImage: "polar-init:test"
+        neo4jBoltAddr: "polar-db-svc.polar-graph.svc.cluster.local:7687"
+        certIssuerUrl: "https://cert-issuer.polar.svc.cluster.local:8443"
+        certIssuerAudience: "polar-cert-issuer-neo4j.local"
+        credentialsObserverUrl: $OBSERVER
+        credentialsAgentIdentity: $CREDENTIALS_AGENT
+    } | merge $extra)
+    let r = (^nu ($INFRA | path join "layers/2-services" $chart "main.nu") ($context | to nuon) | complete)
+    if $r.exit_code != 0 { error make { msg: $"rendering ($chart) failed: ($r.stderr)" } }
+    $out
+}
+
+# The env of the polar-init container in the first document that has one.
+def init_env [file: string] {
+    open --raw $file
+    | split row "\n---\n"
+    | each {|d| $d | from yaml }
+    | each {|doc|
+        let pod = ($doc | get -o spec.template.spec)
+        if $pod == null { null } else {
+            $pod | get -o initContainers | default [] | where name == "polar-init" | get -o 0.env
+        }
+    }
+    | compact
+    | first
+}
+
+def value_of [vars: list, name: string] { $vars | where name == $name | get -o 0.value }
+
+# The pod spec of the first document in a rendered file that has one.
+def pod_of [file: string] {
+    open --raw $file | split row "\n---\n" | each {|d| $d | from yaml | get -o spec.template.spec } | compact | first
+}
+
+# Whether polar-init in a rendered pod trusts cert-issuer's CA as the mounted polar-ca file, and the pod mounts it.
+def pins_the_ca [file: string] {
+    let pod = (pod_of $file)
+    let init = ($pod.initContainers | where name == "polar-init" | first)
+    assert equal (value_of $init.env "POLAR_INIT_CA_CERT") "/etc/polar-ca/ca.pem"
+    let mount = ($init.volumeMounts | where mountPath == "/etc/polar-ca" | first)
+    assert equal ($pod.volumes | where name == $mount.name | first | get configMap.name) "polar-ca"
+}
+
+# cert-issuer's chart, as render.nu renders it: the floor from the catalog (none here), whether it is enforced.
+def render_cert_issuer [enforced: bool] {
+    render cert-issuer { floor: [], floorEnforced: $enforced, identityLifetimeOverrides: [] }
+}
+
+# The pod spec of cert-issuer's Deployment.
+def cert_issuer_pod [out: string] {
+    open --raw ($out | path join "cert-issuer-deployment.yaml") | from yaml | get spec.template.spec
+}
+
+def cert_issuer_settings [out: string] {
+    open --raw ($out | path join "cert-issuer-configmap.yaml") | from yaml | get data
+}
+
+# The pod spec of a catalog workload as render-catalog.nu renders it for local-minimal, from a stand-in scaffold (the
+# real ones are asked of the images on a cluster); the pod's containers do not depend on what the scaffold says.
+def catalog_pod [name: string] {
+    let scaffolds = (mktemp --directory)
+    let out = (mktemp --directory)
+    {
+        agent: { name: $name, purpose: "a stand-in" }, requires: [], shutdown_budget_minimum_secs: 30, commands: []
+        runtime: [], topics: [], sections: []
+    } | to json | save --force ($scaffolds | path join $"($name).json")
+    let r = (with-env { POLAR_SCAFFOLD_DIR: $scaffolds } {
+        do { ^nu ($INFRA | path join "render-catalog.nu") local-minimal $out --only $name } | complete
+    })
+    if $r.exit_code != 0 {
+        rm -rf $scaffolds $out
+        error make { msg: $"the render of ($name) failed: ($r.stderr | lines | last 5 | str join '; ')" }
+    }
+    let docs = (open --raw ($out | path join $"($name).yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+    rm -rf $scaffolds $out
+    $docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first | get spec.template.spec
+}
+
+def main [] {
+    # The charts' Dhall reads the node registry from the environment, which render.nu sets; these render a chart without it.
+    $env.POLAR_NODE_REGISTRY = (node_registry local-minimal)
+    let tests = {
+        # docs/architecture/deployments.md, step 3: the move to Deployments restarts a pod in place by a container's
+        # restart rule, which the schema's Kubernetes types have from dhall-kubernetes 1.35.
+        "the schema's containers take a restart rule, for agents that restart in place": {
+            let file = (mktemp --suffix ".dhall")
+            ([
+                $"let k = ($INFRA)/schema/kubernetes.dhall"
+                "in  k.Container::{"
+                "    , name = \"agent\""
+                "    , restartPolicyRules = Some"
+                "      [ { action = \"RestartAllContainers\""
+                "        , exitCodes = None { operator : Text, values : Optional (List Natural) }"
+                "        }"
+                "      ]"
+                "    }"
+            ] | str join "\n") | save --force $file
+            let r = (do { ^dhall-to-yaml --file $file } | complete)
+            rm $file
+            assert equal $r.exit_code 0 $r.stderr
+            assert equal ($r.stdout | from yaml | get restartPolicyRules) [{ action: "RestartAllContainers" }]
+        }
+
+        # docs/architecture/deployments.md, step 4: a pod that restarts in place removes its containers, and their logs with
+        # them. A container that fails keeps its last log lines as its termination message, in the pod's status.
+        "a failed container's last log lines are its termination message, in every pod that restarts in place": {
+            let policy = "FallbackToLogsOnError"
+            # an agent, with the custody daemon and polar-init
+            let agent = (catalog_pod jira-observer)
+            let containers = [...$agent.initContainers ...$agent.containers]
+            assert equal ($containers | get name) ["polar-custody" "polar-init" "jira-observer"]
+            for c in $containers {
+                assert equal ($c.terminationMessagePolicy? | default null) $policy $c.name
+            }
+            # cert-issuer, of the `ca` kind, which has no polar-init
+            let issuer = (catalog_pod cert-issuer | get containers.0)
+            assert equal ($issuer.terminationMessagePolicy? | default null) $policy $issuer.name
+            # polar-init in a hand chart
+            let ace = (pod_of ((render ace {}) | path join "ace.yaml"))
+            let init = ($ace.initContainers | where name == "polar-init" | first)
+            assert equal ($init.terminationMessagePolicy? | default null) $policy "ace's polar-init"
+        }
+
+        # docs/architecture/authority-model.md, "Multi-instance workloads": the template marks a multi-instance workload's
+        # object, which the rules read, and leaves every other unmarked; a Deployment and a run's Job alike.
+        "a multi-instance workload's object is marked, and any other is not": {
+            use ../rules.nu [INSTANCES_ANNOTATION, is_multi_instance]
+            let workload = {|instances, job|
+                let expr = $"let k = ($INFRA)/schema/kubernetes.dhall sha256:2086df2178fdb83a08bd4ca89c951f12e4ce16d3cc1441005fcda943a028bb8c
+                    in \(($INFRA)/schema/functions.dhall\).workloadOf
+                      { name = \"build-job\", namespace = \"polar\", job = ($job)
+                      , instances = < one | many >.($instances)
+                      , pod = k.PodSpec::{ containers = [ k.Container::{ name = \"build-job\" } ] } }"
+                let r = ($expr | ^dhall-to-yaml --quoted | complete)
+                if $r.exit_code != 0 { error make { msg: $r.stderr } }
+                $r.stdout | from yaml
+            }
+            let none = "None { backoff_limit : Natural, ttl_after_finished_secs : Natural }"
+            let job = "Some { backoff_limit = 1, ttl_after_finished_secs = 60 }"
+            for case in [[$none "Deployment"] [$job "Job"]] {
+                let many = (do $workload "many" $case.0)
+                assert equal $many.kind $case.1
+                assert (is_multi_instance $many) $"($case.1) many"
+                assert equal ($many.metadata.annotations | get $INSTANCES_ANNOTATION) "many"
+                let one = (do $workload "one" $case.0)
+                assert (not (is_multi_instance $one)) $"($case.1) one"
+                assert ($one.metadata.annotations | get -o $INSTANCES_ANNOTATION | is-empty) "one is unmarked"
+            }
+        }
+
+        # docs/architecture/deployments.md, step 4: ace, a pod with polar-init, restarts in place, one pod at a time.
+        "the ACE job is a Deployment that restarts in place": {
+            use ../rules.nu [in_place_problems]
+            let out = (render ace {})
+            let docs = (open --raw ($out | path join "ace.yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+            let ace = ($docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first)
+            assert equal $ace.kind "Deployment"
+            assert equal (in_place_problems [$ace]) []
+            # the Service still selects its pod
+            let svc = ($docs | where kind == "Service" | first)
+            assert equal $svc.spec.selector { name: $ace.metadata.name }
+            assert equal ($ace.spec.template.metadata.labels | get name) $ace.metadata.name
+        }
+
+        "Neo4j's server certificate is requested from the credentials agent": {
+            let out = (render neo4j {})
+            let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
+            assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
+            assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            # whose signature on a session offer it believes, as render.nu has it from the catalog
+            assert equal (value_of $vars "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") $CREDENTIALS_AGENT
+            # nothing in the pod is told where cert-issuer is
+            assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
+        }
+
+        # docs/architecture/placement.md: Neo4j is the writers' (the maintainer, 2026-10-28), placed only on a target that
+        # declares the pool, with both the selector and the toleration; a target that lacks the pool refuses it.
+        "Neo4j goes to the writers' node where the target declares the pool, and nowhere in particular otherwise": {
+            let placed = (render neo4j { placement: { pools: ["core" "observers" "writers"] } })
+            let pod = (open ($placed | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            assert equal $pod.nodeSelector { "polar.dev/pool": "writers" }
+            assert equal $pod.tolerations [{ key: "polar.dev/pool", operator: "Equal", value: "writers", effect: "NoSchedule" }]
+            for extra in [{} { placement: null }] {
+                let plain = (open ((render neo4j $extra) | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+                assert equal ($plain.nodeSelector? | default null) null
+                assert equal ($plain.tolerations? | default null) null
+            }
+            let refused = (try { render neo4j { placement: { pools: ["core"] } }; null } catch {|e| $e.msg })
+            assert ($refused != null) "a target without the writers' pool"
+            assert ($refused | str contains "writers") $refused
+        }
+
+        # The pod's fsGroup does not reach a volume on host-path storage (local-path, as minikube has it): Kubernetes
+        # leaves the folder as the provisioner made it, and Neo4j, which is not root, cannot write there. The last init
+        # container, as root, gives each of its claimed volumes to the user Neo4j runs as, after the others wrote theirs.
+        "Neo4j's volumes belong to the user it runs as before it starts": {
+            let pod = (open ((render neo4j {}) | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            let neo4j = ($pod.containers | first)
+            let owner = $"($neo4j.securityContext.runAsUser):($neo4j.securityContext.runAsGroup)"
+            let claimed = ($pod.volumes | where {|v| $v.persistentVolumeClaim? != null } | get name)
+            let mounts = ($neo4j.volumeMounts | where name in $claimed)
+            assert equal ($mounts | length) 3 "data, logs and certificates"
+            let last = ($pod.initContainers | last)
+            assert equal $last.securityContext.runAsUser 0
+            let script = ([...($last.command? | default []) ...($last.args? | default [])] | str join " ")
+            for m in $mounts {
+                assert (($last.volumeMounts | where name == $m.name and mountPath == $m.mountPath) | is-not-empty) $"($m.name) at ($m.mountPath)"
+                assert ($script | str contains $"chown -R ($owner) ") $script
+                assert ($script | str contains $m.mountPath) $"($m.mountPath) in: ($script)"
+            }
+        }
+
+        # In the image /var/lib/neo4j is root's and has no run directory, so Neo4j said "Failed to write PID file" at every
+        # start. An emptyDir is its group's, the pod's fsGroup, which Neo4j runs in.
+        "Neo4j's run directory, where its configuration puts it, is an emptyDir of its own": {
+            let out = (render neo4j {})
+            let conf = (open --raw ($out | path join "neo4j-configmap.yaml") | from yaml | get data | get "neo4j.conf")
+            let run = ($conf | lines | where {|l| $l | str starts-with "server.directories.run=" } | first | str replace "server.directories.run=" "")
+            let pod = (open ($out | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            let mount = (($pod.containers | first).volumeMounts | where mountPath == $run)
+            assert equal ($mount | length) 1 $"a mount at ($run)"
+            let volume = ($pod.volumes | where name == $mount.0.name | first)
+            assert (($volume.emptyDir? | default null) != null) $"($volume.name) is an emptyDir"
+            assert equal $pod.securityContext.fsGroup ($pod.containers | first).securityContext.runAsGroup
+        }
+
+        "Neo4j still asks for the server certificate it did and runs no escrow bootstrap": {
+            let out = (render neo4j {})
+            let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))
+            assert ($text | str contains "server:/etc/neo4j-tls:ecdsa-p256:")
+            let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
+            assert (($vars | where name == "POLAR_INIT_ESCROW_BOOTSTRAP") | is-empty)
+            assert (($vars | where name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP") | is-empty)
+        }
+
+        "Neo4j's configuration reaches its ConfigMap exactly, whatever characters it has": {
+            # It is written into a Dhall string on the way, where a quote ends the string, a backslash starts an
+            # escape and ${ starts an interpolation.
+            let dir = (mktemp --directory)
+            mkdir ($dir | path join "conf")
+            let conf = "# a \"quoted\" word, a back\\slash, a ${brace} and a $dollar\nserver.x=1\n"
+            $conf | save --force ($dir | path join "conf/neo4j-ssl.conf")
+            let out = (render neo4j { target_dir: $dir })
+            let map = (open --raw ($out | path join "neo4j-configmap.yaml") | from yaml)
+            assert equal ($map | get data | get "neo4j.conf") $conf
+        }
+
+        "cert-issuer's settings reach it one declared variable each, and nothing names the file it read before": {
+            let out = (render_cert_issuer true)
+            let keys = (cert_issuer_settings $out | columns | sort)
+            assert equal $keys ([
+                CERT_ISSUER_BIND_ADDR CERT_ISSUER_BOOTSTRAP CERT_ISSUER_CA_CERT_PATH CERT_ISSUER_CA_KEY_PATH
+                CERT_ISSUER_CA_PROVISIONING CERT_ISSUER_DEFAULT_LIFETIME_SECS CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES
+                CERT_ISSUER_INTERNAL_CALLERS CERT_ISSUER_ISSUERS CERT_ISSUER_SERVER_IDENTITY
+                CERT_ISSUER_SERVER_LIFETIME_SECS CERT_ISSUER_SERVICE_LIFETIME_SECS CERT_ISSUER_USER_LIFETIME_SECS
+            ] | sort)
+            # An agent's escrow certificate outlives its pods: a year, as an account's certificate.
+            assert equal (cert_issuer_settings $out | get CERT_ISSUER_SERVICE_LIFETIME_SECS) "31536000"
+            for key in [CERT_ISSUER_ISSUERS CERT_ISSUER_BOOTSTRAP CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES] {
+                cert_issuer_settings $out | get $key | from json
+            }
+            let container = (cert_issuer_pod $out | get containers.0)
+            assert equal ($container | get envFrom.0.configMapRef.name) "cert-issuer-config"
+            assert (($container.env | where name == "CERT_ISSUER_CONFIG") | is-empty)
+            assert (not (open --raw ($out | path join "cert-issuer-deployment.yaml") | str contains "/etc/cert-issuer"))
+        }
+
+        "cert-issuer's floor holds its own entry when it is enforced, and is unset, the open floor, when it is not": {
+            let floor = (cert_issuer_settings (render_cert_issuer true) | get CERT_ISSUER_BOOTSTRAP | from json)
+            let own = ($floor | where workload == "system:serviceaccount:polar:cert-issuer")
+            assert equal ($own | length) 1
+            assert equal ($own.0.cert_type) "CLIENT"
+            assert equal ($own.0.groups) ["cassini-client"]
+            assert equal ($own.0.names) []
+            assert (not ((cert_issuer_settings (render_cert_issuer false)) | columns | any {|c| $c == "CERT_ISSUER_BOOTSTRAP" }))
+        }
+
+        "cert-issuer's pod has its own token, for its audience, and the probe and health every builder agent has": {
+            let pod = (cert_issuer_pod (render_cert_issuer true))
+            let token = ($pod.volumes | where name == "sa-token" | get 0.projected.sources.0.serviceAccountToken)
+            assert equal $token.audience "polar-cert-issuer-neo4j.local"
+            let container = ($pod.containers.0)
+            assert equal (value_of $container.env "CERT_ISSUER_OWN_TOKEN") "/workspace/token"
+            assert (($container.volumeMounts | where name == "sa-token" and mountPath == "/workspace") | is-not-empty)
+            assert equal ($container.livenessProbe.exec.command) ["polar-healthcheck"]
+            assert equal (value_of $container.env "POLAR_HEALTH_CERTS") (value_of $container.env "TLS_CLIENT_CERT")
+            # cert-issuer writes the CA it signs under beside its own certificate, as the cassini capability names it,
+            # not over the CA's own file, which is on a read-only Secret.
+            assert equal (value_of $container.env "TLS_CA_CERT") "/etc/tls/certs/ca.pem"
+            let tls = ($container.volumeMounts | where mountPath == "/etc/tls/certs" | get 0.name)
+            assert (($pod.volumes | where name == $tls | get 0 | get -o emptyDir) != null)
+            assert equal (value_of $container.env "POLAR_CAPABILITIES") "cassini"
+        }
+
+        "Neo4j's and the ACE job's polar-init trust cert-issuer's CA as a mounted file": {
+            pins_the_ca ((render neo4j {}) | path join "neo4j-statefulset.yaml")
+            pins_the_ca ((render ace {}) | path join "ace.yaml")
+        }
+
+        "the ACE job's client certificate is requested from the credentials agent": {
+            let out = (render ace {})
+            let vars = (init_env ($out | path join "ace.yaml"))
+            assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
+            assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            assert equal (value_of $vars "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") $CREDENTIALS_AGENT
+            assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
+        }
+    }
+
+    let results = ($tests | transpose name body | each {|t|
+        try {
+            do $t.body
+            { name: $t.name, error: null }
+        } catch {|e|
+            { name: $t.name, error: $e.msg }
+        }
+    })
+
+    for r in $results {
+        if $r.error == null { print $"  ok    ($r.name)" } else { print -e $"  FAIL  ($r.name): ($r.error)" }
+    }
+
+    let failed = ($results | where error != null | length)
+    if $failed > 0 {
+        print -e $"($failed) of ($results | length) failed"
+        exit 1
+    }
+    print $"all ($results | length) passed"
+}

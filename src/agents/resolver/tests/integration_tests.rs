@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 // tests/integration_tests.rs
 
 use oci_client::{
@@ -54,7 +77,7 @@ async fn push_minimal_image(registry_host: &str, repo: &str, tag: &str) -> Strin
     let config_data = b"{}".to_vec();
 
     let config = Config {
-        data: config_data,
+        data: config_data.into(),
         media_type: "application/vnd.oci.image.config.v1+json".to_string(),
         annotations: None,
     };
@@ -155,37 +178,6 @@ async fn distinct_tags_produce_distinct_digests() {
 // ---------------------------------------------------------------------------
 // Pure-function unit tests (no container needed)
 // ---------------------------------------------------------------------------
-
-/// registry_from_image_ref extracts the hostname component from a fully
-/// qualified image reference and returns None for Docker Hub short refs.
-#[test]
-fn registry_from_image_ref_extracts_hostname() {
-    fn registry_from_image_ref(uri: &str) -> Option<String> {
-        let first = uri.split('/').next()?;
-        let has_dot = first.contains('.');
-        let has_port = first.contains(':') && uri.contains('/');
-        if has_dot || has_port {
-            Some(first.to_string())
-        } else {
-            None
-        }
-    }
-
-    // Fully qualified with dot — hostname present.
-    assert_eq!(
-        registry_from_image_ref("ghcr.io/myorg/myimage:latest"),
-        Some("ghcr.io".into())
-    );
-    // Host:port with path — hostname present.
-    assert_eq!(
-        registry_from_image_ref("localhost:5000/myimage:tag"),
-        Some("localhost:5000".into())
-    );
-    // Bare name:tag with no slash — not a hostname.
-    assert_eq!(registry_from_image_ref("myimage:latest"), None);
-    // Docker Hub two-part ref — "library" has no dot or port, not a hostname.
-    assert_eq!(registry_from_image_ref("library/ubuntu"), None);
-}
 
 /// build_registry_candidates must not generate any http:// variants.
 #[test]

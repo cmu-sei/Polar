@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! Execution: the `BuildJob` — what ran, where, and how it ended.
 //!
 //! Reported by whatever ran the job: the build orchestrator (Cyclops), or an
@@ -29,9 +52,10 @@ use polar::graph::controller::{
     GraphOp, GraphValue, IntoGraphKey, Property,
     rel::{BUILT_BY, IS},
 };
-use polar::graph::nodes::builds::BuildNodeKey;
+use polar::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
 use polar::graph::nodes::git::GitNodeKey;
 use polar::{BackendIdentity, PackageAnalysisStartedPayload, StageOutcome};
+use tracing::warn;
 
 fn job(build_id: &str) -> BuildNodeKey {
     BuildNodeKey::BuildJob {
@@ -113,15 +137,19 @@ pub fn started(
 
     // Optional: GitLab-sourced events may not know their runner at start time.
     if let Some(backend) = backend {
-        ops.push(edge(
-            job(&build_id),
-            "EXECUTED_IN",
-            BuildNodeKey::BackendJob {
-                node_label: backend.node_label,
-                identity_props: backend.identity_props,
-            },
-            vec![Property("at".into(), string(observed_at))],
-        ));
+        // The label and the property names are written into Cypher, so the identity refuses any that are not
+        // plain identifiers: such a backend is left unlinked, not written.
+        match BackendJobIdentity::new(backend.node_label, backend.identity_props) {
+            Ok(identity) => ops.push(edge(
+                job(&build_id),
+                "EXECUTED_IN",
+                BuildNodeKey::BackendJob(identity),
+                vec![Property("at".into(), string(observed_at))],
+            )),
+            Err(e) => {
+                warn!(build_id, error = %e, "backend job identity refused — no EXECUTED_IN edge")
+            }
+        }
     }
 
     // Type hierarchy, as with (OCIArtifact)-[:IS]->(Artifact) for artifacts.
@@ -293,5 +321,5 @@ pub fn analysis_started(p: PackageAnalysisStartedPayload, observed_at: &str) -> 
         ("archive_sha256".into(), p.archive_sha256.into()),
         ("observed_at".into(), observed_at.into()),
     ];
-    vec![GraphOp::RawQuery { cypher, params }]
+    vec![GraphOp::RawMergeWrite { cypher, params }]
 }

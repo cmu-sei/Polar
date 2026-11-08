@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # Polar Justfile
 #
 # Host-side recipes: build images, run containers, dev workflow
@@ -18,11 +39,38 @@ _nix_flags := if verbose == "true" { "-L" } else { "--log-format bar-with-logs" 
 
 _taskfile := "/workspace/agent-task.json"
 
+# The target whose registry the image and registry recipes use: its own, in the cluster, through a forward they start
+# (infra/cluster-registry.nu). POLAR_TARGET, else local-minimal; `just target=sandbox-local image cassini` for another.
+# `just target= images-push ...` pushes to POLAR_REGISTRY instead (default localhost:5000, such as `just registry-host-up`'s).
+target := env_var_or_default('POLAR_TARGET', 'local-minimal')
+_target_flag := if target == "" { "" } else { "--target " + target }
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 # List all available recipes
 default:
     @just --list
+
+# ── Helpers (private) ─────────────────────────────────────────────────────────
+
+# Load a docker-archive build result into the host podman.
+# No-ops when podman is unavailable (e.g. inside the dev container, where
+# podman-in-podman is explicitly not wanted and images reach the cluster through
+# its registry instead: `just image <name>`), or when POLAR_SKIP_LOAD is set. This lets the
+# per-service build recipes run unchanged in both the dev container and on the
+# host — in the container they build only; on the host they also load.
+_load result:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${POLAR_SKIP_LOAD:-}" ]; then
+        echo "POLAR_SKIP_LOAD set — skipping load of {{result}}"
+        exit 0
+    fi
+    if ! command -v {{_runtime}} >/dev/null 2>&1; then
+        echo "{{_runtime}} not found — skipping load of {{result}} (build-only)"
+        exit 0
+    fi
+    {{_runtime}} load -i "{{result}}"
 
 # ── Agent containers ──────────────────────────────────────────────────────────
 
@@ -43,39 +91,17 @@ agent-container gpu='rocm':
     esac
     echo "Building agent container ($target) for {{platform}}..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.$target" -o result-agent-container
-    podman load -i result-agent-container
+    just _load result-agent-container
 
-# Build every package — binaries, all containers, TLS certs.
-# Use this to verify the full build after disruptive changes.
-build-all:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.default"               -o result-binaries
-    nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer"          -o result-dev-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.ciContainer"           -o result-ci-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"        -o result-agent-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"    -o result-agent-container-rocm
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan"  -o result-agent-container-vulkan
-    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts"              -o result-tls-certs
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniImage"          -o result-cassini
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniProducerImage"  -o result-harness-producer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniSinkImage"      -o result-harness-sink
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabObserverImage"   -o result-gitlab-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabConsumerImage"   -o result-gitlab-consumer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeObserverImage"     -o result-kube-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeConsumerImage"     -o result-kube-consumer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiObserverImage"  -o result-openapi-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiProcessorImage" -o result-openapi-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerProcessorImage" -o result-scheduler-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerObserverImage"  -o result-scheduler-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraObserverImage"     -o result-jira-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraProcessorImage"    -o result-jira-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
-    nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
-    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage"        -o result-git-server
+# Use this to verify the full build after disruptive changes. The table's images are built by infra/images.nu (the
+# images-build recipe, first); the rest are what the table does not hold: the workspace binaries and the CI and agent containers.
+# Build every image in infra/images.nuon, then the binaries and the containers it does not list
+build-all: images-build
+    nix build {{_nix_flags}} ".#packages.{{platform}}.default"              -o result-binaries
+    nix build {{_nix_flags}} ".#packages.{{platform}}.ciContainer"          -o result-ci-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"       -o result-agent-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"   -o result-agent-container-rocm
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan" -o result-agent-container-vulkan
 
 # ── Dev container ─────────────────────────────────────────────────────────────
 
@@ -83,368 +109,7 @@ build-all:
 dev-container:
     echo "Building dev container ({{platform}})..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer" -o result-dev-container
-    podman load -i result-dev-container
-
-# Build cert-issuer and cert-client images
-# Usage: just cert-issuer          (all)
-#        just cert-issuer server
-#        just cert-issuer client
-cert-issuer target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.server" -o result-cert-issuer-server
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
-            podman load -i result-cert-issuer-image
-            ;;
-        serverImage)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
-            podman load -i result-cert-issuer
-            ;;
-        client)
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
-    esac
-
-# ── Cassini ───────────────────────────────────────────────────────────────────
-
-# Build cassini images
-# Usage: just cassini           (all images)
-#        just cassini server
-#        just cassini producer
-#        just cassini sink
-#        just cassini client
-cassini target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.cassini"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.cassiniImage"  -o result-cassini-image
-            nix build {{_nix_flags}} "$base.producerImage" -o result-cassini-producer-image
-            nix build {{_nix_flags}} "$base.sinkImage"     -o result-cassini-sink-image
-            podman load -i result-cassini-image
-            podman load -i result-cassini-producer-image
-            podman load -i result-cassini-sink-image
-            ;;
-        server)
-            nix build {{_nix_flags}} "$base.cassiniImage" -o result-cassini-image
-            podman load -i result-cassini-image
-            ;;
-        producer)
-            nix build {{_nix_flags}} "$base.producerImage" -o result-cassini-producer-image
-            podman load -i result-cassini-producer-image
-            ;;
-        sink)
-            nix build {{_nix_flags}} "$base.sinkImage" -o result-cassini-sink-image
-            podman load -i result-cassini-sink-image
-            ;;
-        client)
-            nix build {{_nix_flags}} "$base.clientBin" -o result-cassini-client
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, server, producer, sink, or client." && exit 1 ;;
-    esac
-
-# ── GitLab agents ─────────────────────────────────────────────────────────────
-
-# Build gitlab agent images
-# Usage: just gitlab            (all)
-#        just gitlab observer
-#        just gitlab consumer
-gitlab target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.gitlabAgent"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-gitlab-observer
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-gitlab-consumer
-            podman load -i result-gitlab-observer
-            podman load -i result-gitlab-consumer
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-gitlab-observer
-            podman load -i result-gitlab-observer
-            ;;
-        consumer)
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-gitlab-consumer
-            podman load -i result-gitlab-consumer
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
-    esac
-
-# ── Kubernetes agents ─────────────────────────────────────────────────────────
-
-# Build kubernetes agent images
-# Usage: just kube              (all)
-#        just kube observer
-#        just kube consumer
-kube target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.kubeAgent"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-kube-observer
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-kube-consumer
-            podman load -i result-kube-observer
-            podman load -i result-kube-consumer
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-kube-observer
-            podman load -i result-kube-observer
-            ;;
-        consumer)
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-kube-consumer
-            podman load -i result-kube-consumer
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
-    esac
-
-# ── Jira agents ───────────────────────────────────────────────────────────────
-# Build jira agent images
-# Usage: just jira              (all)
-#        just jira observer
-#        just jira processor
-jira target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.jiraAgent"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
-            nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
-            podman load -i result-jira-observer
-            podman load -i result-jira-processor
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
-            podman load -i result-jira-observer
-            ;;
-        processor)
-            nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
-            podman load -i result-jira-processor
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
-    esac
-
-# ── Local dev PKI / cert-issuer stack ─────────────────────────────────────────
-#
-# One-time bootstrap sequence (run once per CA rotation):
-#
-#   just setup-cert-issuer                    # generates CA, OIDC keypair, JWKS, tokens, config
-#
-# Then, in separate terminals (or tmux panes):
-#
-#   just run-jwks                     # Terminal A: JWKS HTTP server (port 8081)
-#   just run-cert-issuer                   # Terminal B: cert-issuer gRPC server (port 8443)
-#
-# Then issue all three certs and copy Neo4j layout:
-#
-#   just issue-certs                    # issues cassini, neo4j, and agent certs
-#
-# Print env vars for a given workload:
-#
-#   just dev-env cassini
-#   just dev-env agent
-#   just dev-env neo4j
-#
-# Tokens expire after 1h. Refresh without rotating the CA:
-#
-#   just                     # safe to re-run; preserves dev/tmp/
-#
-# Rotate the CA root (invalidates all outstanding certs):
-#
-#   just dev-clean ca && just dev-setup
-
-# Run the one-shot dev environment setup (CA, OIDC keypair, JWKS, tokens, config).
-# Safe to re-run — preserves dev/tmp/. Delete dev/tmp/ explicitly to rotate the CA.
-setup-cert-issuer:
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer-setup
-
-# Start the JWKS HTTP server on port 8081.
-# Run in a dedicated terminal — this is a foreground process.
-# Must be running before dev-issuer starts.
-run-jwks:
-    python3 -m http.server 8081 --directory dev
-
-# Start the cert-issuer on port 8443.
-# Run in a dedicated terminal — this is a foreground process.
-# Requires dev-jwks to be running (issuer fetches JWKS on startup).
-run-cert-issuer:
-    export CERT_ISSUER_CONFIG=dev/config.json
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer
-
-# Issue all three dev certs (cassini server, neo4j server, agent client).
-# Requires both dev-jwks and dev-issuer to be running in separate terminals.
-# Tokens expire after 1h; re-run dev-setup first if they've expired.
-issue-dev-certs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # TODO: add healthcheck
-    # Fail fast if the issuer is not reachable rather than producing a confusing TLS error.
-    # if ! curl -sf --max-time 2 http://127.0.0.1:8443 > /dev/null 2>&1; then
-    #     echo "ERROR: cert-issuer not responding on :8443 — run 'just dev-issuer' in another terminal first."
-    #     exit 1
-    # fi
-
-    echo "--- Issuing Cassini server cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-cassini \
-        --cert-dir dev/certs/server \
-        --cert-type server \
-        --key-algorithm ecdsa-p256
-
-    echo "--- Issuing Neo4j server cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-neo4j \
-        --cert-dir dev/certs/neo4j-server \
-        --cert-type server \
-        --key-algorithm ecdsa-p256 \
-        --extra-san neo4j.polar.svc.cluster.local \
-        --extra-san polar-db-svc.polar.svc.cluster.local
-
-    for p in https bolt; do
-        mkdir -p "dev/certs/neo4j/$p/trusted"
-        cp dev/certs/neo4j-server/cert.pem "dev/certs/neo4j/$p/public.crt"
-        cp dev/certs/neo4j-server/key.pem  "dev/certs/neo4j/$p/private.key"
-        cp dev/certs/neo4j-server/ca.pem   "dev/certs/neo4j/$p/trusted/ca.pem"
-        echo "  populated dev/certs/neo4j/$p/"
-    done
-
-    echo "--- Issuing agent client cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-agent \
-        --cert-dir dev/certs/client \
-        --key-algorithm ecdsa-p256
-
-    echo "--- Verifying EKUs ---"
-    for cert in dev/certs/server/cert.pem dev/certs/neo4j-server/cert.pem dev/certs/client/cert.pem; do
-        echo "  $cert:"
-        openssl x509 -in "$cert" -noout -text | grep -A5 'Extended Key Usage' | sed 's/^/    /'
-    done
-
-    echo "Done."
-
-
-
-# ── Git agents ────────────────────────────────────────────────────────────────
-
-# Build git agent images
-# Usage: just git-agents        (all)
-#        just git-agents observer
-#        just git-agents consumer
-git-agents target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.gitAgent"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.observerImage"  -o result-git-observer
-            nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            podman load -i result-git-observer
-            podman load -i result-git-processor
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-git-observer
-            podman load -i result-git-observer
-            ;;
-        processor)
-            nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            podman load -i result-git-processor
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
-    esac
-
-# ── Build processor + resolver ──────────────────────────────────────────────
-# Build the consolidated build-processor and resolver images.
-# Usage: just build-agents           (all)
-#        just build-agents processor
-#        just build-agents resolver
-build-agents target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
-            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-            podman load -i result-build-processor
-            podman load -i result-resolver
-            ;;
-        processor)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
-            podman load -i result-build-processor
-            ;;
-        resolver)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-            podman load -i result-resolver
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, processor, or resolver." && exit 1 ;;
-    esac
-
-# ── OpenAPI agents ────────────────────────────────────────────────────────────
-
-# Build openapi agent images
-# Usage: just openapi               (all)
-#        just openapi observer
-#        just openapi processor
-openapi target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.webAgent"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.observerImage"  -o result-openapi-observer
-            nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
-            podman load -i result-openapi-observer
-            podman load -i result-openapi-processor
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-openapi-observer
-            podman load -i result-openapi-observer
-            ;;
-        processor)
-            nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
-            podman load -i result-openapi-processor
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
-    esac
-
-# ── Scheduler agents ──────────────────────────────────────────────────────────
-
-# Build scheduler agent images
-# Usage: just scheduler         (all)
-#        just scheduler processor
-#        just scheduler observer
-scheduler target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.scheduler"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.processorImage" -o result-scheduler-processor
-            nix build {{_nix_flags}} "$base.observerImage"  -o result-scheduler-observer
-            podman load -i result-scheduler-processor
-            podman load -i result-scheduler-observer
-            ;;
-        processor)
-            nix build {{_nix_flags}} "$base.processorImage" -o result-scheduler-processor
-            podman load -i result-scheduler-processor
-            ;;
-        observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-scheduler-observer
-            podman load -i result-scheduler-observer
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, processor, or observer." && exit 1 ;;
-    esac
+    just _load result-dev-container
 
 # ── Workspace binaries ────────────────────────────────────────────────────────
 
@@ -452,42 +117,27 @@ scheduler target='all':
 agents:
     nix build {{_nix_flags}} ".#packages.{{platform}}.default" -o polar
 
-# Build TLS certificates for local testing
-tls:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts" -o result-tls-certs
-    ls -alh result-tls-certs
-
-# Build the nu-init infrastructure container
-nu-init:
-    echo "Building nu-init container..."
-    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init
-    podman load -i result-nu-init
-
-polar-init:
-    echo "Building polar-init container..."
-    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage" -o result-polar-init
-    podman load -i result-polar-init
-
-git-server:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
-    podman load -i result-git-server-image
-
-# Update the nix-container-lib pin in container-lib.dhall and re-render all container.nix files.
+# Pin the Dhall side of nix-container-lib (src/containers/container-lib.dhall) to the commit flake.lock names for its Nix side,
+# with the hash Dhall computes for it, then re-render every container config that imports it. Each rendered .nix opens with the
+# license banner of the .dhall it comes from, as src/flake/Justfile's renders do. Review with git diff.
+# Pin container-lib.dhall to flake.lock's nix-container-lib and re-render the container configs
 update-dhall-pins:
     #!/usr/bin/env bash
     set -euo pipefail
     COMMIT=$(nix flake metadata --json | jq -r '.locks.nodes["nix-container-lib"].locked.rev')
-    DHALL_HASH=$(dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/${COMMIT}/dhall/prelude.dhall")
-    echo "nix-container-lib commit: $COMMIT"
-    echo "Dhall prelude hash:       $DHALL_HASH"
-    echo "Updating src/containers/container-lib.dhall..."
-    echo "Re-rendering container.nix files..."
-    for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v 'container-lib.dhall'); do
-        DIR="$(dirname $f)"
-        BASE="$(basename $f .dhall)"
-        pushd "$DIR" > /dev/null
-        dhall-to-nix < "$BASE.dhall" > "$BASE.nix" && echo "  rendered: $DIR/$BASE.nix" || echo "  skipped:  $f"
-        popd > /dev/null
+    URL="https://raw.githubusercontent.com/daveman1010221/nix-container-lib/${COMMIT}/dhall/prelude.dhall"
+    echo "+ dhall hash <<< $URL"
+    HASH=$(dhall hash <<< "$URL")
+    echo "  nix-container-lib $COMMIT, Dhall prelude $HASH"
+    LIB=src/containers/container-lib.dhall
+    echo "+ pinning $LIB"
+    sed -i -E "s|https://raw\.githubusercontent\.com/daveman1010221/nix-container-lib/[0-9a-f]{40}/dhall/prelude\.dhall|$URL|; s|^([[:space:]]*)sha256:[0-9a-f]{64}$|\1$HASH|" "$LIB"
+    for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v '^src/containers/container-lib.dhall$'); do
+        DIR="$(dirname "$f")"; BASE="$(basename "$f" .dhall)"
+        echo "+ (cd $DIR && dhall-to-nix < $BASE.dhall > $BASE.nix)"
+        # Rendered aside and then written into the existing file, which keeps its mode; a failed render leaves it as it was.
+        ( cd "$DIR" && { sed -n '/^--/!q; s/^--/#/p' "$BASE.dhall"; dhall-to-nix < "$BASE.dhall"; } > "$BASE.nix.new" && cat "$BASE.nix.new" > "$BASE.nix" && rm "$BASE.nix.new" ) \
+            || { rm -f "$DIR/$BASE.nix.new"; echo "  FAILED: $f" >&2; exit 1; }
     done
     echo "Done. Review with: git diff"
 
@@ -564,10 +214,6 @@ run-dev-container:
         -v $HOME/.local/share/atuin:/root/.local/share/atuin \
         -p 2222:2223 \
         localhost/polar-dev:latest
-
-# Start the local docker-compose stack
-run-compose:
-    podman compose -f src/conf/docker-compose.yml up -d
 
 # ── Inside container: LLM server ──────────────────────────────────────────────
 
@@ -767,524 +413,448 @@ fmt:
 
 # Run static analysis tools
 static-analysis:
-    sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
+    nu scripts/pipeline/static-tools.nu --manifest-path src/agents/Cargo.toml
 
-# Run CI pipeline locally
-ci:
-    podman run --rm \
-        --name polar-dev \
-        --env-file=ci.env \
-        --env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
-        --env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \
-        --env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
-        --user 0 \
-        --userns=keep-id \
-        -v $(pwd):/workspace:rw \
-        -p 2222:2223 \
-        polar-dev:0.1.0 \
-        bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
+# Also run by static-analysis. Exit 1: a source is gone; exit 2: github.com could not be reached, nothing was checked.
+# Check that every git source in a Cargo.lock or flake.lock is fetchable anonymously at its pinned revision
+check-sources:
+    nu infra/check-sources.nu
 
-# Install neo4j mTLS client cert into the browser's NSS certificate store.
-# Fetches fresh certs from the running cluster and imports into Librewolf.
-# Usage: just neo4j-install-certs
-neo4j-install-certs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Waiting for a Running Neo4j-client pod..."
-    AGENT_POD=""
-    AGENT_CONTAINER=""
-    for i in $(seq 1 30); do
-        for LABEL in kube-consumer jira-processor build-processor git-repo-consumer polar-gitlab-consumer artifact-linker polar-scheduler; do
-            CANDIDATE=$(kubectl get pod -n polar -l name="$LABEL" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-            if [ -n "$CANDIDATE" ]; then
-                AGENT_POD="$CANDIDATE"
-                AGENT_CONTAINER="$LABEL"
-                break 2
-            fi
-        done
-        sleep 2
-    done
-    if [ -z "$AGENT_POD" ]; then
-        echo "ERROR: no Running Neo4j-client pod found after 60s" >&2
-        exit 1
-    fi
-    echo "Fetching certs from $AGENT_POD (container: $AGENT_CONTAINER)..."
-    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
-    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
-    kubectl exec -n polar-graph polar-neo4j-0 -- cat /var/lib/neo4j/certificates/https/trusted/ca.pem > /tmp/neo4j-ca.pem
-    echo "Bundling PKCS12..."
-    openssl pkcs12 -export \
-        -out /tmp/neo4j-client.p12 \
-        -inkey /tmp/neo4j-client-key.pem \
-        -in /tmp/neo4j-client-cert.pem \
-        -certfile /tmp/neo4j-ca.pem \
-        -name "Polar Neo4j Client" \
-        -passout pass:changeit
-    NSS_DB=~/.librewolf/$(ls ~/.librewolf/ | head -1)
-    echo "Importing into Librewolf NSS db at $NSS_DB..."
-    nix-shell -p nssTools --run "pk12util -i /tmp/neo4j-client.p12 -d '$NSS_DB' -W changeit"
-    nix-shell -p nssTools --run "certutil -M -n 'Polar Internal CA' -t 'CT,,' -d '$NSS_DB'"
-    echo "Done. Port-forward and browse to https://localhost:7473"
+# Import your claimed user certificate (and the Polar CA) into Librewolf.
+# Reads ~/.config/polar-admin/<username>.{crt,key} and ca.pem, which `claim`
+# and `bootstrap` wrote. Close Librewolf first so the NSS db is not locked.
+#
+# First removes the old Polar certificates (with their private keys) from the
+# store: a new cluster has a new CA, so the old CA and every client certificate
+# it issued are dead and would otherwise stack up. A certificate counts as old
+# if its nickname starts with "Polar ", or its subject is this user's or the
+# CA's, or its issuer is the CA's name. Matching is by subject and issuer, not
+# nickname alone, because NSS gives a new certificate for the same subject the
+# old one's nickname (usually "Imported Certificate"). Nothing else is touched.
+#
+# Usage: just user-cert-install            (defaults to the current user)
+#        just user-cert-install alice
+# POLAR_NSS_DB=<profile dir> overrides which profile is used (for testing on a copy).
+user-cert-install username=env_var('USER'):
+    bash infra/user-cert-install.sh {{username}}
 
-# Load a neo4j dump file into the cluster database.
-# Scales down neo4j, runs a loader pod as root, chowns the data, scales back up,
-# and resets the neo4j password to match the cluster secret.
-# Usage: just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+# ── polar-admin-grant wrappers ───────────────────────────────────────────────
+#
+# The observer URL is the port-forward from `just port-forwards-up`. Override
+# for another cluster:  POLAR_OBSERVER_URL=https://... just admin-claim ...
+# (product code has no default; this is only the dev convenience.)
+
+_admin_dir    := env_var('HOME') + "/.config/polar-admin"
+# The container runtime: POLAR_CONTAINER_RUNTIME, else podman or docker, whichever is installed (Polar provides neither).
+_runtime      := env_var_or_default('POLAR_CONTAINER_RUNTIME', `if command -v podman >/dev/null 2>&1; then echo podman; elif command -v docker >/dev/null 2>&1; then echo docker; else echo podman; fi`)
+# The admin tool: polar-admin-grant on PATH (see `nu infra/tools.nu install`), else built from this checkout.
+_admin_grant  := `if command -v polar-admin-grant >/dev/null 2>&1; then echo polar-admin-grant; else echo "cargo run -q --manifest-path $(pwd)/src/agents/Cargo.toml -p polar-admin-grant --"; fi`
+_observer_url := env_var_or_default('POLAR_OBSERVER_URL', 'http://localhost:8081')
+
+# Step 1: fetch the CA, then redeem the one-shot bootstrap credential.
+# Writes ~/.config/polar-admin/{ca.pem,bootstrap-admin.crt,bootstrap-admin.key}.
+admin-bootstrap:
+    mkdir -p {{_admin_dir}}
+    chmod 700 {{_admin_dir}}
+    kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' > {{_admin_dir}}/ca.pem
+    {{_admin_grant}} \
+        --observer-url {{_observer_url}} bootstrap \
+        --cert-out {{_admin_dir}}/bootstrap-admin.crt \
+        --key-out  {{_admin_dir}}/bootstrap-admin.key
+
+# Step 2: provision a normal admin account, signed with the bootstrap cert.
+# The account can provision accounts, grant permissions and revoke certificates (c:revoke), and sign the two kinds of
+# document the agents act on: a configuration (c:update-configuration) and a command (c:run-command). Capabilities
+# are fixed when the certificate is issued, so an account provisioned before one was added to this
+# list does not have it; provision another, or reissue.
+# The bootstrap certificate is spent by the first provisioning, so a later account is provisioned
+# by an account that already holds c:provision-account: name it as the signer.
+# Usage: just admin-provision alice alice@example.org
+#        just admin-provision operator ops@example.org alice
+admin-provision username email signer="bootstrap-admin":
+    {{_admin_grant}} \
+        --cert {{_admin_dir}}/{{signer}}.crt \
+        --key  {{_admin_dir}}/{{signer}}.key \
+        --observer-url {{_observer_url}} provision-account \
+        --username {{username}} --email {{email}} \
+        --permission p:u2s:polar-db-svc.polar-graph.svc.cluster.local \
+        --permission p:u2s:credentials-agent-observer.polar.svc.cluster.local \
+        --capability c:provision-account --capability c:grant \
+        --capability c:update-configuration --capability c:run-command \
+        --capability c:update-policy --capability c:update-runtime \
+        --capability c:update-groups --capability c:revoke \
+        --reason user-onboarding
+
+# Step 3: claim the provisioned account. Generates the keypair locally (the
+# key never leaves this machine) and writes ~/.config/polar-admin/<username>.{crt,key}.
+# Usage: just admin-claim alice alice@example.org
+admin-claim username email:
+    {{_admin_grant}} \
+        --observer-url {{_observer_url}} claim \
+        --username {{username}} --email {{email}} \
+        --cert-out {{_admin_dir}}/{{username}}.crt \
+        --key-out  {{_admin_dir}}/{{username}}.key
+
+# Stops Neo4j (suspending the Flux Kustomization that applies it, on a gitops target), loads the dump with Neo4j's own image
+# and user, and starts it again; the users and the password are kept (infra/neo4j-load.nu says how).
+#   just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+# Replace the cluster graph's neo4j database with a dump
 neo4j-load-dump dump_path:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f "{{dump_path}}" ]; then
-        echo "ERROR: dump file not found: {{dump_path}}"
-        exit 1
-    fi
-    NEO4J_PASSWORD=$(kubectl get secret -n polar-graph neo4j-secret -o jsonpath='{.data.secret}' | base64 -d | cut -d'/' -f2)
-    echo "Scaling neo4j down..."
-    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=0
-    kubectl wait --for=delete pod/polar-neo4j-0 -n polar-graph --timeout=120s 2>/dev/null || true
-    echo "Launching loader pod..."
-    kubectl run -n polar-graph neo4j-loader \
-        --image=neo4j:5.26.2 \
-        --restart=Never \
-        --overrides='{"spec":{"securityContext":{"runAsUser":0,"runAsGroup":0},"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"polar-db-data"}},{"name":"logs","persistentVolumeClaim":{"claimName":"polar-db-logs"}}],"containers":[{"name":"neo4j-loader","image":"neo4j:5.26.2","command":["/bin/sh","-c","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/var/lib/neo4j/data"},{"name":"logs","mountPath":"/var/lib/neo4j/logs"}]}]}}'
-    kubectl wait --for=condition=Ready pod/neo4j-loader -n polar-graph --timeout=60s
-    echo "Copying dump file..."
-    cat "{{dump_path}}" | kubectl exec -i -n polar-graph neo4j-loader -- /bin/sh -c 'cat > /var/lib/neo4j/data/neo4j.dump'
-    echo "Loading dump..."
-    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c \
-        'mkdir -p /var/lib/neo4j/tmp && NEO4J_HOME=/var/lib/neo4j NEO4J_CONF=/var/lib/neo4j/conf JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/var/lib/neo4j/tmp" /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/neo4j-admin database load neo4j --from-path=/var/lib/neo4j/data --overwrite-destination=true'
-    echo "Fixing ownership..."
-    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c 'chown -R 7474:7474 /var/lib/neo4j/data && rm /var/lib/neo4j/data/neo4j.dump'
-    echo "Cleaning up loader pod..."
-    kubectl delete pod -n polar-graph neo4j-loader
-    echo "Scaling neo4j back up..."
-    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=1
-    echo "Waiting for neo4j to be ready..."
-    kubectl wait --for=condition=Ready pod/polar-neo4j-0 -n polar-graph --timeout=180s
-    echo "Waiting for neo4j to finish initializing..."
-    sleep 15
-    echo "Resetting neo4j password..."
-    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
-        -u neo4j -p neo4j \
-        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED" || \
-    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
-        -u neo4j -p "$NEO4J_PASSWORD" \
-        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
-    echo "Done. Run 'just neo4j-install-certs' to update browser certs."
+    nu infra/neo4j-load.nu {{dump_path}}
+
+# The image recipes are infra/images.nu (its header says what each stage needs), and print the command they run. Those that
+# push use the target's registry (`target`, above): the one in its cluster, through a forward they start.
+
+# Build the nix images (archives under result/). Needs only nix: no registry, no cluster.
+# With no names, builds every image.  just images-build kube-observer
+images-build *names:
+    nu infra/images.nu build {{ if names == "" { "--all" } else { names } }}
+
+# Build and push to the target's registry. With no names, every image.
+images-push *names:
+    nu infra/images.nu push {{ if names == "" { "--all" } else { names } }} {{_target_flag}}
+
+# Copy third-party images from upstream into the target's registry. With no names, every one.
+images-mirror *names:
+    nu infra/images.nu mirror {{ if names == "" { "--all" } else { names } }} {{_target_flag}}
+
+# Every stage for the named images: build, push, mirror.
+#   just image kube-observer jira-observer
+image +names:
+    nu infra/images.nu sync {{names}} {{_target_flag}}
+
+# What `cluster-load` did (import an image into the node), for any cluster: build it and push it to the cluster's registry.
+alias cluster-load := image
+
+# Every stage for every image in infra/images.nuon.
+images-all:
+    nu infra/images.nu sync --all {{_target_flag}}
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
-# Full cluster startup sequence:
+# Full startup sequence. Steps marked [dev] are for developers using
+# nix-usernetes locally; users bringing their own cluster skip those and
+# need their images in a registry the cluster can pull from.
 #
-#   cd ~/Documents/projects/nix-usernetes
-#   just load-node-image   # after every nix build
-#   just reset && just up && just init && just kubeconfig
-#   export KUBECONFIG=$(pwd)/kubeconfig
+#   1. [dev] Fresh cluster
+#        cd ~/Documents/projects/nix-usernetes
+#        just reset && just up && just init && just kubeconfig
+#        set -gx KUBECONFIG (pwd)/kubeconfig      # fish
+#        cd ~/Documents/projects/Polar
 #
-#   cd ~/Documents/projects/Polar
-#   just cluster-install-cert-manager
-#   just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply
+#   2. Bring it up, from the Polar repo root with KUBECONFIG set. --dev builds and
+#      loads images into the local registry; only the steps the target needs run:
+#        nu infra/up.nu local-minimal --dev --user <user> --email <email>
+#      It renders, applies namespaces, bootstraps the CA, applies the manifests,
+#      waits for the core pods, starts the needed port-forwards and runs the admin
+#      flow. It pauses for the browser import and the Neo4j password, and is safe
+#      to re-run to resume. The individual recipes (admin-bootstrap, admin-provision,
+#      admin-claim, user-cert-install, port-forwards-up) still work on their own.
 
 _u7s_dir      := env_var('HOME') + "/Documents/projects/nix-usernetes"
 _u7s_kubeconf := _u7s_dir + "/kubeconfig"
-
-# Start the local cluster
-cluster-up:
-    just -f {{_u7s_dir}}/Justfile up
-
-# Stop the local cluster
-cluster-down:
-    just -f {{_u7s_dir}}/Justfile down
-
-# Initialize the cluster (first time only)
-cluster-init:
-    just -f {{_u7s_dir}}/Justfile init
-
-# Install cert-manager into the cluster. Required before deploying Polar.
-# cert-manager is a Polar concern — not permanent cluster infrastructure.
-cluster-install-cert-manager:
-    just -f {{_u7s_dir}}/Justfile install-cert-manager
 
 # Wipe all cluster state
 cluster-reset:
     just -f {{_u7s_dir}}/Justfile reset
 
-# Show cluster status
+# Delete the pods that failed. A Job with restartPolicy Never and a large backoffLimit keeps every
+# failed pod for as long as it runs, so an agent that cannot start (the Jira observer with no Jira
+# to reach) leaves hundreds in a weekend, and their logs and records fill the node until it taints
+# itself with disk pressure and nothing schedules. Safe to run at any time: running pods are untouched.
+cluster-prune-failed:
+    kubectl delete pods -A --field-selector=status.phase=Failed --wait=false
+
+# Show cluster status. Respects whatever KUBECONFIG is already set.
 cluster-status:
-    KUBECONFIG={{_u7s_kubeconf}} kubectl get nodes
-    KUBECONFIG={{_u7s_kubeconf}} kubectl get pods -A
+    kubectl get nodes
+    kubectl get pods -A
 
-# Open a shell inside the cluster node
-cluster-shell:
-    podman exec -it u7s bash
+# Start detached, auto-restarting port-forwards for local dev (neo4j
+# browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI,
+# credentials-agent observer). Fully detached via setsid (nohup without it, on macOS) -- survives
+# terminal close, does not appear in `jobs`. Logs go to /tmp/pf-*.log; stop
+# with `just port-forwards-down`.
+#
+# The observer is on local 8081, not 8080: keycloak already owns 8080, and
+# a forward that loses that race silently talks to the wrong service.
+#
+# `registry` (a target whose registry is in the cluster, infra/cluster-registry.nu)
+# starts only when named, since it takes local 5000, where the host registry
+# listens: POLAR_REGISTRY_FORWARD_PORT picks another port. `deploy` (a gitops
+# target's deployment git server, infra/deploy-repo.nu) starts only when named
+# too, on local 9443 or POLAR_DEPLOY_FORWARD_PORT.
+port-forwards-up *only:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # No arguments: start every forward. Otherwise only the named ones
+    # (neo4j keycloak ace jaeger observer git).
+    ONLY=" {{only}} "
+    want() { [ "$ONLY" = "  " ] || [[ "$ONLY" == *" $1 "* ]]; }
+    start_pf() {
+        local name="$1" ns="$2" svc="$3" ports="$4" logfile="$5"
+        want "$name" || return 0
+        local loop="while true; do kubectl port-forward -n $ns svc/$svc $ports > $logfile 2>&1; sleep 1; done"
+        # macOS has no setsid; nohup keeps the loop past the terminal's hangup there.
+        if command -v setsid > /dev/null; then
+            setsid bash -c "$loop" < /dev/null > /dev/null 2>&1 &
+        else
+            nohup bash -c "$loop" < /dev/null > /dev/null 2>&1 &
+        fi
+        disown
+        echo "  forward started: $name ($ports)"
+    }
+    start_pf neo4j    polar-graph polar-db-svc                 "7473:7473 7687:7687"   /tmp/pf-neo4j.log
+    start_pf keycloak polar-auth  keycloak-svc                 "8080:8080"             /tmp/pf-keycloak.log
+    start_pf ace      polar       ace-svc                      "8050:8050"             /tmp/pf-ace.log
+    start_pf jaeger   polar       jaeger-svc                   "4318:4318 16686:16686" /tmp/pf-jaeger.log
+    start_pf observer polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
+    start_pf git      polar       polar-git-server             "8443:8443"             /tmp/pf-polar-git-server.log
+    if [[ "$ONLY" == *" registry "* ]]; then
+        start_pf registry polar-registry registry "${POLAR_REGISTRY_FORWARD_PORT:-5000}:5000" /tmp/pf-registry.log
+    fi
+    if [[ "$ONLY" == *" deploy "* ]]; then
+        start_pf deploy polar-deploy polar-deploy-git "${POLAR_DEPLOY_FORWARD_PORT:-9443}:9443" /tmp/pf-deploy.log
+    fi
+    echo "Logs: /tmp/pf-*.log"
 
-# Switch kubectl context to local cluster
+# The polar-git-server, as the git CLI reaches it from this machine: the cluster's own name for it,
+# which is the name on its certificate, mapped to the port-forward (just port-forwards-up git).
+# git checks the certificate's name against the URL's host, so the URL keeps the cluster name and
+# curl is told where that name lives (http.curloptResolve, git 2.37 or newer).
+_git_host := "polar-git-server.polar.svc.cluster.local"
+
+# The git configuration that makes `git` present your Polar certificate to the Polar git server.
+# Prints it; changes nothing. GIT_SSL_CAINFO in the environment overrides http.sslCAInfo, so unset
+# it (in fish: set -e GIT_SSL_CAINFO) or use `just polar-git-clone`, which does it for one command.
+# Usage: just polar-git-config            (as the current user)
+#        just polar-git-config alice
+polar-git-config user=env_var('USER'):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="$HOME/.config/polar-admin"
+    for f in "{{user}}.crt" "{{user}}.key" "ca.pem"; do
+        [ -f "$DIR/$f" ] || { echo "ERROR: missing $DIR/$f" >&2; exit 1; }
+    done
+    U="https://{{_git_host}}:8443/"
+    echo "git config --global 'http.$U.sslCAInfo' $DIR/ca.pem"
+    echo "git config --global 'http.$U.sslCert' $DIR/{{user}}.crt"
+    echo "git config --global 'http.$U.sslKey' $DIR/{{user}}.key"
+    echo "git config --global 'http.$U.curloptResolve' {{_git_host}}:8443:127.0.0.1"
+    echo
+    echo "Then: git clone ${U}polar-schedules.git"
+    if [ -n "${GIT_SSL_CAINFO:-}" ]; then
+        echo "NOTE: GIT_SSL_CAINFO is set ($GIT_SSL_CAINFO) and overrides http.sslCAInfo." >&2
+    fi
+
+# Clone a repository from the Polar git server with your Polar certificate, for this one command,
+# without touching your git configuration. Needs the port-forward (just port-forwards-up git).
+# Usage: just polar-git-clone polar-schedules
+#        just polar-git-clone polar-schedules ~/work/schedules alice
+polar-git-clone repo dest="" user=env_var('USER'):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="$HOME/.config/polar-admin"
+    for f in "{{user}}.crt" "{{user}}.key" "ca.pem"; do
+        [ -f "$DIR/$f" ] || { echo "ERROR: missing $DIR/$f" >&2; exit 1; }
+    done
+    env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git \
+        -c "http.sslCAInfo=$DIR/ca.pem" \
+        -c "http.sslCert=$DIR/{{user}}.crt" \
+        -c "http.sslKey=$DIR/{{user}}.key" \
+        -c "http.curloptResolve={{_git_host}}:8443:127.0.0.1" \
+        clone "https://{{_git_host}}:8443/{{repo}}.git" {{dest}}
+
+# Ask the Cassini broker in the cluster to shut down in order, over the wire, with the shutdown token
+# from its Secret and your certificate (just user-cert-install). The Job starts a new broker.
+# Usage: just cassini-shutdown            (as the current user)
+#        just cassini-shutdown alice
+cassini-shutdown user=env_var('USER'):
+    nu infra/cassini-shutdown.nu --user {{user}}
+
+# What the secret harness pods say about the credentials agent's secret policy, and whether it held
+# (src/agents/secret-harness). The owner needs two rounds (a minute apart) and the intruder starts after
+# 90 seconds, so run it a few minutes after the pods are up; it exits non-zero until the policy has held.
+secret-harness-results:
+    nu infra/harness.nu
+
+# Run a load-harness plan on the cluster (src/agents/cassini/test; docs/architecture/policy-enforcement.md, stage 5a):
+# each run's sinks, then its producers, as Jobs; the records go to ~/.cache/polar/harness. The target must enable
+# harness-producer and harness-sink (its config.nuon and target.nu say how).
+#        just load-harness-run infra/load-plans/baseline.nuon
+load-harness-run plan target='local-minimal':
+    nu infra/load-harness.nu run {{plan}} --target {{target}}
+
+# The runs in load-harness records, side by side.
+#        just load-harness-compare ~/.cache/polar/harness/baseline-*.nuon
+load-harness-compare +records:
+    nu infra/load-harness.nu compare {{records}}
+
+# Stop all detached port-forwards started by port-forwards-up.
+port-forwards-down:
+    #!/usr/bin/env bash
+    pkill -f "port-forward -n polar-graph svc/polar-db-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/polar-git-server" 2>/dev/null || true
+    pkill -f "port-forward -n polar-registry svc/registry" 2>/dev/null || true
+    pkill -f "port-forward -n polar-deploy svc/polar-deploy-git" 2>/dev/null || true
+    echo "Port-forwards stopped."
+
+# Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization
+# Code + direct-grant enabled for scripted testing), audience mapper
+# scoping tokens to cert-issuer, and a test user. Safe to re-run --
+# every step checks for existence first. Test user credentials are read
+# directly from sops (secrets.sops.yaml / user.sops.yaml), never stored
+# as a Kubernetes Secret -- nothing in the cluster ever consumes them,
+# so there's no reason for them to touch cluster storage at all.
+#
+# Known Keycloak gotchas this script works around (found the hard way):
+#   - kcadm set-password defaults to a *temporary* password, which
+#     attaches a required action and blocks direct-grant login entirely
+#     until resolved -- creating the user with an inline credentials
+#     array (temporary=false) sidesteps this in one step.
+#   - the realm's default User Profile requires email/firstName/lastName;
+#     a user missing any of these fails direct-grant with the generic,
+#     unhelpful "Account is not fully set up" error, indistinguishable
+#     from the temporary-password case without checking both.
+#   - kcadm's `-q` search does a *partial* match by default (e.g.
+#     username=testuser also matches "testuser2") -- every existence
+#     check below passes `-q exact=true` explicitly to avoid a false
+#     "already exists" against an unrelated, similarly-named resource.
+keycloak-bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    KC_NS="polar-auth"
+    KC_URL="http://localhost:8080"
+    KC_REALM="polar"
+    KC_CLIENT_ID="browser-cert-fetcher"
+    KC_AUDIENCE="polar-cert-issuer.local"
+    KC_REDIRECT_URI="http://localhost:8765/callback"
+
+    kc() {
+        kubectl exec -n "$KC_NS" deployment/keycloak -- /opt/keycloak/bin/kcadm.sh "$@"
+    }
+
+    echo "Logging into kcadm..."
+    KC_ADMIN_USER=$(kubectl get secret -n "$KC_NS" keycloak-admin-secret -o jsonpath="{.data.username}" | base64 -d)
+    KC_ADMIN_PASSWORD=$(kubectl get secret -n "$KC_NS" keycloak-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+    kc config credentials --server "$KC_URL" --realm master --user "$KC_ADMIN_USER" --password "$KC_ADMIN_PASSWORD"
+
+    echo "Ensuring realm '$KC_REALM' exists..."
+    REALM_CHECK=$(kc get "realms/$KC_REALM" 2>/dev/null || echo "{}")
+    if [ "$(echo "$REALM_CHECK" | jq -r ".realm // empty")" != "$KC_REALM" ]; then
+        kc create realms -s realm="$KC_REALM" -s enabled=true
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "Ensuring client '$KC_CLIENT_ID' exists..."
+    CLIENT_LIST=$(kc get clients -r "$KC_REALM" -q clientId="$KC_CLIENT_ID" -q exact=true 2>/dev/null || echo "[]")
+    CLIENT_ID_INTERNAL=$(echo "$CLIENT_LIST" | jq -r ".[0].id // empty")
+    if [ -z "$CLIENT_ID_INTERNAL" ]; then
+        kc create clients -r "$KC_REALM" \
+            -s clientId="$KC_CLIENT_ID" \
+            -s publicClient=true \
+            -s standardFlowEnabled=true \
+            -s directAccessGrantsEnabled=true \
+            -s "redirectUris=[\"$KC_REDIRECT_URI\"]" \
+            -s "attributes={\"pkce.code.challenge.method\":\"S256\"}"
+        CLIENT_ID_INTERNAL=$(kc get clients -r "$KC_REALM" -q clientId="$KC_CLIENT_ID" -q exact=true | jq -r ".[0].id")
+        echo "  created (id=$CLIENT_ID_INTERNAL)"
+    else
+        echo "  already exists (id=$CLIENT_ID_INTERNAL)"
+    fi
+
+    echo "Ensuring audience mapper exists..."
+    MAPPERS=$(kc get "clients/$CLIENT_ID_INTERNAL/protocol-mappers/models" -r "$KC_REALM" 2>/dev/null || echo "[]")
+    MAPPER_EXISTS=$(echo "$MAPPERS" | jq -r ".[] | select(.name==\"polar-audience\") | .id // empty")
+    if [ -z "$MAPPER_EXISTS" ]; then
+        kc create "clients/$CLIENT_ID_INTERNAL/protocol-mappers/models" -r "$KC_REALM" \
+            -s name=polar-audience \
+            -s protocol=openid-connect \
+            -s protocolMapper=oidc-audience-mapper \
+            -s "config={\"included.custom.audience\":\"$KC_AUDIENCE\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}"
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "Ensuring test user exists..."
+    TARGET_DIR="infra/targets/local-minimal"
+    SHARED_JSON=$(SOPS_CONFIG="$TARGET_DIR/.sops.yaml" sops --decrypt --output-type json "$TARGET_DIR/secrets.sops.yaml" 2>/dev/null || echo "{}")
+    USER_JSON=$(SOPS_CONFIG="$TARGET_DIR/.user.sops.yaml" sops --decrypt --output-type json "$TARGET_DIR/user.sops.yaml" 2>/dev/null || echo "{}")
+    MERGED_JSON=$(jq -s ".[0] * .[1]" <(echo "$SHARED_JSON") <(echo "$USER_JSON"))
+    KC_TEST_USERNAME=$(echo "$MERGED_JSON" | jq -r ".keycloak_test_username // empty")
+    KC_TEST_PASSWORD=$(echo "$MERGED_JSON" | jq -r ".keycloak_test_password // empty")
+    if [ -z "$KC_TEST_USERNAME" ] || [ -z "$KC_TEST_PASSWORD" ]; then
+        echo "  ERROR: keycloak_test_username/keycloak_test_password not set in secrets.sops.yaml or user.sops.yaml" >&2
+        exit 1
+    fi
+    USER_LIST=$(kc get users -r "$KC_REALM" -q username="$KC_TEST_USERNAME" -q exact=true 2>/dev/null || echo "[]")
+    USER_EXISTS=$(echo "$USER_LIST" | jq -r ".[0].id // empty")
+    if [ -z "$USER_EXISTS" ]; then
+        kc create users -r "$KC_REALM" \
+            -s username="$KC_TEST_USERNAME" \
+            -s enabled=true \
+            -s emailVerified=true \
+            -s firstName=Test \
+            -s lastName=User \
+            -s email="$KC_TEST_USERNAME@polar.local" \
+            -s "credentials=[{\"type\":\"password\",\"value\":\"$KC_TEST_PASSWORD\",\"temporary\":false}]"
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "keycloak-bootstrap: done"
+
+# Regenerate licenses/THIRD_PARTY_LICENSES.md from the agents workspace
+licenses:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=src/agents/Cargo.toml
+    tmp=$(mktemp -d)
+    cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+      | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]' > "$tmp/own-crates.txt"
+    cargo about generate --manifest-path "$manifest" --config licenses/about.toml --format json > "$tmp/about.json"
+    python3 licenses/licenses_md.py "$tmp/about.json" --exclude "$tmp/own-crates.txt" > licenses/THIRD_PARTY_LICENSES.md
+    rm -rf "$tmp"
+
+# Fail if any dependency has a license outside licenses/about.toml's allowlist
+licenses-check:
+    cargo about generate --manifest-path src/agents/Cargo.toml --config licenses/about.toml --format json > /dev/null
+
+# Print nix-usernetes kubeconfig export command (dev convenience only).
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
 
-# Load a nix result or podman image into the cluster containerd
-# Usage: just cluster-load ./result-cassini-image
-#        just cluster-load cassini:latest
-cluster-load image:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -e "{{image}}" ]; then
-        podman exec -i u7s ctr -n k8s.io images import - < "{{image}}"
-    else
-        podman save "{{image}}" | podman exec -i u7s ctr -n k8s.io images import -
-    fi
+_registry_host := "localhost"
+_registry_port := "5000"
 
-_neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-image"
+# Applied with the storage it needs, and forwarded to this machine, which pushes through the forward; up.nu's registry step.
+# Start the target's registry in its cluster (infra/cluster-registry.nu)
+registry-up:
+    nu infra/cluster-registry.nu up {{target}}
 
-# Build all images needed for cluster deployment with correct result symlink names
-cluster-build-all:
-    just cert-issuer all
-    just cassini all
-    just gitlab all
-    just kube all
-    just scheduler all
-    just git-agents all
-    just jira all
-    just openapi all
-    just build-agents all
-    just nu-init
-    just polar-init
+# Whether the target's registry in the cluster runs, and its forward answers.
+registry-status:
+    nu infra/cluster-registry.nu status {{target}}
 
-# Load only the images needed by the local-minimal target:
-# neo4j, cassini, cert-issuer, polar-init, kube observer/consumer, jira observer/processor.
-cluster-load-minimal neo4j_result=_neo4j_result:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    _load() {
-        if [ -e "$1" ]; then
-            echo "Loading $1..."
-            podman exec -i u7s ctr -n k8s.io images import - < "$1"
-        else
-            echo "Skipping $1 (not found)"
-        fi
-    }
-    _tag() {
-        echo "Tagging $1 -> $2"
-        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
-    }
-    # Infrastructure
-    if [ -n "{{neo4j_result}}" ]; then
-        _load "{{neo4j_result}}"
-    fi
-    # Minimal-target images only
-    _load ./result-cassini-image
-    _load ./result-cert-issuer
-    _load ./result-cert-client
-    _load ./result-polar-init
-    _load ./result-kube-observer
-    _load ./result-kube-consumer
-    _load ./result-jira-observer
-    _load ./result-jira-processor
-    _load ./result-nu-init
-    # Retag to match manifest image references
-    _tag docker.io/library/cassini:latest               docker.io/library/cassini:latest
-    _tag docker.io/library/kube-observer:latest          docker.io/library/kube-observer:latest
-    _tag docker.io/library/kube-consumer:latest          docker.io/library/kube-consumer:latest
-    _tag docker.io/library/jira-observer:latest          docker.io/library/jira-observer:latest
-    _tag docker.io/library/jira-processor:latest         docker.io/library/jira-processor:latest
-    _tag docker.io/library/nix-neo4j:latest              docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/cert-issuer:latest             docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest      docker.io/library/polar-cert-client:latest
-    _tag docker.io/library/polar-init:latest             docker.io/library/polar-init:latest
-    _tag docker.io/library/polar-nu-init:latest          docker.io/library/polar-nu-init:latest
-    echo "Minimal images loaded and tagged."
+# For a target that names a registry you bring (no `registry_in_cluster`): a container on localhost:5000, with podman or
+# docker. Push to it with `just target= images-push ...`; your nodes must be able to reach it.
+# Start a registry on this machine
+registry-host-up:
+    {{_runtime}} run -d --name polar-registry -p {{_registry_port}}:{{_registry_port}} docker.io/library/registry:2 2>/dev/null || echo "Container 'polar-registry' already running."
 
-# Build and load all core Polar images into the cluster.
-# All images are loaded directly from nix result symlinks.
-# Usage: just cluster-load-all
-#        just cluster-load-all neo4j_result=../nix-neo4j/result-neo4j-image
-cluster-load-all neo4j_result=_neo4j_result:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    _load() {
-        if [ -e "$1" ]; then
-            echo "Loading $1..."
-            podman exec -i u7s ctr -n k8s.io images import - < "$1"
-        else
-            echo "Skipping $1 (not found)"
-        fi
-    }
-    _tag() {
-        echo "Tagging $1 -> $2"
-        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
-    }
-    _load_podman() {
-        echo "Loading $1 from podman..."
-        if ! podman image exists "$1" 2>/dev/null; then
-            echo "Pulling $1..."
-            podman pull "$1"
-        fi
-        podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
-    }
-    # Infrastructure
-    if [ -n "{{neo4j_result}}" ]; then
-        _load "{{neo4j_result}}"
-    fi
-    # Polar images — all from nix result symlinks
-    _load ./result-cassini-image
-    _load ./result-cert-issuer
-    _load ./result-cert-client
-    _load ./result-harness-producer
-    _load ./result-harness-sink
-    _load ./result-gitlab-observer
-    _load ./result-gitlab-consumer
-    _load ./result-kube-observer
-    _load ./result-kube-consumer
-    _load ./result-git-observer
-    _load ./result-git-processor
-    _load ./result-git-scheduler
-    _load ./result-jira-observer
-    _load ./result-jira-processor
-    _load ./result-openapi-observer
-    _load ./result-openapi-processor
-    _load ./result-resolver
-    _load ./result-scheduler-observer
-    _load ./result-scheduler-processor
-    _load ./result-build-processor
-    _load ./result-nu-init
-    _load ./result-polar-init
-    # Retag to match manifest image references
-    _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
-    _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
-    _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
-    _tag docker.io/library/gitlab-observer:latest               docker.io/library/gitlab-observer:latest
-    _tag docker.io/library/gitlab-consumer:latest               docker.io/library/gitlab-consumer:latest
-    _tag docker.io/library/kube-observer:latest                 docker.io/library/kube-observer:latest
-    _tag docker.io/library/kube-consumer:latest                 docker.io/library/kube-consumer:latest
-    _tag docker.io/library/git-observer:latest                  docker.io/library/git-observer:latest
-    _tag docker.io/library/git-processor:latest                 docker.io/library/git-processor:latest
-    _tag docker.io/library/git-scheduler:latest                 docker.io/library/git-scheduler:latest
-    _tag docker.io/library/jira-observer:latest                 docker.io/library/jira-observer:latest
-    _tag docker.io/library/jira-processor:latest                docker.io/library/jira-processor:latest
-    _tag docker.io/library/openapi-observer:latest              docker.io/library/openapi-observer:latest
-    _tag docker.io/library/openapi-processor:latest             docker.io/library/openapi-processor:latest
-    _tag docker.io/library/scheduler-observer:latest            docker.io/library/scheduler-observer:latest
-    _tag docker.io/library/scheduler-processor:latest           docker.io/library/scheduler-processor:latest
-    _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
-    _tag docker.io/library/oci-resolver:latest                  docker.io/library/oci-resolver:latest
-    _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest             docker.io/library/polar-cert-client:latest
-    _tag docker.io/library/polar-init:latest                    docker.io/library/polar-init:latest
-    echo "Core images loaded and tagged."
+# Stop the registry on this machine
+registry-host-down:
+    {{_runtime}} rm -f polar-registry
 
-# Render manifests for the local cluster.
-# Writes values-active.dhall to select the local values file before rendering.
-# See scripts/render-manifests.sh for the dhall-to-yaml invocation.
-cluster-render:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f src/deploy/local/conf/git.json ]; then
-        echo "ERROR: src/deploy/local/conf/git.json missing. Copy from git.json.example and fill in credentials."
-        exit 1
-    fi
-    for var in NEO4J_TLS_CA_CERT_CONTENT NEO4J_TLS_SERVER_CERT_CONTENT NEO4J_TLS_SERVER_KEY_CONTENT; do
-        if [ -z "${!var:-}" ]; then
-            echo "ERROR: $var is not set. Source example.env and fill in the TLS values."
-            exit 1
-        fi
-    done
-    echo './values.local.dhall' > src/deploy/local/values-active.dhall
-    bash scripts/render-manifests.sh src/deploy/local manifests
-
-# Pull and load the local-path provisioner image into the cluster
-cluster-load-provisioner:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    img="docker.io/rancher/local-path-provisioner:v0.0.35"
-    if ! podman image exists "$img" 2>/dev/null; then
-        echo "Pulling $img..."
-        podman pull "$img"
-    fi
-    echo "Loading $img into cluster..."
-    podman save "$img" | podman exec -i u7s ctr -n k8s.io images import -
-    echo "Done."
-
-# Apply storage infrastructure (local-path provisioner + managed-csi StorageClass)
-cluster-apply-storage: cluster-load-provisioner
-    #!/usr/bin/env bash
-    set -euo pipefail
-    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f src/deploy/local/pki/local-path-provisioner.yaml
-    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f manifests/storage.yaml
-
-# Apply all rendered Polar manifests to the local cluster.
-# Order matters: namespaces and storage must exist before dependent resources.
-# Apply all rendered Polar manifests to the local cluster.
-cluster-apply:
-    nu infra/render.nu local --apply
-
-# ── kind (local cluster) ──────────────────────────────────────────────────────
-
-_kind_cluster  := "polar"
-_kind_config   := "src/conf/kind-cluster.yaml"
-_deploy_local  := "src/deploy/local"
-_manifests_out := "manifests-local"
-
-# Create the local kind cluster (idempotent)
-kind-up:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
-        echo "Cluster '{{_kind_cluster}}' already exists — skipping."
-    else
-        echo "Creating kind cluster '{{_kind_cluster}}'..."
-        kind create cluster --name {{_kind_cluster}} --config {{_kind_config}}
-    fi
-    kubectl cluster-info --context kind-{{_kind_cluster}}
-
-# Tear down the local kind cluster
-kind-down:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
-        kind delete cluster --name {{_kind_cluster}}
-    else
-        echo "No cluster '{{_kind_cluster}}' — nothing to do."
-    fi
-
-# Switch kubectl context to the local kind cluster
-kind-ctx:
-    kubectl config use-context kind-{{_kind_cluster}}
-
-# Show cluster health at a glance
-kind-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== kind clusters ==="
-    kind get clusters
-    echo ""
-    echo "=== nodes ==="
-    kubectl get nodes --context kind-{{_kind_cluster}}
-    echo ""
-    echo "=== pods (all namespaces) ==="
-    kubectl get pods -A --context kind-{{_kind_cluster}}
-
-# Load an image into kind — accepts either a nix result path or a podman image name.
-# Usage: just kind-load ./result-cassini-image
-#        just kind-load cassini:latest
-kind-load image:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -e "{{image}}" ]; then
-        echo "Loading nix result '{{image}}' into kind cluster '{{_kind_cluster}}'..."
-        kind load image-archive {{image}} --name {{_kind_cluster}}
-    else
-        echo "Loading podman image '{{image}}' into kind cluster '{{_kind_cluster}}'..."
-        podman save {{image}} | kind load image-archive /dev/stdin --name {{_kind_cluster}}
-    fi
-
-# Build and load all core Polar images into kind (skips podman entirely).
-# Requires: kind-up, and nix-neo4j result-neo4j-image available at NEO4J_IMAGE_PATH.
-# Usage: just kind-load-all
-#        just NEO4J_IMAGE_PATH=~/projects/nix-neo4j/result-neo4j-image kind-load-all
-kind-load-all neo4j_result='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    load() { just kind-load "$1"; }
-
-    # Infrastructure
-    if [ -n "{{neo4j_result}}" ]; then
-        load "{{neo4j_result}}"
-    else
-        echo "Skipping neo4j — pass neo4j_result=<path> to include it."
-        echo "  e.g. just kind-load-all neo4j_result=../nix-neo4j/result-neo4j-image"
-    fi
-
-    # Cassini
-    just cassini all
-    load ./result-cassini-image
-    load ./result-cassini-producer-image
-    load ./result-cassini-sink-image
-
-    # Scheduler
-    just scheduler all
-    load ./result-scheduler-processor
-    load ./result-scheduler-observer
-
-    echo "Core images loaded. Agent images (gitlab, kube, git, web) load on demand:"
-    echo "  just kind-load-agents gitlab"
-    echo "  just kind-load-agents kube"
-    echo "  etc."
-
-# Build and load a specific agent pair (or all agents) into kind.
-# Usage: just kind-load-agents gitlab
-#        just kind-load-agents kube
-#        just kind-load-agents git
-#        just kind-load-agents web
-#        just kind-load-agents all
-kind-load-agents agent='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    load() { just kind-load "$1"; }
-    case "{{agent}}" in
-        gitlab)
-            just gitlab all
-            load ./result-gitlab-observer
-            load ./result-gitlab-consumer
-            ;;
-        kube)
-            just kube all
-            load ./result-kube-observer
-            load ./result-kube-consumer
-            ;;
-        git)
-            just git-agents all
-            load ./result-git-observer
-            load ./result-git-consumer
-            load ./result-git-scheduler
-            ;;
-        web)
-            just web all
-            load ./result-openapi-observer
-            load ./result-openapi-processor
-            ;;
-        all)
-            just kind-load-agents gitlab
-            just kind-load-agents kube
-            just kind-load-agents git
-            just kind-load-agents web
-            ;;
-        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, or all." && exit 1 ;;
-    esac
-
-# Render Dhall manifests for local kind deployment.
-# Output goes to _manifests_out (gitignored, rebuilt on demand).
-kind-render:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Rendering manifests from {{_deploy_local}} -> {{_manifests_out}}..."
-    rm -rf {{_manifests_out}}
-    bash scripts/render-manifests.sh {{_deploy_local}} {{_manifests_out}}
-    echo "Rendered manifests in {{_manifests_out}}/"
-
-# Apply rendered manifests to the local kind cluster.
-kind-apply:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -d "{{_manifests_out}}" ]; then
-        echo "No manifests found — run 'just kind-render' first."
-        exit 1
-    fi
-    kubectl apply -R -f {{_manifests_out}} --context kind-{{_kind_cluster}}
-
-# Render and apply in one step.
-kind-deploy: kind-render kind-apply
-
-# Port-forward core services to localhost (runs in foreground — use a separate pane).
-# Jaeger UI, Neo4j browser, and Cassini are forwarded.
-# Note: kind's extraPortMappings already handle these for NodePort services;
-# this target is for ClusterIP services or when you want explicit control.
-kind-forward:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Forwarding services (Ctrl-C to stop all)..."
-    kubectl port-forward -n polar     svc/cassini-ip-svc  8080:8080 --context kind-{{_kind_cluster}} &
-    kubectl port-forward -n polar     svc/jaeger-svc     16686:16686 4317:4317 4318:4318 --context kind-{{_kind_cluster}} &
-    kubectl port-forward -n polar-db  svc/polar-db-svc    7474:7474 7687:7687 --context kind-{{_kind_cluster}} &
-    wait
+# Whether the registry on this machine answers
+registry-host-status:
+    curl -sf http://{{_registry_host}}:{{_registry_port}}/v2/ && echo "registry reachable"

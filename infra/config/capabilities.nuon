@@ -1,0 +1,311 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/config/capabilities.nuon
+#
+# What an agent gets by declaring a need. An agent lists capabilities in
+# `needs`; the resolver unions what each one contributes. Nothing here is
+# code: adding a capability means adding an entry here, and an unknown name in
+# `needs` fails the resolver.
+#
+# Each capability answers every facet in facets.nuon (checked by
+# `nu infra/resolve.nu check`):
+#
+#   pod         env: [{ name, value | secret+key, key_of? }]
+#                 key_of: "client" or "server", for a key's file: left out when the
+#                 custody daemon holds the pod's keys (cluster.nuon, `custody`)
+#               volumes: [{ name, secret? | claim? | config_map? }]   (none of them = emptyDir)
+#                 a secret volume may list items: [{ key, path }], the keys it holds and their files
+#               mounts: [{ name, path, read_only }]
+#   identity    certs: [{ dir, volume, read_only, kind?, san?, watch? }]
+#                 dir/volume: where the cert lives; read_only in the agent
+#                 container (polar-init always writes). kind: client (the
+#                 default) or server; san: the name a server certificate carries;
+#                 watch: the files in dir the health check watches for expiry
+#                 (cert.pem by default)
+#   dependency  service, ttl_secs
+#                 service: a key of services.nuon; ttl_secs: minimum remaining
+#                 lifetime of its certificate
+#   init        env: [{ name, value }], mounts: [{ name, path }]
+#                 given to polar-init, besides the certificates it issues
+#   resources   pvcs: [{ name }]   (storage class and size are the cluster's)
+#               sa_token_secret: name of a service-account-token Secret
+#               cluster_roles: [{ name, rules: [{ api_groups, resources, verbs }] }]
+#                 (each role is bound to the workload's ServiceAccount)
+#
+# Text values may use {<service>.dns}, {<service>.port}, {<service>.addr} and
+# {workload}, the workload's own name.
+{
+  cassini: {
+    pod: {
+      env: [
+        { name: "TLS_CA_CERT",         value: "/etc/tls/certs/ca.pem" }
+        { name: "TLS_CLIENT_CERT",     value: "/etc/tls/certs/cert.pem" }
+        # The key of the client certificate: left out when the custody daemon holds it.
+        { name: "TLS_CLIENT_KEY",      value: "/etc/tls/certs/key.pem", key_of: "client" }
+        { name: "BROKER_ADDR",         value: "{cassini.addr}" }
+        { name: "CASSINI_SERVER_NAME", value: "{cassini.dns}" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: false } ] }
+    dependency: { service: "cassini", ttl_secs: 300 }
+    init: {}
+    resources: {}
+  }
+
+  # The agent writes to the graph (Neo4j) over mTLS. The Rust builder's
+  # `.with_graph_write()` requires this. Named for what the code needs, not for
+  # the service that provides it, so a read-only variant can differ later.
+  graph-write: {
+    pod: {
+      env: [
+        { name: "GRAPH_ENDPOINT",    value: "bolt+s://{neo4j.addr}" }
+        { name: "GRAPH_DB",          value: "neo4j" }
+        { name: "GRAPH_USER",        value: "neo4j" }
+        { name: "GRAPH_PASSWORD",    secret: "polar-graph-pw", key: "secret" }
+        { name: "GRAPH_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
+        { name: "GRAPH_CLIENT_KEY",  value: "/etc/tls/certs/key.pem", key_of: "client" }
+        { name: "GRAPH_CA_CERT",     value: "/etc/tls/certs/ca.pem" }
+      ]
+    }
+    # No certificate of its own: the pod presents the one client certificate it has (the identity facet's
+    # /etc/tls/certs) to Neo4j as it does to Cassini. Neo4j accepts any client certificate the Polar CA signed,
+    # so a second one, for the same identity and type with no extra names, said nothing the first did not, and
+    # the credentials agent issues one client certificate per pod instance.
+    identity: {}
+    dependency: { service: "neo4j", ttl_secs: 300 }
+    init: {}
+    resources: {}
+  }
+
+  # The agent reads the graph over mTLS (the state agent, docs/architecture/soft-state.md): the same connection as
+  # graph-write, but its health does not depend on the graph (the builder does not watch it), so it has no
+  # dependency either: polar-init does not wait for Neo4j, and the health check does not watch its certificate. A
+  # read that fails is answered as unavailable, and the asker retries.
+  graph-read: {
+    pod: {
+      env: [
+        { name: "GRAPH_ENDPOINT",    value: "bolt+s://{neo4j.addr}" }
+        { name: "GRAPH_DB",          value: "neo4j" }
+        { name: "GRAPH_USER",        value: "neo4j" }
+        { name: "GRAPH_PASSWORD",    secret: "polar-graph-pw", key: "secret" }
+        { name: "GRAPH_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
+        { name: "GRAPH_CLIENT_KEY",  value: "/etc/tls/certs/key.pem", key_of: "client" }
+        { name: "GRAPH_CA_CERT",     value: "/etc/tls/certs/ca.pem" }
+      ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # The agent reads its own soft state back through the state agent (docs/architecture/soft-state.md): never listed by
+  # hand, the builder adds it to the scaffold's `requires` for an agent that declares a graph read, and starts its state
+  # actor. Nothing in the pod: the questions and answers travel over Cassini. Its dependency is the state agent itself,
+  # a workload, not a service with a certificate to wait for: `resolve.nu check` refuses a target that runs an agent
+  # needing it without running soft-state-observer.
+  soft-state: {
+    pod: {}
+    identity: {}
+    dependency: { workload: "soft-state-observer" }
+    init: {}
+    resources: {}
+  }
+
+  # The agent uses CryptoActor to encrypt payloads and decrypt what was escrowed for it (the Rust
+  # builder's `.with_encryption()`). Opt-in: observers publish without encrypting. The crypto actor
+  # opens what is sealed to the workload's escrow keypair through the custody daemon, so the daemon's
+  # custodian fetches one: only for an agent that needs encryption, and it needs the daemon
+  # (key-custody.md, step 9; policy-enforcement.md, "Decisions", 2026-10-22). The core services (the
+  # credentials agent, which serves the escrow keypair, and the broker, which carries it) do not need
+  # encryption, so they never ask for it.
+  encryption: {
+    pod: {}
+    identity: {}
+    dependency: {}
+    init: { env: [ { name: "POLAR_INIT_ESCROW_BOOTSTRAP", value: "true" } ] }
+    resources: {}
+  }
+
+  # Read access to the Kubernetes API with the workload's own ServiceAccount
+  # token (a Secret, mounted where Kubernetes clients look for it). The Job
+  # leaves automountServiceAccountToken unset because of this mount.
+  kube-api-read: {
+    pod: {
+      # No KUBE_TOKEN: nothing reads it. The client finds the API and the token itself, from the
+      # variables Kubernetes sets in every pod and the mounted service account directory.
+      volumes: [ { name: "{workload}-sa-token", secret: "{workload}-sa-token" } ]
+      mounts: [ { name: "{workload}-sa-token", path: "/var/run/secrets/kubernetes.io/serviceaccount", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {
+      sa_token_secret: "{workload}-sa-token"
+      cluster_roles: [
+        { name: "{workload}-read", rules: [ { api_groups: ["*"], resources: ["*"], verbs: ["get", "list", "watch"] } ] }
+      ]
+    }
+  }
+
+  # State that must outlive the pod, on a persistent volume claim named for the workload and
+  # mounted at /var/lib/<workload>. The claim is created alongside the workload (the storage
+  # class and size are the cluster's, in cluster.nuon). It is not an emptyDir: the credentials
+  # agent keeps its ledger's event log and its escrow keypair here, and losing either is losing
+  # what every secret ever escrowed depends on.
+  persistent-data: {
+    pod: {
+      volumes: [ { name: "{workload}-data", claim: "{workload}-data" } ]
+      mounts: [ { name: "{workload}-data", path: "/var/lib/{workload}", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: { pvcs: [ { name: "{workload}-data" } ] }
+  }
+
+  # polar-init verifies cert-issuer against the Polar CA from its first request, read from the
+  # polar-ca ConfigMap mounted at /etc/polar-ca, and the container has the file too, for an
+  # agent that talks to cert-issuer itself. Without it the CA is fetched once, unverified, and
+  # pinned. Needs a target whose cert-issuer provisions its CA (render.nu checks this).
+  pinned-ca: {
+    pod: {
+      volumes: [ { name: "polar-ca", config_map: "polar-ca" } ]
+      mounts: [ { name: "polar-ca", path: "/etc/polar-ca", read_only: true } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {
+      env: [ { name: "POLAR_INIT_CA_CERT", value: "/etc/polar-ca/ca.pem" } ]
+      mounts: [ { name: "polar-ca", path: "/etc/polar-ca" } ]
+    }
+    resources: {}
+  }
+
+  # cert-issuer's CA, made ahead of time by an operator with cluster-admin rights (`polar-admin-grant bootstrap-ca`), in
+  # the Secret cert-issuer-ca, and only loaded: a missing CA is a startup error, never a reason to make a new root. Its
+  # files are readable by the pod's group alone (0440), and the pod is in that group (the `ca` kind's `fs_group`).
+  # cert-issuer declares these variables itself (`cert-issuer --scaffold`, section cert-issuer).
+  provisioned-ca: {
+    pod: {
+      env: [
+        { name: "CERT_ISSUER_CA_PROVISIONING", value: "provisioned" }
+        { name: "CERT_ISSUER_CA_CERT_PATH",    value: "/home/polar/ca/ca.crt" }
+        { name: "CERT_ISSUER_CA_KEY_PATH",     value: "/home/polar/ca/ca.key" }
+      ]
+      volumes: [ { name: "cert-issuer-ca", secret: "cert-issuer-ca", items: [ { key: "ca.crt", path: "ca/ca.crt" } { key: "ca.key", path: "ca/ca.key" } ], mode: 288 } ]
+      mounts: [ { name: "cert-issuer-ca", path: "/home/polar", read_only: true } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # The broker's identity and arrangements: a server certificate for the Cassini service's name,
+  # read-only in the container, the paths the broker reads it from, the address it listens on and the
+  # shutdown token from a Secret. The broker declares these
+  # variables itself (`cassini --scaffold`, section cassini-broker); a workload without that section
+  # cannot be given this capability.
+  cassini-server: {
+    pod: {
+      env: [
+        { name: "TLS_SERVER_CERT_CHAIN",   value: "/etc/tls/certs/cert.pem" }
+        { name: "TLS_SERVER_KEY",          value: "/etc/tls/certs/key.pem", key_of: "server" }
+        { name: "TLS_CA_CERT",             value: "/etc/tls/certs/ca.pem" }
+        { name: "CASSINI_BIND_ADDR",       value: "0.0.0.0:{cassini.port}" }
+        { name: "CASSINI_SHUTDOWN_TOKEN",  secret: "cassini-shutdown-token", key: "token" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: true, kind: "server", san: "{cassini.dns}", watch: ["cert.pem", "ca.pem"] } ] }
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # The git server's identity and arrangements: a server certificate for its Service name, in
+  # a directory of its own (its Cassini client certificate is the baseline `cassini` one), the
+  # paths and port it reads, and the repositories' directory on the persistent volume
+  # `persistent-data` provides. The server declares these variables itself
+  # (`polar-git-server --scaffold`, section polar-git-server).
+  git-server: {
+    pod: {
+      env: [
+        { name: "POLAR_GIT_SERVER_CERT",      value: "/etc/tls/git-server/cert.pem" }
+        { name: "POLAR_GIT_SERVER_KEY",       value: "/etc/tls/git-server/key.pem", key_of: "server" }
+        { name: "POLAR_GIT_SERVER_CA_CERT",   value: "/etc/tls/git-server/ca.pem" }
+        { name: "POLAR_GIT_SERVER_PORT",      value: "{polar-git-server.port}" }
+        { name: "POLAR_GIT_SERVER_REPO_ROOT", value: "/var/lib/{workload}/repos" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/git-server", volume: "git-server-certs", read_only: true, kind: "server", san: "{polar-git-server.dns}", watch: ["cert.pem", "ca.pem"] } ] }
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # A directory the workload may write that need not outlive the pod: an emptyDir mounted at
+  # /var/lib/<workload>. The scheduler observer keeps its checkout of the schedules repository
+  # here; it clones again when the pod is replaced.
+  working-checkout: {
+    pod: {
+      volumes: [ { name: "{workload}-checkout" } ]
+      mounts: [ { name: "{workload}-checkout", path: "/var/lib/{workload}", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # Where the workload sends its traces: Jaeger's OTLP HTTP port. Every workload has it, from its
+  # kind. How much it sends is its own: the `logging` section every agent declares (RUST_LOG for
+  # the console, info, and POLAR_TRACE_FILTER for what is exported, warn, unless a workload says more).
+  tracing: {
+    pod: {
+      env: [
+        { name: "JAEGER_OTLP_ENDPOINT", value: "{jaeger.url}/v1/traces" }
+      ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # Registry credentials for a workload that pulls from private registries: the Secret
+  # `oci-registry-auth`, whose one key is a Docker credential file, mounted read-only as
+  # config.json in a directory the workload is told to look in (DOCKER_CONFIG). The secrets step
+  # makes the Secret; with no credentials it holds an empty file and the registries are asked
+  # anonymously.
+  oci-registry-auth: {
+    pod: {
+      env: [ { name: "DOCKER_CONFIG", value: "/etc/oci-registry-auth" } ]
+      volumes: [ { name: "oci-registry-auth", secret: "oci-registry-auth", items: [ { key: "oci-registry-auth", path: "config.json" } ] } ]
+      mounts: [ { name: "oci-registry-auth", path: "/etc/oci-registry-auth", read_only: true } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+}

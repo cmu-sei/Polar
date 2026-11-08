@@ -1,0 +1,75 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/targets/local/config.nuon
+#
+# Overrides applied on top of infra/config for this target:
+#   cluster    any field of cluster.nuon
+#   workloads  per-workload fields, keyed by workload name
+{
+  cluster: {}
+  workloads: {
+    # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): the issuers it trusts and the
+    # lifetimes that differ here. Written as values, and given to it as JSON.
+    cert-issuer: {
+      env: [
+        { name: "CERT_ISSUER_ISSUERS", value: [
+        {
+          issuer: "https://kubernetes.default.svc.cluster.local"
+          audience: ["polar-cert-issuer.local" "polar-cert-issuer-neo4j.local"]
+          jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+          workload_identity_claim: "sub"
+          instance_binding_claim: "kubernetes.io/pod/uid"
+          instance_name_claim: "kubernetes.io/pod/name"
+          identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
+          identity_scope_claim: null
+          allowed_algorithms: ["RS256" "ES256" "EdDSA"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        ] }
+        { name: "CERT_ISSUER_SERVER_LIFETIME_SECS", value: "43200" }
+        # A year, for the identities whose certificates are not renewed by rejuvenation.
+        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000 } }
+      ]
+    }
+    # Who administers the git server in development: the DNS names in the certificates of the
+    # accounts `just admin-claim` made on this cluster (alice, operator). They belong to this
+    # cluster's ledger and change when it is reset: read them with
+    #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
+    polar-git-server: {
+      env: [
+        { name: "POLAR_GIT_SERVER_ADMINS", value: "66b3f4c8-f024-4207-b70b-9fadf7badc92,8db96072-25c2-46fc-9705-e72c0b6f4461" }
+      ]
+    }
+    # The cluster pulls from the development registry over plain http, and so must the resolver.
+    oci-registry-resolver: {
+      env: [
+        { name: "OCI_INSECURE_REGISTRIES", value: "{registry}" }
+      ]
+    }
+    jira-observer: {
+      env: [
+        { name: "JIRA_URL", value: "https://example.atlassian.net" }
+      ]
+    }
+  }
+}

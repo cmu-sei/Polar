@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use cassini_types::BrokerMessage;
 use ractor::{Actor, ActorProcessingErr};
 
@@ -41,6 +64,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: Actor::spawn(None, MockActor, ()).await.unwrap().0,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Just make sure we can spawn the SessionManager
@@ -48,7 +72,8 @@ mod tests {
             Some("test-session-manager".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -60,6 +85,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -67,13 +93,16 @@ mod tests {
             Some("test-session-manager-2".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a registration request message to the actor
         let msg = BrokerMessage::RegistrationRequest {
             registration_id: None,
             client_id: "test-client".to_string(),
             trace_ctx: None,
+            peer_identity: None,
+            peer_instance: None,
         };
 
         // This should not panic or error
@@ -83,12 +112,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_manager_handle_session_pending_update() -> Result<(), ActorProcessingErr> {
+    async fn test_session_manager_handle_session_pending_update() -> Result<(), ActorProcessingErr>
+    {
         // Create a mock broker to pass as argument
         let broker_ref = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -96,7 +127,8 @@ mod tests {
             Some("test-session-manager-3".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a session pending update message to the actor
         let msg = BrokerMessage::SessionPendingUpdate {
@@ -117,6 +149,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -124,7 +157,8 @@ mod tests {
             Some("test-session-manager-4".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a set listener manager message to the actor
         let msg = BrokerMessage::SetListenerManager {
@@ -144,6 +178,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -151,12 +186,11 @@ mod tests {
             Some("test-session-manager-5".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a prepare for shutdown message to the actor
-        let msg = BrokerMessage::PrepareForShutdown {
-            auth_token: None,
-        };
+        let msg = BrokerMessage::PrepareForShutdown { auth_token: None };
 
         // This should not panic or error
         actor_ref.send_message(msg).unwrap();
@@ -171,6 +205,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -178,7 +213,8 @@ mod tests {
             Some("test-session-manager-6".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send an initiate drain phase message to the actor
         let msg = BrokerMessage::InitiateShutdownPhase {
@@ -198,6 +234,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -205,11 +242,12 @@ mod tests {
             Some("test-session-manager-7".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a get session reference message to the actor - this test is just to make sure we can send the message
         // We're not actually testing the reply_to functionality since that's complex to set up
-        
+
         Ok(())
     }
 }

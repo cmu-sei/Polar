@@ -1,0 +1,73 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+sequenceDiagram
+    autonumber
+    participant Admin as Administrator
+    participant IdP as Identity Provider<br/>(Keycloak / Okta / etc.)
+    participant GrantTool as polar-admin-grant<br/>(holds its own Polar cert --<br/>see admin_bootstrap_identity.mmd)
+    participant Cassini as Cassini broker
+    participant CredAgentCon as Credentials Agent<br/>(consumer -- high trust)
+    participant EventLog as Event log<br/>(hash-chained JSONL,<br/>PersistentVolume-backed --<br/>the actual record of truth)
+    participant Graph as Neo4j<br/>(rebuildable projection --<br/>observability only)
+
+    Note over Admin,Graph: Phase 0 -- Admin provisions the user in the IdP<br/>(may already exist -- shown for completeness)
+
+    Admin->>IdP: Provision user account<br/>(or confirm an existing one)
+    activate IdP
+    IdP-->>Admin: Account created/confirmed
+    deactivate IdP
+
+    Admin->>IdP: Query the account for its exact<br/>identity claim value (e.g. preferred_username) --<br/>must be the SAME claim cert-issuer is<br/>configured to extract for this issuer, or the<br/>grant below will silently never match the<br/>token this user actually presents later
+    activate IdP
+    IdP-->>Admin: Exact claim value
+    deactivate IdP
+
+    Note over Admin,Graph: Repeatable. A signed admin action, the only way to grant or revoke<br/>(the unsigned credentials-grants and credentials-revocations topics were removed,<br/>docs/architecture/authority-model.md)
+
+    Admin->>GrantTool: Run tool with arguments<br/>(grant: target_identity, permissions --<br/>or revoke: serial, reason)
+    activate GrantTool
+    GrantTool->>GrantTool: Sign the action with the admin's own<br/>certificate's key (SignedAdminAction:<br/>payload, author_serial, signature)
+    GrantTool->>Cassini: Connect using the admin's own<br/>Polar client cert (mTLS)
+    activate Cassini
+    GrantTool->>Cassini: Publish the SignedAdminAction to<br/>credentials-admin-action-requests
+
+    Cassini->>CredAgentCon: Deliver message
+    activate CredAgentCon
+    CredAgentCon->>CredAgentCon: Look the author's certificate up by serial in the ledger,<br/>refuse a revoked author, verify the signature,<br/>check the capability the action needs against the ledger record<br/>(never the certificate), refuse a replay by payload hash
+    alt Refused
+        CredAgentCon->>Cassini: Reply Refused (why) on<br/>credentials-admin-action-replies
+    else Accepted
+        CredAgentCon->>EventLog: Append AdminActionRecorded, fsync'd<br/>(hash includes previous entry's hash, the grant or<br/>revocation is derived from it in the state fold --<br/>a grant is later consumed by a matching issuance,<br/>never mutated or deleted here)
+        activate EventLog
+        EventLog-->>CredAgentCon: Appended
+        deactivate EventLog
+        CredAgentCon->>Graph: Project derived state<br/>(Grant node, or mark a<br/>Certificate node revoked --<br/>rebuildable from the event log,<br/>never the source of truth)
+        activate Graph
+        Graph-->>CredAgentCon: Written
+        deactivate Graph
+        CredAgentCon->>Cassini: Reply Recorded on<br/>credentials-admin-action-replies
+    end
+    deactivate CredAgentCon
+    Cassini->>GrantTool: Deliver the reply
+    deactivate Cassini
+    GrantTool-->>Admin: Exit 0 only on Recorded
+    deactivate GrantTool

@@ -1,3 +1,23 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
 
 -- Schema for the cert issuer's ServiceConfig.
 --
@@ -35,6 +55,7 @@ let IssuerConfig =
           , jwks_uri : Optional Text
           , workload_identity_claim : Text
           , instance_binding_claim : Text
+          , instance_name_claim : Optional Text
           , allowed_algorithms : List Text
           , jwks_cache_ttl_min : Duration
           , jwks_cache_ttl_max : Duration
@@ -61,6 +82,8 @@ let IssuerConfig =
             -- `extract_string_claim` in oidc.rs for why this
             -- isn't dot-separated.
             instance_binding_claim = "kubernetes.io/pod/uid"
+          , -- The pod's name, which a multi-instance workload's certificate names its instance by, for people.
+            instance_name_claim = Some "kubernetes.io/pod/name"
           , -- HS256/HS384/HS512 and "none" are rejected by the
             -- Rust config validator regardless of what's here, so
             -- there's no way to accidentally enable them through
@@ -81,6 +104,8 @@ let CaConfig =
           , ca_key_path : Text
           , default_lifetime : Duration
           , server_lifetime : Duration
+          , user_lifetime : Duration
+          , service_lifetime : Duration
           , identity_lifetime_overrides : List { mapKey : Text, mapValue : Duration }
           }
       , default =
@@ -97,6 +122,8 @@ let CaConfig =
             -- Server certs default to same as client certs.
             -- Override per-target for long-lived infrastructure certs.
           , server_lifetime = hours 1
+          , user_lifetime = hours 8760
+          , service_lifetime = hours 8760
           , identity_lifetime_overrides = [] : List { mapKey : Text, mapValue : Duration }
           }
       }

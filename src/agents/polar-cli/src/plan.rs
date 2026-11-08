@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! A plan: what to put on a cluster, in what order, and what to wait for.
 //!
 //! The shape is `src/deploy/types/plan.dhall`'s, rendered to YAML. This module reads it and judges it
@@ -8,6 +31,9 @@ use serde::Deserialize;
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+/// For each group (or lone secret): each authority's name, the halves of it that are there, and what it was asked to be.
+type Authorities = BTreeMap<String, BTreeMap<String, (BTreeSet<CaPart>, (String, u32))>>;
 
 /// How long a wait lasts unless it says otherwise.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -212,7 +238,11 @@ impl fmt::Debug for Value {
             Value::Literal(_) => write!(f, "literal"),
             Value::Random(r) => write!(f, "random({} bytes)", r.random),
             Value::Template(_) => write!(f, "template"),
-            Value::Copy(c) => write!(f, "copy({}/{}:{})", c.copy.namespace, c.copy.name, c.copy.key),
+            Value::Copy(c) => write!(
+                f,
+                "copy({}/{}:{})",
+                c.copy.namespace, c.copy.name, c.copy.key
+            ),
             Value::Ca(c) => write!(f, "ca({}: {:?})", c.ca.common_name, c.ca.part),
         }
     }
@@ -262,8 +292,14 @@ pub fn placeholders(template: &str) -> Result<Vec<String>, String> {
             return Err(format!("a '{{' that is never closed in \"{template}\""));
         };
         let id = &after[..close];
-        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return Err(format!("\"{{{id}}}\" is not an id (letters, digits, - and _) in \"{template}\""));
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "\"{{{id}}}\" is not an id (letters, digits, - and _) in \"{template}\""
+            ));
         }
         found.push(id.to_string());
         rest = &after[close + 1..];
@@ -356,12 +392,18 @@ impl Plan {
                 for (key, value) in &secret.keys {
                     if let Value::Random(random) = value {
                         if random.random == 0 || random.random > 1024 {
-                            problems.push(format!("{at}: {name} key '{key}' asks for {} random bytes; 1 to 1024", random.random));
+                            problems.push(format!(
+                                "{at}: {name} key '{key}' asks for {} random bytes; 1 to 1024",
+                                random.random
+                            ));
                         }
                         if let Some(id) = &random.id
                             && !ids.insert(id.clone())
                         {
-                            problems.push(format!("{at}: the id '{id}' is defined twice in {}", scope(&secret.group)));
+                            problems.push(format!(
+                                "{at}: the id '{id}' is defined twice in {}",
+                                scope(&secret.group)
+                            ));
                         }
                     }
                     if let Value::Copy(copy) = value
@@ -374,8 +416,7 @@ impl Plan {
             }
             // The authorities made in each group, or in each secret that is in none: what they are called,
             // which halves are there, and what each was asked to be.
-            let mut authorities: BTreeMap<String, BTreeMap<String, (BTreeSet<CaPart>, (String, u32))>> =
-                BTreeMap::new();
+            let mut authorities: Authorities = BTreeMap::new();
             for secret in &stage.secrets {
                 let name = format!("{}/{}", secret.namespace, secret.name);
                 let scope_key = match &secret.group {
@@ -390,7 +431,10 @@ impl Plan {
                         continue;
                     }
                     if ca.common_name.trim().is_empty() {
-                        problems.push(format!("{at}: {name} key '{key}': the CA '{}' has no common name", ca.id));
+                        problems.push(format!(
+                            "{at}: {name} key '{key}': the CA '{}' has no common name",
+                            ca.id
+                        ));
                     }
                     if ca.validity_days == 0 || ca.validity_days > MAX_CA_DAYS {
                         problems.push(format!(
@@ -427,7 +471,9 @@ impl Plan {
                 let name = format!("{}/{}", config_map.namespace, config_map.name);
                 if config_map.namespace.trim().is_empty() || config_map.name.trim().is_empty() {
                     problems.push(format!("{at}: a configMap needs a namespace and a name"));
-                } else if !config_map_names.insert((config_map.namespace.clone(), config_map.name.clone())) {
+                } else if !config_map_names
+                    .insert((config_map.namespace.clone(), config_map.name.clone()))
+                {
                     problems.push(format!("{at}: configMap {name} is in the plan twice"));
                 }
                 if config_map.keys.is_empty() {
@@ -444,7 +490,9 @@ impl Plan {
                     if let Value::Copy(copy) = value
                         && copy.copy.key.trim().is_empty()
                     {
-                        problems.push(format!("{at}: configMap {name} key '{key}' copies a key with no name"));
+                        problems.push(format!(
+                            "{at}: configMap {name} key '{key}' copies a key with no name"
+                        ));
                     }
                 }
             }
@@ -472,11 +520,16 @@ impl Plan {
             for wait in &stage.waits {
                 let target = wait.target();
                 if wait.api_version.is_empty() || wait.kind.is_empty() || wait.name.is_empty() {
-                    problems.push(format!("{at}: a wait needs an apiVersion, a kind and a name"));
+                    problems.push(format!(
+                        "{at}: a wait needs an apiVersion, a kind and a name"
+                    ));
                     continue;
                 }
                 if wait.field.split('.').any(str::is_empty) {
-                    problems.push(format!("{at}: wait on {target}: '{}' is not a dotted path", wait.field));
+                    problems.push(format!(
+                        "{at}: wait on {target}: '{}' is not a dotted path",
+                        wait.field
+                    ));
                 }
                 if wait.timeout_secs == 0 {
                     problems.push(format!("{at}: wait on {target} has a timeout of zero"));
@@ -502,7 +555,11 @@ impl Plan {
                 anyhow::bail!(
                     "plan '{}' has no stage '{asked}' (it has: {})",
                     self.name,
-                    self.stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+                    self.stages
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
@@ -528,7 +585,11 @@ impl Plan {
     /// name this plan does not have is simply not for it.
     pub fn select_among(&self, with: &[String], only: &[String]) -> anyhow::Result<Vec<&Stage>> {
         let mine = |names: &[String]| -> Vec<String> {
-            names.iter().filter(|n| self.stages.iter().any(|s| &s.name == *n)).cloned().collect()
+            names
+                .iter()
+                .filter(|n| self.stages.iter().any(|s| &s.name == *n))
+                .cloned()
+                .collect()
         };
         // `--only` runs just the named stages: a plan with none of them has nothing to do.
         if !only.is_empty() && mine(only).is_empty() {
@@ -563,13 +624,35 @@ impl Plan {
                 out.push_str("   install  the PolarAgent CRD\n");
             }
             for secret in &stage.secrets {
-                let group = secret.group.as_deref().map(|g| format!(" (group {g})")).unwrap_or_default();
-                let keys: Vec<String> = secret.keys.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
-                out.push_str(&format!("   secret   {}/{}{group}  [{}]\n", secret.namespace, secret.name, keys.join(", ")));
+                let group = secret
+                    .group
+                    .as_deref()
+                    .map(|g| format!(" (group {g})"))
+                    .unwrap_or_default();
+                let keys: Vec<String> = secret
+                    .keys
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v:?}"))
+                    .collect();
+                out.push_str(&format!(
+                    "   secret   {}/{}{group}  [{}]\n",
+                    secret.namespace,
+                    secret.name,
+                    keys.join(", ")
+                ));
             }
             for config_map in &stage.config_maps {
-                let keys: Vec<String> = config_map.keys.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
-                out.push_str(&format!("   configmap {}/{}  [{}]\n", config_map.namespace, config_map.name, keys.join(", ")));
+                let keys: Vec<String> = config_map
+                    .keys
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v:?}"))
+                    .collect();
+                out.push_str(&format!(
+                    "   configmap {}/{}  [{}]\n",
+                    config_map.namespace,
+                    config_map.name,
+                    keys.join(", ")
+                ));
             }
             for object in &stage.objects {
                 match object.id() {
@@ -593,7 +676,9 @@ impl Plan {
 
 fn is_polar_agent(object: &Object) -> bool {
     object.kind() == Some("PolarAgent")
-        && object.api_version().is_some_and(|v| v.starts_with("polar.sei.cmu.edu/"))
+        && object
+            .api_version()
+            .is_some_and(|v| v.starts_with("polar.sei.cmu.edu/"))
 }
 
 fn scope(group: &Option<String>) -> String {
@@ -724,7 +809,10 @@ stages:
             "name: p\nstages:\n  - name: s\n    secrets:\n      - { namespace: n, name: a, group: g, keys: { k: { template: 'x-{pw}' } } }\n      - { namespace: n, name: b, group: h, keys: { k: { random: 4, id: pw } } }\n",
         );
         let text = bad.problems().join("\n");
-        assert!(text.contains("uses {pw}, which no random value in group 'g' is named"), "{text}");
+        assert!(
+            text.contains("uses {pw}, which no random value in group 'g' is named"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -741,9 +829,14 @@ stages:
     #[test]
     fn a_plan_with_polar_agents_must_install_the_operator_first() {
         let agents = "      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, metadata: { name: a, namespace: n } }\n";
-        let without = plan(&format!("name: p\nstages:\n  - name: s\n    objects:\n{agents}"));
+        let without = plan(&format!(
+            "name: p\nstages:\n  - name: s\n    objects:\n{agents}"
+        ));
         let text = without.problems().join("\n");
-        assert!(text.contains("applies PolarAgents but no stage up to here installs the operator"), "{text}");
+        assert!(
+            text.contains("applies PolarAgents but no stage up to here installs the operator"),
+            "{text}"
+        );
 
         // After is no better than never: the operator must be there first.
         let late = plan(&format!(
@@ -757,7 +850,9 @@ stages:
         assert_eq!(with.problems(), Vec::<String>::new());
 
         // Plain objects need no operator.
-        let plain = plan("name: p\nstages:\n  - name: s\n    objects:\n      - { apiVersion: v1, kind: Namespace, metadata: { name: n } }\n");
+        let plain = plan(
+            "name: p\nstages:\n  - name: s\n    objects:\n      - { apiVersion: v1, kind: Namespace, metadata: { name: n } }\n",
+        );
         assert_eq!(plain.problems(), Vec::<String>::new());
     }
 
@@ -766,10 +861,21 @@ stages:
         let plan = plan(GOOD);
         let names = |stages: Vec<&Stage>| stages.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(plan.select(&[], &[]).unwrap()), ["base"]);
-        assert_eq!(names(plan.select(&["graph".into()], &[]).unwrap()), ["base", "graph"]);
-        assert_eq!(names(plan.select(&[], &["graph".into()]).unwrap()), ["graph"]);
+        assert_eq!(
+            names(plan.select(&["graph".into()], &[]).unwrap()),
+            ["base", "graph"]
+        );
+        assert_eq!(
+            names(plan.select(&[], &["graph".into()]).unwrap()),
+            ["graph"]
+        );
         assert!(plan.select(&["nope".into()], &[]).is_err());
-        assert!(plan.select(&["base".into()], &[]).unwrap_err().to_string().contains("not optional"));
+        assert!(
+            plan.select(&["base".into()], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("not optional")
+        );
         assert!(plan.select(&["graph".into()], &["base".into()]).is_err());
     }
 
@@ -784,7 +890,10 @@ stages:
     }
 
     fn problems_of(secrets_and_maps: &str) -> Vec<String> {
-        plan(&format!("name: p\nstages:\n  - name: s\n{secrets_and_maps}")).problems()
+        plan(&format!(
+            "name: p\nstages:\n  - name: s\n{secrets_and_maps}"
+        ))
+        .problems()
     }
 
     const CA_HALVES: &str = "    secrets:
@@ -801,10 +910,22 @@ stages:
     #[test]
     fn the_halves_of_a_ca_must_agree_and_each_be_there_once() {
         let disagree = CA_HALVES.replace("validityDays: 30 } } } }", "validityDays: 31 } } } }");
-        assert!(problems_of(&disagree).iter().any(|p| p.contains("disagree about its name or lifetime")), "{:?}", problems_of(&disagree));
+        assert!(
+            problems_of(&disagree)
+                .iter()
+                .any(|p| p.contains("disagree about its name or lifetime")),
+            "{:?}",
+            problems_of(&disagree)
+        );
 
         let twice = CA_HALVES.replace("part: key", "part: certificate");
-        assert!(problems_of(&twice).iter().any(|p| p.contains("Certificate of the CA 'root' is defined twice")), "{:?}", problems_of(&twice));
+        assert!(
+            problems_of(&twice)
+                .iter()
+                .any(|p| p.contains("Certificate of the CA 'root' is defined twice")),
+            "{:?}",
+            problems_of(&twice)
+        );
     }
 
     #[test]
@@ -813,21 +934,41 @@ stages:
       - { namespace: n, name: a, keys: { c: { ca: { id: root, part: certificate, commonName: CA, validityDays: 1 } } } }
       - { namespace: n, name: b, keys: { c: { ca: { id: root, part: certificate, commonName: CA, validityDays: 1 } } } }
 ";
-        assert_eq!(problems_of(two), Vec::<String>::new(), "no group: each secret is its own scope");
-        let grouped = two.replace("name: a,", "name: a, group: g,").replace("name: b,", "name: b, group: g,");
-        assert!(problems_of(&grouped).iter().any(|p| p.contains("defined twice in group 'g'")), "{:?}", problems_of(&grouped));
+        assert_eq!(
+            problems_of(two),
+            Vec::<String>::new(),
+            "no group: each secret is its own scope"
+        );
+        let grouped = two
+            .replace("name: a,", "name: a, group: g,")
+            .replace("name: b,", "name: b, group: g,");
+        assert!(
+            problems_of(&grouped)
+                .iter()
+                .any(|p| p.contains("defined twice in group 'g'")),
+            "{:?}",
+            problems_of(&grouped)
+        );
     }
 
     #[test]
     fn a_ca_needs_a_name_and_a_sane_lifetime() {
         for (change, expected) in [
             ("validityDays: 30", "validityDays: 0", "would last 0 days"),
-            ("validityDays: 30", "validityDays: 99999", "would last 99999 days"),
+            (
+                "validityDays: 30",
+                "validityDays: 99999",
+                "would last 99999 days",
+            ),
             ("commonName: CA", "commonName: ''", "has no common name"),
         ]
         .map(|(from, to, why)| (CA_HALVES.replace(from, to), why))
         {
-            assert!(problems_of(&change).iter().any(|p| p.contains(expected)), "{expected}: {:?}", problems_of(&change));
+            assert!(
+                problems_of(&change).iter().any(|p| p.contains(expected)),
+                "{expected}: {:?}",
+                problems_of(&change)
+            );
         }
     }
 
@@ -842,7 +983,10 @@ stages:
       - { namespace: n, name: c, keys: { a: { random: 4 } } }
 ";
         assert!(
-            problems_of(random).iter().any(|p| p.contains("a ConfigMap is public, so it may only hold a literal or a copy")),
+            problems_of(random)
+                .iter()
+                .any(|p| p
+                    .contains("a ConfigMap is public, so it may only hold a literal or a copy")),
             "{:?}",
             problems_of(random)
         );
@@ -850,10 +994,21 @@ stages:
         let ca = "    configMaps:
       - { namespace: n, name: c, keys: { a: { ca: { id: r, part: key, commonName: CA, validityDays: 1 } } } }
 ";
-        assert!(problems_of(ca).iter().any(|p| p.contains("may only hold a literal or a copy")), "a CA's key never goes in a ConfigMap");
+        assert!(
+            problems_of(ca)
+                .iter()
+                .any(|p| p.contains("may only hold a literal or a copy")),
+            "a CA's key never goes in a ConfigMap"
+        );
 
         let twice = format!("{good}{}", good.trim_start_matches("    configMaps:\n"));
-        assert!(problems_of(&twice).iter().any(|p| p.contains("configMap n/c is in the plan twice")), "{:?}", problems_of(&twice));
+        assert!(
+            problems_of(&twice)
+                .iter()
+                .any(|p| p.contains("configMap n/c is in the plan twice")),
+            "{:?}",
+            problems_of(&twice)
+        );
     }
 
     #[test]
@@ -862,7 +1017,13 @@ stages:
       - {{ namespace: n, name: polar-ca, keys: {{ ca.pem: {{ copy: {{ namespace: n, name: ca, key: ca.crt }} }} }} }}
 ");
         let said = plan(&format!("name: p\nstages:\n  - name: s\n{both}")).describe();
-        assert!(said.contains("configmap n/polar-ca") && said.contains("copy(n/ca:ca.crt)"), "{said}");
-        assert!(said.contains("ca(CA: Certificate)") && said.contains("ca(CA: Key)"), "{said}");
+        assert!(
+            said.contains("configmap n/polar-ca") && said.contains("copy(n/ca:ca.crt)"),
+            "{said}"
+        );
+        assert!(
+            said.contains("ca(CA: Certificate)") && said.contains("ca(CA: Key)"),
+            "{said}"
+        );
     }
 }

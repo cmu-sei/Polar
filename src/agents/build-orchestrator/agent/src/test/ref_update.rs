@@ -1,10 +1,33 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 /// Tests for turning git observer `RefUpdated` messages into build requests.
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod ref_update {
     use crate::actors::supervisor::{EventConversionError, OrchestratorSupervisor};
     use crate::client::StorageConfig;
     use crate::config::{BackendConfig, OrchestratorConfig, RepoMapping};
-    use orchestrator_backend_podman::backend::PodmanConfig;
     use orchestrator_core::types::SourceRef;
     use polar::graph::nodes::git::RepoId;
 
@@ -13,23 +36,24 @@ mod ref_update {
     fn config(repo_url: &str) -> OrchestratorConfig {
         OrchestratorConfig {
             backend: BackendConfig {
-                driver: "podman".to_string(),
+                driver: "kubernetes".to_string(),
                 command: vec!["nu".to_string(), "scripts/pipeline/ci.nu".to_string()],
                 job_env: Default::default(),
                 kubernetes: None,
-                podman: PodmanConfig::rootless_default().into(),
             },
             repo_mappings: vec![RepoMapping {
                 repo_url: repo_url.to_string(),
                 pipeline_image: Some("registry.example.com/polar-ci@sha256:abc".to_string()),
+                ..Default::default()
             }],
             storage: StorageConfig {
                 endpoint_url: "http://localhost:9000".to_string(),
-                bucket: "cyclops-artifacts".to_string(),
+                bucket: "build-artifacts".to_string(),
                 region: "us-east-1".to_string(),
                 access_key: "abcdefghijklmnop".to_string(),
                 secret_key: "abcdefghijklmnop".to_string(),
             },
+            max_concurrent_builds: 1,
         }
     }
 
@@ -98,5 +122,57 @@ mod ref_update {
             result,
             Err(EventConversionError::InvalidSource(_))
         ));
+    }
+
+    fn request_with_command(url: &str, command: &[&str]) -> orchestrator_core::types::BuildRequest {
+        let mut request = OrchestratorSupervisor::build_request_from_ref_update(
+            &config(url),
+            &RepoId::from_url(url),
+            "refs/heads/main",
+            SHA,
+            "1700000000000",
+        )
+        .unwrap()
+        .unwrap();
+        request.command = command.iter().map(|s| s.to_string()).collect();
+        request
+    }
+
+    #[test]
+    fn a_mapped_repositorys_command_is_the_mappings_and_never_the_requests() {
+        let url = "https://git.example.org/a.git";
+        let default = vec!["nu".to_string(), "default.nu".to_string()];
+
+        // The mapping gives its own command.
+        let mapping = RepoMapping {
+            repo_url: url.to_string(),
+            command: Some(vec!["sh".into(), "-c".into(), "mapped".into()]),
+            ..Default::default()
+        };
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        OrchestratorSupervisor::command_from_mapping(&[mapping], &default, &mut request).unwrap();
+        assert_eq!(request.command, ["sh", "-c", "mapped"]);
+
+        // The mapping gives none: the configuration file's.
+        let bare = RepoMapping {
+            repo_url: url.to_string(),
+            ..Default::default()
+        };
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        OrchestratorSupervisor::command_from_mapping(&[bare], &default, &mut request).unwrap();
+        assert_eq!(request.command, default);
+    }
+
+    #[test]
+    fn a_repository_with_no_mapping_is_not_built() {
+        let url = "https://git.example.org/a.git";
+        let other = RepoMapping {
+            repo_url: "https://git.example.org/other.git".to_string(),
+            ..Default::default()
+        };
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        let why =
+            OrchestratorSupervisor::command_from_mapping(&[other], &[], &mut request).unwrap_err();
+        assert!(why.contains(url) && why.contains("no mapping"), "{why}");
     }
 }

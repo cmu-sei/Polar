@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Git Repository Agent Architecture
 
 ## Git Repo Observer
@@ -25,7 +48,7 @@ This system is structured as a **fact-emitting observer** coupled to **independe
 
 ### High-level structure
 
-The Git observer is an actor-based system with a strict supervision tree:
+The Git observer is an actor-based system with a strict supervision tree. It is a `PolarAgent` run by the agent builder (`git-repo-observer --help` lists its settings), a catalog workload (`infra/config/workloads/git.nuon`), and it keeps running when the broker restarts: the supervisor registers its workers again on every `Registered`, where it used to stop itself. Its clones live in an emptyDir and are fetched again when the pod is replaced.
 
 * **GitObserverRoot** is the root supervisor.
 * A single **TcpClientActor** owns the connection to the Cassini message broker.
@@ -108,3 +131,11 @@ Ref edges are **never** created during commit discovery. This avoids incorrect a
 This design trades immediacy for correctness and extensibility. By emitting raw facts and deferring interpretation, the system avoids hard-coding assumptions about Git semantics, supports multiple concurrent processors, and allows the graph model to evolve without touching the observer.
 
 In short: the observer reports reality; processors argue about what it means.
+
+### Credentials
+
+A repository names the credential it wants, and the value reaches the observer in a signed runtime document
+addressed to it; the observer keeps it with the credentials agent and fetches it from there (`git-controller.md`,
+"A credential"). The two older paths are gone (2026-10-14): the static `git.yaml` credentials file, which it loaded and did
+not use, and the inline `credentials` field of the configuration event, which the scheduler always sent as `None`
+(the event now carries the credential's name).

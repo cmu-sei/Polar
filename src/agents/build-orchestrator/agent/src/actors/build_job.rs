@@ -1,23 +1,45 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 //! BuildJobActor — owns the full lifecycle of a single build.
 //!
 //! # Execution flow
 //!
 //! The actor drives the build through these phases in order:
 //!
-//! 1. ResolvingImage  — look up the repo in config to find the pipeline image.
-//!                      If an image digest is already known, proceed to phase 3.
-//!                      If not, proceed to phase 2.
+//! 1. ResolvingImage: look up the repo in config to find the pipeline image.
+//!    If an image digest is already known, proceed to phase 3.
+//!    If not, proceed to phase 2.
 //!
-//! 2. Bootstrapping   — submit a bootstrap Job to build the missing pipeline
-//!                      image. Poll until it completes. On success, record the
-//!                      produced image digest and proceed to phase 3.
+//! 2. Bootstrapping: submit a bootstrap Job to build the missing pipeline
+//!    image. Poll until it completes. On success, record the produced image
+//!    digest and proceed to phase 3.
 //!
-//! 3. Scheduled       — submit the pipeline Job using the resolved image.
-//!                      The pipeline image always has /bin/pipeline-runner as
-//!                      its entrypoint. The orchestrator does not inject build
-//!                      logic — only context via env vars.
+//! 3. Scheduled: submit the pipeline Job using the resolved image. The
+//!    pipeline image always has /bin/pipeline-runner as its entrypoint. The
+//!    orchestrator does not inject build logic, only context via env vars.
 //!
-//! 4. Running         — poll until the job reaches a terminal state.
+//! 4. Running: poll until the job reaches a terminal state.
 //!
 //! # Polling model
 //!
@@ -45,14 +67,17 @@ use std::time::Instant;
 use crate::actors::build_registry::RegistryMessage;
 use crate::client::{LogContainer, StorageClient};
 use crate::config::OrchestratorConfig;
+use crate::credentials::{self, Resolution};
 use orchestrator_core::{
     backend::{BackendJobHandle, BuildBackend, JobStatus},
-    types::{BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials, SourceRef},
+    types::{
+        BuildRequest, BuildSpec, BuildState, GitCredentials, GitSecret, RegistryCredentials,
+        SourceRef,
+    },
 };
 use polar::cassini::{CassiniClient, PublishRequest};
-use polar::{
-    BUILD_EVENTS_TOPIC, BackendIdentity, PackageAnalysisStartedPayload, ProvenanceEvent, RkyvError,
-};
+use polar::{BUILD_EVENTS_TOPIC, BackendIdentity, ProvenanceEvent, RkyvError};
+use polar_agent_builder::CryptoClient;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
 use tracing::instrument;
@@ -105,6 +130,8 @@ pub struct BuildJobArguments {
     pub config: Arc<OrchestratorConfig>,
     /// Storage client for uploading logs and manifests to MinIO.
     pub storage: Arc<StorageClient>,
+    /// Opens the credentials the repository's mapping names. `None` where nothing is to be opened (tests).
+    pub crypto: Option<Arc<dyn CryptoClient>>,
 }
 
 pub struct BuildJobState {
@@ -114,6 +141,7 @@ pub struct BuildJobState {
     publisher: Arc<dyn CassiniClient>,
     config: Arc<OrchestratorConfig>,
     storage: Arc<StorageClient>,
+    crypto: Option<Arc<dyn CryptoClient>>,
 
     /// The backend handle for whatever job is currently running.
     /// Replaced when transitioning from bootstrap to pipeline phase.
@@ -167,6 +195,7 @@ impl Actor for BuildJobActor {
             publisher: args.publisher,
             config: args.config,
             storage: args.storage,
+            crypto: args.crypto,
             backend_handle: None,
             resolved_image: None,
             phase: None,
@@ -215,6 +244,9 @@ impl BuildJobActor {
             payload: to_bytes::<RkyvError>(&event)?.to_vec(),
             trace_ctx: None,
             offline_behavior: Default::default(),
+            // The broker attaches the verified identity of the publisher; a processor can then believe an event
+            // came from the orchestrator and not from a job.
+            share_identity: true,
         };
 
         if let Err(e) = publisher.publish(req) {
@@ -223,9 +255,7 @@ impl BuildJobActor {
             Ok(())
         }
     }
-    /// Entry point. Transitions to ResolvingImage and resolves the image to run:
-    /// the request's own image if it names one, otherwise the configured
-    /// pipeline image for the git repo.
+    /// Entry point. Transitions to ResolvingImage and resolves the image to run (`resolve_pipeline_image`).
     async fn handle_start(
         &self,
         myself: ActorRef<BuildJobMessage>,
@@ -235,14 +265,16 @@ impl BuildJobActor {
 
         self.transition(state, BuildState::ResolvingImage, None, None, None)?;
 
-        let pipeline_image = match (&state.request.pipeline_image, &state.request.source) {
-            (Some(image), _) => Some(image.clone()),
-            (None, SourceRef::Git { url, .. }) => {
-                state.config.pipeline_image_for(url).map(|s| s.to_string())
-            }
-            // Repo mappings only exist for git sources.
-            (None, SourceRef::RegistryArchive { .. }) => None,
-        };
+        if let (Some(asked), SourceRef::Git { .. }) =
+            (&state.request.pipeline_image, &state.request.source)
+        {
+            tracing::warn!(
+                build_id = %build_id,
+                image = %asked,
+                "ignored the image the request names: a git build runs its mapping's"
+            );
+        }
+        let pipeline_image = resolve_pipeline_image(&state.request, &state.config);
 
         match pipeline_image {
             Some(image) => {
@@ -255,7 +287,7 @@ impl BuildJobActor {
                 tracing::error!(
                     build_id = %build_id,
                     source = %state.request.source.locator(),
-                    "no pipeline image in request or config for this source"
+                    "no pipeline image for this source: its mapping names none, or the analysis request names no analyzer"
                 );
                 self.fail(
                     state,
@@ -269,6 +301,29 @@ impl BuildJobActor {
 
         Ok(())
     }
+    /// The credential the repository's mapping names, if it names one. A build whose mapping names a credential
+    /// that cannot be had does not start: it would only fail at the clone, with a worse reason.
+    async fn resolve_git_secret(state: &BuildJobState) -> Result<Option<GitSecret>, String> {
+        let SourceRef::Git { url, .. } = &state.request.source else {
+            return Ok(None);
+        };
+        let names = state.config.credentials_for(url);
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let Some(crypto) = &state.crypto else {
+            return Err(
+                "the mapping names a credential, and there is no credential store to open it"
+                    .to_string(),
+            );
+        };
+        match credentials::resolve(crypto.as_ref(), names, url).await {
+            Resolution::Public => Ok(None),
+            Resolution::Ready(secret) => Ok(Some(secret)),
+            Resolution::Refused(reason) => Err(reason),
+        }
+    }
+
     /// Submits the pipeline job using a known image digest.
     /// Called either directly from handle_start (image was in config) or
     /// from handle_poll after a bootstrap job succeeds.
@@ -281,6 +336,17 @@ impl BuildJobActor {
     ) -> Result<(), ActorProcessingErr> {
         let build_id = state.request.build_id;
 
+        // What this build may clone with is decided here, from the signed mapping, and never from the request.
+        let git_secret = match Self::resolve_git_secret(state).await {
+            Ok(secret) => secret,
+            Err(reason) => {
+                tracing::error!(build_id = %build_id, %reason, "the build's credential could not be had");
+                self.fail(state, reason, STAGE_SCHEDULING).await?;
+                myself.stop(Some("no credential".to_string()));
+                return Ok(());
+            }
+        };
+
         let git_credentials = git_credentials_from_config(&state.config);
         let registry_credentials = registry_credentials_from_config(&state.config);
 
@@ -292,6 +358,7 @@ impl BuildJobActor {
             registry_credentials,
             state.request.command.clone(),
         );
+        spec.git_secret = git_secret;
         spec.env = state
             .config
             .backend
@@ -356,26 +423,6 @@ impl BuildJobActor {
                     );
                 }
 
-                // For a package archive, record what is being analyzed and by
-                // which image. Only the orchestrator knows this authoritatively;
-                // the analyzer reports findings against the build_id.
-                if let SourceRef::RegistryArchive { purl, sha256, .. } = &state.request.source {
-                    let event =
-                        ProvenanceEvent::PackageAnalysisStarted(PackageAnalysisStartedPayload {
-                            build_id: build_id.to_string(),
-                            purl: purl.clone(),
-                            archive_sha256: sha256.clone(),
-                            analyzer_image: pipeline_image.clone(),
-                        });
-                    if let Err(e) = Self::publish_event(&state.publisher, event) {
-                        tracing::error!(
-                            build_id = %build_id,
-                            error = %e,
-                            "failed to publish package_analysis_started event"
-                        );
-                    }
-                }
-
                 myself.send_after(std::time::Duration::from_millis(POLL_INTERVAL_MS), || {
                     BuildJobMessage::PollStatus
                 });
@@ -397,6 +444,7 @@ impl BuildJobActor {
     /// - Bootstrap + Succeeded → extract produced image digest, submit pipeline job.
     /// - Pipeline  + Succeeded → emit completed event, stop actor.
     /// - Any phase + Failed    → emit failed event, stop actor.
+    ///
     /// TODO: Failure to poll status from the backend should leave the build in an unreconciled state.
     /// Failure to reconcile will just result in marking the job as failed.
     async fn handle_poll(
@@ -544,17 +592,17 @@ impl BuildJobActor {
         let build_id = state.request.build_id;
         tracing::info!(build_id = %build_id, "cancellation requested");
 
-        if let Some(handle) = &state.backend_handle {
-            if let Err(e) = state.backend.cancel(handle).await {
-                // Cancellation failure is not fatal — we still mark the build
-                // as cancelled locally. The backend job may continue running
-                // until its own TTL fires, but that is acceptable.
-                tracing::warn!(
-                    build_id = %build_id,
-                    error = %e,
-                    "backend cancellation returned error — proceeding with local cancellation"
-                );
-            }
+        if let Some(handle) = &state.backend_handle
+            && let Err(e) = state.backend.cancel(handle).await
+        {
+            // Cancellation failure is not fatal — we still mark the build
+            // as cancelled locally. The backend job may continue running
+            // until its own TTL fires, but that is acceptable.
+            tracing::warn!(
+                build_id = %build_id,
+                error = %e,
+                "backend cancellation returned error — proceeding with local cancellation"
+            );
         }
 
         self.transition(state, BuildState::Cancelled, None, None, reason.clone())?;
@@ -657,7 +705,6 @@ impl BuildJobActor {
 /// Currently returns the single configured credential set for all repos.
 /// Per-repo credential selection will be added when the scheduler owns repo
 /// mappings and can carry per-repo credential references in the build request.
-
 fn git_credentials_from_config(_config: &OrchestratorConfig) -> GitCredentials {
     GitCredentials::HttpToken {
         secret_name: "some_secret".into(),
@@ -689,6 +736,7 @@ fn registry_credentials_from_config(_config: &OrchestratorConfig) -> RegistryCre
 /// authoritative rather than derived.
 ///
 /// TODO: replace with annotation/ConfigMap read after bootstrap polling.
+#[allow(dead_code)] // for the bootstrap job, which is not submitted yet
 pub(crate) fn derive_bootstrap_output_image(
     repo_url: &str,
     commit_sha: &str,
@@ -696,7 +744,7 @@ pub(crate) fn derive_bootstrap_output_image(
 ) -> String {
     let repo_slug = repo_url
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or("unknown")
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
         .to_lowercase();
@@ -704,4 +752,17 @@ pub(crate) fn derive_bootstrap_output_image(
     let short_sha = &commit_sha[..commit_sha.len().min(12)];
 
     format!("{}/{repo_slug}:{short_sha}", target_registry)
+}
+
+/// The image a build runs. A git build runs its repository's mapping's image and never the request's: a request can
+/// come from anyone who can publish on the broker, and the mapping is a signed document. An archive build (analysis)
+/// has no mapping and runs the analyzer the request names, which `BuildRequest::validate` holds to a digest.
+pub(crate) fn resolve_pipeline_image(
+    request: &BuildRequest,
+    config: &OrchestratorConfig,
+) -> Option<String> {
+    match &request.source {
+        SourceRef::Git { url, .. } => config.pipeline_image_for(url).map(str::to_string),
+        SourceRef::RegistryArchive { .. } => request.pipeline_image.clone(),
+    }
 }

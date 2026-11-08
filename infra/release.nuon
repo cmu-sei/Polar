@@ -1,0 +1,43 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/release.nuon
+#
+# What `nu infra/release.nu` checks before it lets a release happen. A gate that fails and is `blocking` stops the release; a
+# gate that is not blocking is reported and does not. Gates run cheapest first. Skip one for a single run with `--skip-gate NAME`
+# (it is then said, in the output, that it was skipped). A gate with `after_images: true` is run by `release.nu run` after the images are
+# built and the lock is written (it needs the digests), and before anything is committed; `release.nu gates` runs every gate.
+{
+  # The targets that deploy by digest, whose render must be identical on every run (infra/tests/render-determinism.nu).
+  determinism_targets: ["sandbox-local"]
+
+  # Tests in infra/tests that the `unit` gate does not run, because a gate of their own does, or they take minutes.
+  heavy_tests: ["render-determinism" "resolve"]
+
+  gates: [
+    { name: "unit",        blocking: true,  what: "the infra unit tests (infra/tests, apart from the heavy ones)" }
+    { name: "deny",        blocking: true,  what: "cargo deny: advisories, licenses, bans and sources" }
+    { name: "secrets",     blocking: true,  what: "no secret in the published history beyond the accepted ones (infra/release-secrets-baseline.nuon)" }
+    { name: "clippy",      blocking: false, what: "clippy with warnings denied; report-only until the workspace's warnings are cleared" }
+    { name: "resolve",     blocking: true,  what: "every workload of the catalog resolves (infra/resolve.nu check)" }
+    { name: "determinism", blocking: true,  after_images: true, what: "the render of each pinned target is identical on every run (a release runs it once the lock is written, since a pinned render needs the digests)" }
+  ]
+}

@@ -1,26 +1,23 @@
-# Polar (OSS)
-
-# Copyright 2024 Carnegie Mellon University.
-
-# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING
-# INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON
-# UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS
-# TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE
-# OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE
-# MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND
-# WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
-
-# Licensed under a MIT-style license, please see license.txt or contact
-# permission@sei.cmu.edu for full terms.
-
-# [DISTRIBUTION STATEMENT A] This material has been approved for public release
-# and unlimited distribution.  Please see Copyright notice for non-US
-# Government use and distribution.
-
-# This Software includes and/or makes use of Third-Party Software each subject
-# to its own license.
-
-# DM24-0470
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
 
 [workspace]
 resolver = "2"
@@ -30,10 +27,16 @@ members = [
     "cassini/cassini-c2",
     "cassini/client",
     "cassini/test/common",
-    "cassini/test/control",
     "cassini/test/producer",
     "cassini/test/sink",
     "cassini/types",
+    "credentials-agent/admin",
+    "credentials-agent/client",
+    "credentials-agent/common",
+    "credentials-agent/consume",
+    "credentials-agent/fetcher",
+    "credentials-agent/model",
+    "credentials-agent/observe",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
@@ -42,12 +45,11 @@ members = [
     "gitlab/schema",
     "git/observe",
     "git/process",
-    "git/observe",
-    "git/process",
-    "git/scheduler",
+    "git/controller",
     "jira/common",
     "jira/process",
     "jira/observe",
+    "jwt-utils",
     "kubernetes/common",
     "kubernetes/consume",
     "kubernetes/observe",
@@ -56,28 +58,44 @@ members = [
     "openapi/common",
     "openapi/process",
     "openapi/observe",
+    "polar-crypto",
+    "polar-escrow",
+    "polar-env",
+    "polar-git-server/common",
+    "polar-git-server/server",
     "polar-health",
+    "polar-scudo",
+    "polar-version",
     "polar-healthcheck",
     "polar-init",
-    "polar-cli",
-    "policy-config",
-    "resolver",
-    "build-processor",
-    "build-orchestrator/agent",
-    "build-orchestrator/core",
-    "build-orchestrator/k8s",
-    "build-orchestrator/podman",
-    "build-orchestrator/scheduler",
+    "polar-kernel-keyring",
+    "polar-custody",
+    "polar-custody/daemon",
+    "polar-signing",
+    "polar-sign",
+    "polar-agent-builder",
+    "polar-permissions",
+    "polar-policy",
+    "polar-router",
+    "polar-test-graph",
     "polar-operator/common",
     "polar-operator/operator",
     "polar-operator/processor",
+    "polar-cli",
+    "build-orchestrator/agent",
+    "build-orchestrator/core",
+    "build-orchestrator/k8s",
+    "resolver",
+    "build-processor",
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
-    "polar-scheduler/tests/mock-agent",
-    "polar-scheduler/tests/mock-adhoc-agent",
     "build-processor",
-    "cert-issuer/server","cert-issuer/client", "cert-issuer/common"
+    "cert-issuer/server","cert-issuer/client", "cert-issuer/common",
+    "secret-harness",
+    "soft-state/common",
+    "soft-state/observe",
+    "soft-state/process",
 ]
 
 [workspace.package]
@@ -90,122 +108,159 @@ authors = ["David Shepard", "Vaughn Coates"]
 name = "polar"
 
 [workspace.dependencies]
-# External crates – common across many members
-hyper = "1.9.0"
-hyper-util = { version = "0.1.20", features = ["client"]}
-hyperlocal = "0.9.1"
-http-body-util = "0.1.3"
 rstest = "0.21"
 assert_matches = "1"
-ahash = "0.8.12"
 anyhow = "1.0.102"
-async-global-executor-trait = "3.1.0"
+# build-orchestrator's object store client. The SDK's default HTTPS client is rustls over aws-lc-rs, which the fork
+# does not use (ring only, static musl builds), so the default client is off and the agent gives it one over ring
+# (aws-smithy-http-client, rustls-ring).
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
+config = "0.14"
+http-body-util = "0.1.3"
+hyper = "1.9.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
-bitflags = "2.11.0"
-bytecheck = "0.8.2"
-bytecheck_derive = "0.8.2"
 cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5.60", features = ["derive"] }   # only used in one place, but added for consistency
 clokwerk = "0.4.0"
 cyclonedx-bom = "0.8.0"                                 # used in provenance
 cynic = "3.12.0"                                        # used in gitlab, jira?
-dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 docker_credential = "1.3.2"                             # used in resolver
-executor-trait = "3.1.0"
-fake = "4.4.0"                                           # only in producer, but ok
-features = "0.10.0"                                      # used in resolver
 futures = "0.3.32"                                       # used in kube-observer
 futures-lite = "2.6.1"
-getrandom = "0.3.4"
 git2 = "0.20"
 hex = "0.4.3"
+# http::Uri, the type hyper-util's proxy matcher takes (polar::egress)
+http = "1.5"
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.27", features = ["v1_35", "schemars"] }
 kube = { version = "3.1.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
-libloading = "0.8.9"
 log = "0.4.29"                                            # used in jira/observe
 notify = "7"
-neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
-oci-client = "0.15.0"                                     # used in resolver
+# Our own fork, v0.9.0-rc.10 (the latest release) and one commit (branch `polar-v0.9.0-rc.10`): a connection can
+# take a rustls client configuration the caller made (`ConfigBuilder::with_rustls_config`), so a graph writer shows
+# Neo4j the custody daemon's key, which is in no file (docs/architecture/key-custody.md, "The neo4rs patch"). Pinned
+# to a specific commit, as the other forks are.
+neo4rs = { version = "0.9.0-rc.10", git = "https://github.com/daveman1010221/neo4rs", rev = "4117f5a" }
+# Used in resolver and build-processor. 0.18 reads a registry token's expiry itself, without the unmaintained jwt
+# crate (RUSTSEC-2016-0007). native-tls, as 0.15's defaults chose: 0.18's defaults would move the client to rustls
+# on aws-lc-rs with the platform root store.
+oci-client = { version = "0.18.0", default-features = false, features = ["native-tls"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 parse_link_header = "0.4"
-proptest = "1.10.0"                                       # only in policy-config dev, but ok
-ractor = { version = "0.15.10", features = ["async-trait"] }
+proptest = "1.10.0"
+# The authority model's rules (docs/architecture/authority-model.md, "The engine"): chosen 2026-10-22, after research.
+ascent = "0.8.1"
+# output-port-v2: the first OutputPort kept ten messages per subscriber and dropped a subscriber that fell further
+# behind, for good and silently (cassini/client/tests/output_port.rs); every client's events go through these ports.
+ractor = { version = "0.15.10", features = ["async-trait", "output-port-v2"] }
 rand = "0.10.0"
-rand_core = "0.10.0"
-reactor-trait = "3.1.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 rkyv = "0.8.15"
-rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
-rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_json = "1.0"
 serde_path_to_error = "0.1"                               # used in jira/observe
 serde_yaml = "0.9"                                         # used in jira/observe
-sha2 = "0.10.9"
+sha2 = "^0.10.9"
+ed25519-dalek = { version = "2.2", features = ["pkcs8"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
 socket2 = "0.5"                                            # used in cassini/client
 sysinfo = "0.36"
-tcp-stream = "0.34"
+tcp-stream = { version = "0.34", default-features = false, features = ["rustls-platform-verifier", "rustls--ring", "tokio"] }
 tempfile = "3.26.0"                                        # used in tests
 testcontainers = "0.27.2"
 testcontainers-modules = { version = "0.15.0", features = ["neo4j"] }
 tokio = { version = "1.49.0", features = ["full"] }       # full included for simplicity
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12", "ring"] }
 tokio-util = {version = "0.7.18", features = ["compat"]}
 tracing = "0.1.44"
 tracing-glog = "0.4.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 url = "2.5.8"
-urlencoding = "2.1.3"
 utoipa = "5.4.0"                                           # used in openapi
 uuid = {version = "1.21.0", features = ["v4", "serde"]}
 webpki-roots = "1.0"
-config = "0.14"
-# S3-compatible object storage client.
-# Works against MinIO, AWS S3, and any other S3-compatible backend.
-# We only pull in the s3 service crate — not the full SDK — to keep
-# compile times reasonable.
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3  = "1"
-aws-credential-types = "1"
 # Error handling
 thiserror = "1"
 bytes = "1.11.1"
-bollard = { version = "0.20.2", default-features = false, features = ["pipe"] }
 # Internal crates (members) – add as workspace dependencies with paths
 cassini-broker = { path = "cassini/broker" }
-cassini-c2 = { path = "cassini/cassini-c2" }
+# Every binary's allocator (docs/architecture/broker-baseline.md, "Decided").
+polar-scudo = { path = "polar-scudo" }
+# What every binary reports as its version, and its traces as service.version (polar-version/src/lib.rs).
+polar-version = { path = "polar-version" }
 cassini-client = { path = "cassini/client" }
 cassini-tracing = { path = "cassini/cassini-tracing" }
 cassini-types = { path = "cassini/types" }
 common = { path = "gitlab/common" }                         # gitlab common
+credentials_agent_common = { path = "credentials-agent/common" }
+credentials-agent-client = { path = "credentials-agent/client" }
+credentials-agent-model = { path = "credentials-agent/model" }
 git-agent-common = { path = "git/common" }
 gitlab-queries = { path = "gitlab/query" }
 gitlab-schema = { path = "gitlab/schema" }
 harness-common = { path = "cassini/test/common" }
 jira_common = { path = "jira/common" }
+jwt_utils = { path = "jwt-utils" }
 kube-common = { path = "kubernetes/common" }
+polar = { path = "lib" }
+errno = "0.3.14"
+libc = "0.2"
+uninit = "0.3"
+polar-crypto = { path = "polar-crypto" }
+polar-escrow = { path = "polar-escrow" }
+polar-signing = { path = "polar-signing" }
+polar-scheduler-common = { path = "polar-scheduler/common" }
+polar-env = { path = "polar-env" }
+polar-custody = { path = "polar-custody" }
+polar-custody-daemon = { path = "polar-custody/daemon" }
+polar-git-server-common = { path = "polar-git-server/common" }
+polar-health = { path = "polar-health" }
+polar-kernel-keyring = { path = "polar-kernel-keyring" }
+polar-permissions = { path = "polar-permissions" }
+polar-policy = { path = "polar-policy" }
+polar-agent-builder = { path = "polar-agent-builder" }
+polar-router = { path = "polar-router" }
+polar-test-graph = { path = "polar-test-graph" }
 polar-operator-common = { path = "polar-operator/common" }
-
 orchestrator-core = { path = "build-orchestrator/core" }
 orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
-orchestrator-backend-podman = { path = "build-orchestrator/podman" }
-polar = { path = "lib" }
-polar-health = { path = "polar-health" }
-polar-init = { path = "polar-init" }
+soft-state-common = { path = "soft-state/common" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
-x509-parser = { version = "0.16", features = ["verify"]}
-rsa = "0.9"
+x509-parser = { version = "0.18", features = ["verify"] }
+# Our own fork -- crates.io's published rsa crate keeps
+# oaep_decrypt_digest as pub(crate), unreachable from outside the
+# crate. That function is the real, already-audited OAEP-unpad step,
+# genuinely, mathematically separate from the raw RSA modular-
+# exponentiation operation -- exposing it as `pub` is what lets
+# polar-kernel-keyring's own decrypt() perform real OAEP unpadding on
+# the raw, still-padded bytes the kernel hands back (the kernel's own
+# keyctl_pkey_decrypt genuinely, only implements PKCS1v1.5 padding
+# internally; see this fork's own commit history for the full
+# investigation). Pinned to a specific commit, not `branch = "master"`,
+# matching the same, established convention as keyutils-raw below.
+rsa = { git = "https://github.com/daveman1010221/RSA.git", rev = "aa4bc50", features = ["hazmat"] }
+# Our own fork -- crates.io's published 0.4.0 has a real, confirmed
+# bug in PKeyOpParamsKernel (missing the kernel's own required
+# __spare[7] padding, causing every keyctl_pkey_encrypt/decrypt/sign
+# call to genuinely fail with EINVAL). Pinned to a specific commit,
+# not `branch = "master"`, so this dependency can't silently drift if
+# the fork's own master ever moves forward again without us noticing.
+keyutils-raw = { git = "https://github.com/daveman1010221/rust-keyutils.git", rev = "f22e830", package = "keyutils-raw" }
 
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 rcgen = { version = "0.14.7", features = ["x509-parser"] }
 # Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]

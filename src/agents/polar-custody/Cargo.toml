@@ -1,0 +1,56 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+[package]
+name = "polar-custody"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
+# The pod's escrow key (docs/architecture/key-custody.md, "Part A"): P-256, sealed and unwrapped through polar-escrow.
+p256 = { workspace = true, features = ["pem"] }
+polar-escrow.workspace = true
+rsa.workspace = true
+polar-env.workspace = true
+rcgen.workspace = true
+ring = "0.17.14"
+rkyv.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+zeroize = { version = "1.9.0", features = ["aarch64"] }
+
+[dev-dependencies]
+# The tests' callers are this process's own UID.
+libc.workspace = true
+# The tests check signatures with a second, independent implementation.
+p256.workspace = true
+proptest.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+tokio-rustls.workspace = true

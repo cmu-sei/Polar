@@ -1,321 +1,323 @@
-use std::sync::Arc;
-use std::time::Duration;
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
 
 use crate::BROKER_CLIENT_NAME;
-use crate::JiraConsumerArgs;
-use crate::get_neo_config;
-use crate::groups::JiraGroupConsumer;
-use crate::issues::JiraIssueConsumer;
-use crate::projects::JiraProjectConsumer;
-use crate::users::JiraUserConsumer;
-use cassini_backoff::{Backoff, ExponentialBackoff};
-use cassini_client::TCPClientConfig;
-use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
-use cassini_types::ClientMessage;
+use crate::{groups, issues, projects, users};
 use cassini_types::ClientEvent;
-use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
-use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
-use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
-use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::types::JiraData;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use polar::{Supervisor, SupervisorMessage};
-use ractor::Actor;
+use jira_common::{
+    JIRA_GROUPS_CONSUMER_TOPIC, JIRA_ISSUES_CONSUMER_TOPIC, JIRA_PROJECTS_CONSUMER_TOPIC,
+    JIRA_USERS_CONSUMER_TOPIC,
+};
+use polar::cassini::{CassiniClient, TcpClient};
+use polar::graph::controller::{
+    GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal,
+};
+use polar_agent_builder::{
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
+};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
-use ractor::registry::where_is;
-use ractor::rpc::CallResult;
-use ractor::rpc::call;
-use tokio::task::JoinHandle;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
-use tracing::warn;
+use ractor::concurrency::Duration;
+use ractor::{Actor, OutputPort};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
-const DRAIN_WINDOW_SECS: u64 = 5;
+/// Every topic this agent consumes. One Subscription each; all of them
+/// deliver to the supervisor, which decodes and writes to the graph.
+pub(crate) const JIRA_TOPICS: [&str; 4] = [
+    JIRA_PROJECTS_CONSUMER_TOPIC,
+    JIRA_GROUPS_CONSUMER_TOPIC,
+    JIRA_USERS_CONSUMER_TOPIC,
+    JIRA_ISSUES_CONSUMER_TOPIC,
+];
+
+/// How long the infrastructure supervisor gives this agent to drain: the graph
+/// controller's stop (up to 30 s) plus a margin. If it is not done by then the
+/// process exits 1 regardless.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30 + 10);
+
+/// This supervisor's own message type. polar::SupervisorMessage cannot
+/// carry the two infrastructure signals without polar-agent-builder
+/// depending back on lib, so the builder is generic over the message and
+/// each supervisor defines what it needs (see kube-observer).
+pub enum ConsumerSupervisorMessage {
+    ClientEvent {
+        event: ClientEvent,
+    },
+    GraphSignal(GraphSignal),
+    /// The HealthCheckActor, a child of InfrastructureSupervisor, has
+    /// terminated for rejuvenation. Finish this supervisor's own work,
+    /// then send InfrastructureSupervisorMessage::ProceedWithShutdown.
+    PrepareShutdown,
+}
 
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    graph_config: neo4rs::Config,
-    healthcheck: ActorRef<HealthCheckMessage>,
-    draining: bool,
+    broker_client: TcpClient,
+    graph_controller: Option<GraphController>,
+    healthcheck: HealthHandle,
+    /// Sent ProceedWithShutdown once the graph controller has flushed.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    /// True once PrepareShutdown has been received. Messages that still
+    /// arrive are logged, not written, and a linked actor stopping is
+    /// expected rather than fatal.
+    shutting_down: bool,
 }
-impl Supervisor for ConsumerSupervisor {
-    fn deserialize_and_dispatch(topic: String, new_payload: Vec<u8>) {
-        warn!("Payload:{:?}", topic);
-        match rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&new_payload) {
-            Ok(msg) => {
-                match msg {
-                    ClientMessage::PublishRequest {topic, payload, .. } => {
-                        match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
-                            Ok(message) => {
-                                if let Some(consumer) = where_is(topic.clone())
-                                    && let Err(e) = consumer.send_message(message)
-                                {
-                                    tracing::warn!("Error forwarding message. {e}");
-                                }
-                            },
-                            Err(err) => warn!("Failed to deserialize message: {:?}", err),
-                        }
-                    },
-                    other => {
-                        warn!("Received unexpected ClientMessage variant: {:?}", other);
-                    }
-                }
-            }
-            Err(err) => warn!("Failed to deserialize message on topic '{topic}': {:?}", err),
+
+/// How long the graph controller gets to finish at a shutdown.
+const GRAPH_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stops the graph controller at a shutdown once it has written every op already in its mailbox (a drain), bounded
+/// by `timeout`; one that has not stopped by then is logged and left, as the process is about to exit. A stop
+/// (`stop_and_wait`) would be served before the ops still queued, and lose them at every rejuvenation.
+async fn stop_graph_controller(controller: GraphController, timeout: Duration) {
+    match controller.drain_and_wait(Some(timeout)).await {
+        Ok(()) => {
+            info!("CONSUMER_SUPERVISOR: graph controller wrote what was queued and stopped");
+        }
+        Err(e) => {
+            error!(
+                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
+                 within {timeout:?}, continuing: {e:?}"
+            );
         }
     }
 }
+
+/// Decodes what an observer published: the payload of the event is the
+/// serialized JiraData. Anything that does not decode is logged and
+/// dropped, never fatal.
+pub fn decode_payload(payload: &[u8]) -> Option<JiraData> {
+    match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(payload) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            warn!("Failed to deserialize jira data: {e:?}");
+            None
+        }
+    }
+}
+
 impl ConsumerSupervisor {
-    /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
-    async fn restart_actor(
-        actor_name: String,
-        supervisor: ActorRef<SupervisorMessage>,
-        graph_config: neo4rs::Config,
-    ) -> Result<ActorRef<JiraData>, String> {
-        // Set up an exponential backoff policy
-        let mut backoff = ExponentialBackoff::default();
-        backoff.initial_interval = Duration::from_secs(3);
-        backoff.max_interval = Duration::from_secs(300);
-        backoff.max_elapsed_time = Some(Duration::from_secs(3000)); // roughly 10 attempts
-
-        let mut count = 0;
-
-        while let Some(duration) = backoff.next_backoff() {
-            count += 1;
-
-            let registration_id = ConsumerSupervisor::get_registration_id()
-                .await
-                .expect("Expected agent to be registered.");
-
-            let args = JiraConsumerArgs {
-                registration_id,
-                graph_config: graph_config.clone(),
-            };
-
-            debug!("Restarting actor: {actor_name}, attempt: {count}");
-
-            let spawn_result: Result<(ActorRef<JiraData>, JoinHandle<()>), ActorProcessingErr> =
-                if actor_name == JIRA_ISSUES_CONSUMER_TOPIC {
-                    Actor::spawn_linked(
-                        Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
-                        JiraIssueConsumer,
-                        args.clone(),
-                        supervisor.clone().into(),
-                    )
-                    .await
-                    .map_err(|e| ActorProcessingErr::from(format!("{e}")))
-                } else {
-                    Err(ActorProcessingErr::from("Unsupported actor name"))
-                };
-
-            match spawn_result {
-                Ok(_) => break,
-                Err(_) => {
-                    warn!(
-                        "Failed to start actor {actor_name}, retrying in {:?}",
-                        duration
-                    );
-                    tokio::time::sleep(duration).await;
-                }
+    fn dispatch(
+        topic: &str,
+        payload: &[u8],
+        graph_controller: &GraphController,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(data) = decode_payload(payload) else {
+            warn!("Dropping undecodable message on topic '{topic}'");
+            return Ok(());
+        };
+        match data {
+            JiraData::Projects(items) => projects::handle_projects(&items, graph_controller),
+            JiraData::Groups(items) => groups::handle_groups(&items, graph_controller),
+            JiraData::Users(items) => users::handle_users(&items, graph_controller),
+            JiraData::Issues(issue) => issues::handle_issue(&issue.json, graph_controller),
+            #[allow(unreachable_patterns)]
+            _ => {
+                warn!("Ignoring unexpected jira data on topic '{topic}'");
+                Ok(())
             }
         }
-
-        match where_is(actor_name.clone()) {
-            Some(actor) => Ok(actor.into()),
-            None => Err(format!(
-                "Failed to start actor {actor_name} after {count} attempt(s)!"
-            )),
-        }
     }
 
-    pub async fn get_registration_id() -> Option<String> {
-        let client =
-            where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP Client.");
-
-        match call(&client, TcpClientMessage::GetRegistrationId, None)
-            .await
-            .expect("Expected to call TCP Client")
-        {
-            CallResult::Success(registration_id) => registration_id,
-            _ => panic!("Couldn't contact TCP Client"),
-        }
+    /// One Subscription per topic. Each deliver closure rebuilds the
+    /// ClientEvent::MessagePublished the supervisor's handle() expects and
+    /// forwards it. AgentBuilder fires the wire-level Subscribe for every
+    /// one of them when the client registers, and again after a reconnect.
+    fn jira_subscriptions(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Vec<Subscription> {
+        JIRA_TOPICS
+            .iter()
+            .map(|topic| {
+                let supervisor = supervisor.clone();
+                Subscription::new(*topic, move |incoming| {
+                    let event = ClientEvent::MessagePublished {
+                        topic: incoming.topic,
+                        payload: incoming.payload,
+                        trace_ctx: incoming.trace_ctx,
+                        published_by: incoming.published_by,
+                        published_instance: incoming.published_instance,
+                    };
+                    if let Err(e) =
+                        supervisor.send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                    {
+                        warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                    }
+                })
+            })
+            .collect()
     }
 }
+
 #[async_trait]
 impl Actor for ConsumerSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
+        // HealthCheckActor, RouterActor, the four topic subscriptions and
+        // the TcpClient in one composed call. The builder checks that the
+        // deployment provides graph-write (POLAR_CAPABILITIES) before
+        // spawning anything, and reads the dependency endpoints from
+        // POLAR_HEALTH_DEP_ENDPOINTS. This agent never encrypts a payload,
+        // so it does not declare encryption.
+        // What the graph controller makes at start for the labels this agent owns; read before the builder takes
+        // the configuration.
+        let key_indexes = configured.graph_key_indexes();
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
+        for subscription in Self::jira_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let resources = builder
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
+            .build()
+            .await?;
+
+        // The infrastructure half of the respawn and shutdown protocol.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ConsumerSupervisorMessage::PrepareShutdown)
+                }
+            });
+
+        // Eager graph controller spawn: its health never needs to wait on
+        // Cassini registration. GraphControllerActor::pre_start only builds
+        // pool config; HealthCheckMessage::GraphAvailable is what proves
+        // real connectivity.
+        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+        graph_signal_port.subscribe(myself.clone(), |signal| {
+            Some(ConsumerSupervisorMessage::GraphSignal(signal))
         });
-
-        // NOTE: expects_graph is false here even though this agent's child
-        // actors (JiraProjectConsumer, JiraIssueConsumer, etc.) do write to
-        // Neo4j -- they manage their own graph connections independently via
-        // graph_config in their args, not through a GraphControllerActor
-        // this supervisor spawns. There is currently no signal path from
-        // those children back to this supervisor's healthcheck, so graph
-        // availability (GraphAvailable/GraphOpFailed) is NOT tracked for
-        // this agent yet. Cert rejuvenation still applies. Wiring real graph
-        // availability tracking here requires touching the child consumer
-        // actors themselves -- tracked as follow-up, not done in this pass.
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-        ];
-
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: false,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-                prepare_shutdown_port,
-            },
+        let (graph_controller, _) = GraphControllerActor::spawn_linked(
+            Some("jira.process.graph.controller".to_string()),
+            GraphControllerActor,
+            // The settings come from the builder's snapshot, which already judged them.
+            GraphControllerArgs::new(graph_signal_port)
+                .with_settings(
+                    polar::graph::environment::GraphSettings::from_env(&*resources.config)
+                        .map_err(ActorProcessingErr::from)?,
+                )
+                .with_key_indexes(key_indexes),
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let client_config = TCPClientConfig::new()?;
-
-        let (_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config,
-                registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
-            },
-            myself.clone().into(),
-        )
-        .await?;
-
-        let state = ConsumerSupervisorState {
-            graph_config: get_neo_config(),
-            healthcheck,
-            draining: false,
-        };
-
-        Ok(state)
+        Ok(ConsumerSupervisorState {
+            broker_client: resources.tcp_client,
+            graph_controller: Some(graph_controller),
+            healthcheck: resources.healthcheck,
+            infrastructure: resources.infrastructure,
+            shutting_down: false,
+        })
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("CONSUMER_SUPERVISOR: PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
+            ConsumerSupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.graph_available();
                 }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.graph_op_failed(reason);
+                }
+            },
+            ConsumerSupervisorMessage::PrepareShutdown => {
+                info!(
+                    "CONSUMER_SUPERVISOR: PrepareShutdown received -- unsubscribing and \
+                     flushing the graph controller before infrastructure goes down"
+                );
+                state.shutting_down = true;
+
+                for topic in JIRA_TOPICS {
+                    if let Err(e) =
+                        state
+                            .broker_client
+                            .unsubscribe(polar::cassini::UnsubscribeRequest {
+                                topic: topic.to_string(),
+                                trace_ctx: None,
+                            })
+                    {
+                        warn!(
+                            "CONSUMER_SUPERVISOR: unsubscribe from '{topic}' failed (continuing): {e}"
+                        );
+                    }
+                }
+
+                if let Some(controller) = state.graph_controller.take() {
+                    stop_graph_controller(controller, GRAPH_STOP_TIMEOUT).await;
+                }
+
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
             }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
-                std::process::exit(1);
-            }
-            SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { registration_id } => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-
-                    let args = JiraConsumerArgs {
-                        registration_id,
-                        graph_config: get_neo_config(),
-                    };
-
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
-                        JiraProjectConsumer,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start projects consumer. {e}");
-                        myself.stop(None);
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
-                        JiraGroupConsumer,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start groups consumer. {e}");
-                        myself.stop(None);
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
-                        JiraUserConsumer,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start users consumer. {e}");
-                        myself.stop(None);
-                    }
-
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
-                        JiraIssueConsumer,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start issues consumer. {e}");
-                        myself.stop(None);
-                    }
+            ConsumerSupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    // AgentBuilder already fired the wire-level Subscribe
+                    // for every topic when this event fired.
+                    let _ = state.healthcheck.cassini_connected();
+                    let _ = state.healthcheck.graph_connected();
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    if state.draining {
+                    if state.shutting_down {
                         warn!(
-                            "CONSUMER_SUPERVISOR: draining -- logging message on topic '{topic}' \
-                             ({} bytes) instead of dispatching; will be lost on exit",
+                            "CONSUMER_SUPERVISOR: shutting down -- logging message on topic \
+                             '{topic}' ({} bytes) instead of writing; will be lost on exit",
                             payload.len()
                         );
                         // TODO: publish to dead-letter queue once Cassini supports one.
+                    } else if let Some(controller) = &state.graph_controller {
+                        Self::dispatch(&topic, &payload, controller)?;
                     } else {
-                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                        return Err(ActorProcessingErr::from(
+                            "a message arrived but there is no graph controller",
+                        ));
                     }
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => (),
             },
@@ -325,7 +327,7 @@ impl Actor for ConsumerSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -338,101 +340,148 @@ impl Actor for ConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                let actor_name = actor_cell.get_name().unwrap_or_default();
-
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_name,
+                    actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-
-                // Clean termination of the healthcheck actor means the
-                // rejuvenation sequence completed -- exit via the bounded
-                // drain window, same as every other agent today. Any other
-                // actor terminating (a data consumer child) keeps the
-                // existing backoff-restart recovery path, unchanged.
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
-                    if !state.draining {
-                        state.draining = true;
-                        info!(
-                            "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
-                             entering drain window before exiting for rejuvenation"
-                        );
-                        let _ = myself
-                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                                SupervisorMessage::ForceExit
-                            })
-                            .await;
-                    }
-                    return Ok(());
+                // InfrastructureSupervisor is this supervisor's linked child
+                // from build(); the HealthCheckActor is its child, not this
+                // supervisor's. Its termination means the shutdown handshake
+                // is complete, or that infrastructure itself failed. Either
+                // way, exit non-zero so the Job creates a new pod with fresh
+                // certs. Matched by id: it is spawned unnamed.
+                if actor_cell.get_id() == state.infrastructure.get_id() {
+                    info!("CONSUMER_SUPERVISOR: infrastructure is down, exiting");
+                    std::process::exit(1);
                 }
-
-                match ConsumerSupervisor::restart_actor(
-                    actor_name.clone(),
-                    myself.clone(),
-                    state.graph_config.clone(),
-                )
-                .await
-                {
-                    Ok(actor) => {
-                        info!("Restarted actor {0:?}:{1:?}", actor_name, actor.get_id())
-                    }
-                    Err(e) => {
-                        error!("Failed to recover actor: {e}");
-                        myself.stop(Some(e))
-                    }
+                // Any other linked actor (the graph controller) stopping
+                // outside a shutdown means writes can no longer happen.
+                if !state.shutting_down {
+                    error!(
+                        "CONSUMER_SUPERVISOR: a linked actor terminated unexpectedly, \
+                         graph writes can no longer happen; exiting"
+                    );
+                    std::process::exit(1);
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                let actor_name = actor_cell.get_name().unwrap_or_default();
-
-                warn!(
-                    "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
-                    actor_name,
+                error!(
+                    "CONSUMER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
+                    actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-
-                // A healthcheck actor failure (e.g. hard cert-expiry
-                // deadline, or -- once wired -- a graph-availability
-                // deadline) is fatal: drain and exit, same as every other
-                // agent. A data consumer child failing keeps the existing
-                // backoff-restart recovery path.
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
-                    if !state.draining {
-                        state.draining = true;
-                        warn!(
-                            "CONSUMER_SUPERVISOR: entering drain window before exit; \
-                             any messages that arrive will be logged, not dispatched"
-                        );
-                        let _ = myself
-                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                                SupervisorMessage::ForceExit
-                            })
-                            .await;
-                    }
-                    return Ok(());
-                }
-
-                match ConsumerSupervisor::restart_actor(
-                    actor_name.clone(),
-                    myself.clone(),
-                    state.graph_config.clone(),
-                )
-                .await
-                {
-                    Ok(actor) => {
-                        info!("Restarted actor {0:?}:{1:?}", actor_name, actor.get_id())
-                    }
-                    Err(e) => {
-                        error!("Failed to recover actor: {e}");
-                        myself.stop(Some(e))
-                    }
-                }
+                // Any linked actor failing is fatal: exit so the Job
+                // controller creates a new pod.
+                std::process::exit(1);
             }
-
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => {}
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jira_common::types::JiraProject;
+
+    /// What an observer puts on the wire for this agent: the serialized
+    /// JiraData, nothing else.
+    fn as_published(data: &JiraData) -> Vec<u8> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(data)
+            .unwrap()
+            .into_vec()
+    }
+
+    #[test]
+    fn decodes_what_an_observer_publishes() {
+        let data = JiraData::Projects(vec![JiraProject {
+            id: "10042".to_string(),
+            key: "PLAT".to_string(),
+            name: "Platform".to_string(),
+            project_type_key: "software".to_string(),
+        }]);
+
+        let decoded = decode_payload(&as_published(&data));
+
+        assert!(matches!(
+            decoded,
+            Some(JiraData::Projects(ref p)) if p.len() == 1 && p[0].id == "10042"
+        ));
+    }
+
+    #[test]
+    fn a_payload_that_does_not_decode_is_dropped_not_fatal() {
+        assert!(decode_payload(&[0u8; 3]).is_none());
+    }
+
+    /// Stands in for the graph controller: it takes a while over each op, and counts the ops it wrote.
+    struct SlowGraph {
+        written: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Actor for SlowGraph {
+        type Msg = polar::graph::controller::GraphControllerMsg;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            if let polar::graph::controller::GraphControllerMsg::Op(_) = message {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                self.written
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    /// At a rejuvenation the writes still queued for the graph are written before the graph controller stops: none
+    /// is dropped.
+    #[tokio::test]
+    async fn the_graph_controller_writes_what_is_queued_before_it_stops() {
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (graph, _) = Actor::spawn(
+            None,
+            SlowGraph {
+                written: written.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        for _ in 0..40 {
+            graph
+                .cast(polar::graph::controller::GraphControllerMsg::Op(
+                    polar::graph::controller::GraphOp::Transaction { ops: vec![] },
+                ))
+                .unwrap();
+        }
+
+        stop_graph_controller(graph, Duration::from_secs(10)).await;
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 40);
+    }
+
+    #[test]
+    fn every_consumed_topic_is_subscribed_exactly_once() {
+        let mut topics = JIRA_TOPICS.to_vec();
+        topics.sort();
+        topics.dedup();
+        assert_eq!(topics.len(), 4);
     }
 }

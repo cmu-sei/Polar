@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Cert Issuer: Architecture Specification
 
 **Status:** Draft for review
@@ -54,6 +77,36 @@ The **HTTP layer** terminates TLS, parses requests, and dispatches to the issuan
 The **OIDC validation module** fetches and caches JWKS from the Kubernetes API server's OIDC discovery endpoint, validates JWT signatures, and extracts the workload identity claims from the token. It is written against a generic OIDC contract — issuer URL, audience, JWKS endpoint, claim paths — even though v1 only configures one issuer. Writing it generically costs almost nothing and means v2's multi-issuer addition is a configuration change rather than a refactor. JWKS are cached in-memory with TTLs respecting the `Cache-Control` header from the JWKS endpoint, with a default of 5 minutes and a maximum of 1 hour to bound key-rotation propagation. The `jsonwebtoken` crate handles JWT parsing and signature verification.
 
 The configuration for the issuer captures everything the validator needs: the expected `iss` claim, the expected `aud` claim (a required value, not optional, to prevent token replay), the JWKS URL (auto-discovered from the issuer if not specified), the JSON path within the JWT claims that contains the agent's stable identity (for Kubernetes, this is `sub`, which yields `system:serviceaccount:<namespace>:<service-account>`), the JSON path for the per-instance binding identifier (for Kubernetes, this is the pod UID nested under the `kubernetes.io` claim block), and the allowed signing algorithms (RS256, ES256, EdDSA — never HS256 or "none").
+
+**Token lifetime** (*since 2026-10-31*, `cert-issuer/server/src/oidc.rs`, `Validator::validate` steps 7 and 7b). Beyond
+the signature, issuer and audience, a token is held to time, with jsonwebtoken's leeway of 60 seconds on each check:
+
+- `exp` is required, and a token past it is `Expired`.
+- An `nbf` still to come is `NotYetValid("nbf")` (`validate_nbf` is on; before, a token not valid for a year was
+  accepted).
+- An `iat` still to come is `NotYetValid("iat")`. jsonwebtoken does not check `iat`, so the validator does, after
+  decoding.
+- A token issued to live longer than the maximum, `exp - iat`, is `LifetimeTooLong`, however little of it is left: a
+  long-lived token is a standing credential for whoever holds it. The maximum is `CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS`
+  (cert-issuer's settings section), default 86400, a day; 0 is refused at `--check`.
+- A token without `iat` (RFC 7519 makes it optional) is held to what is left of it, `exp - now`, against the same
+  maximum. That bounds how long it can still be used exactly as `exp - iat` would; refusing it outright would refuse an
+  issuer for leaving out a claim that adds nothing once `exp - now` is bounded.
+
+All three refusals reach the caller as `INVALID_TOKEN`, with the reason in the telemetry. The default was set against
+every token Polar presents (2026-10-31), the longest of which lives an hour:
+
+| Token | Lifetime | Where |
+|---|---|---|
+| A workload's projected ServiceAccount token | 3600 s | `infra/config/kinds.nuon` (`sa_token.expiration_secs`), into `agent.dhall` and `ca.dhall` |
+| The constants' projected token, and Neo4j's | 3600 s | `infra/schema/constants.dhall`, `infra/layers/2-services/neo4j/statefulset.dhall` |
+| The admin bootstrap ServiceAccount's TokenRequest | 600 s | `credentials-agent/admin/src/bootstrap.rs` |
+| A person's token from Keycloak | 300 s | Keycloak's realm default: the `polar` realm is created with defaults (`Justfile`, `kc create realms`), and nothing sets a lifespan |
+| `cert-issuer-setup`'s development tokens (RS256) | 3600 s | `cert-issuer/client/src/dev-setup/main.rs` (`TOKEN_LIFETIME_SECS`) |
+
+The projections ask for 3600 seconds, not 3607, so the API server's extension of legacy-length tokens to a year
+(`--service-account-extend-token-expiration`) does not apply to them. The token cert-issuer's own pod mounts
+automatically is presented only to the Kubernetes API, never to cert-issuer.
 
 Agents must request their projected service account tokens with the audience set to the cert issuer's configured audience. This is a single line in the pod spec's `serviceAccountToken` projected volume source, and it's the kind of thing that's easy to miss and important to get right. The cert issuer rejects tokens with mismatched audience claims with a clear error message identifying the misconfiguration. This is called out explicitly in the agent deployment documentation and surfaced as a distinct telemetry outcome (`INVALID_AUDIENCE`) so misconfigurations are immediately visible.
 

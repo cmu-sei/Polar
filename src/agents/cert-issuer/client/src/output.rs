@@ -1,7 +1,30 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 // cert_issuer_init/src/output.rs
 
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -42,6 +65,286 @@ pub fn write_bundle(dir: &Path, bundle: &OutputBundle<'_>) -> Result<(), OutputE
     write_atomic(dir, "ca.pem", bundle.ca_pem.as_bytes(), 0o644)?;
 
     Ok(())
+}
+
+/// Write a certificate whose key is the custody daemon's, and the CA, to `dir` atomically, as [`write_bundle`] writes
+/// them, and remove any `key.pem`: there is no key file beside such a certificate (docs/architecture/key-custody.md,
+/// step 3).
+pub fn write_certificate(dir: &Path, cert_pem: &str, ca_pem: &str) -> Result<(), OutputError> {
+    if !dir.exists() {
+        return Err(OutputError::DirMissing(dir.to_path_buf()));
+    }
+
+    write_atomic(dir, "cert.pem", cert_pem.as_bytes(), 0o644)?;
+    write_atomic(dir, "ca.pem", ca_pem.as_bytes(), 0o644)?;
+    match std::fs::remove_file(dir.join("key.pem")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// What a certificate is for, as the extended key usage says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Usage {
+    Server,
+    Client,
+}
+
+/// A bundle already in a directory, judged for use again.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExistingBundle {
+    /// There is no `cert.pem`: nothing was written here yet.
+    Absent,
+    /// The bundle can be used as it is: its certificate is signed by `ca.pem`, valid now, names the identity and
+    /// every requested name, has the requested usage, and `key.pem` is its key. `not_after` is when it expires.
+    Reusable { not_after: String },
+    /// A bundle is there but cannot be used, and why.
+    Unusable(String),
+}
+
+/// Whether the bundle `write_bundle` left in `dir` can be used again by the same pod, at `now`.
+///
+/// A pod whose init container runs again without the pod being replaced (its sandbox recreated after a node
+/// restart, a StatefulSet's pod restarted in place) keeps its UID, and with it its instance binding: the
+/// credentials agent refuses it a second certificate while the first is valid (`AlreadyHasValidCertificate`).
+/// The first one is still in the pod's own emptyDir, and it is the same certificate the agent would be refusing to
+/// duplicate, so using it again issues nothing new. Anything short of a complete, matching, valid bundle is
+/// `Unusable`, and the caller asks for a new certificate as before.
+///
+/// With `pinned_ca`, the CA the pod was given, the certificate is judged against it and not against the `ca.pem`
+/// beside it, which came with the certificate and so vouches for nothing.
+pub fn existing_bundle(
+    dir: &Path,
+    pinned_ca: Option<&[u8]>,
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> ExistingBundle {
+    let read = |name: &str| std::fs::read(dir.join(name));
+    let cert_pem = match read("cert.pem") {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ExistingBundle::Absent,
+        Err(e) => return ExistingBundle::Unusable(format!("cert.pem cannot be read: {e}")),
+    };
+    let key_pem = match read("key.pem") {
+        Ok(key) => key,
+        Err(e) => return ExistingBundle::Unusable(format!("key.pem cannot be read: {e}")),
+    };
+    let (ca_pem, ca_name) = match pinned_ca {
+        Some(pinned) => (pinned.to_vec(), "the pinned CA"),
+        None => match read("ca.pem") {
+            Ok(ca) => (ca, "ca.pem"),
+            Err(e) => return ExistingBundle::Unusable(format!("ca.pem cannot be read: {e}")),
+        },
+    };
+    match judge(
+        &cert_pem,
+        Key::File(&key_pem),
+        &ca_pem,
+        ca_name,
+        identity,
+        names,
+        usage,
+        now,
+    ) {
+        Ok(not_after) => ExistingBundle::Reusable { not_after },
+        Err(why) => ExistingBundle::Unusable(why),
+    }
+}
+
+/// Whether a certificate and its key, as they were handed over, can be used: signed by `pinned_ca`, valid at `now`,
+/// naming `identity` and every one of `names`, for `usage`, and `key_pem` its key. `Ok` is when it expires; `Err`
+/// says why not. polar-init judges what the credentials agent's observer hands it this way, against the CA the pod
+/// was given, never the chain that came with it (docs/architecture/core-restarts.md, "The plan", step 1).
+pub fn judge_bundle(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        Key::File(key_pem),
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
+/// Whether a certificate whose key is the custody daemon's can be used (docs/architecture/key-custody.md, step 3):
+/// judged as [`judge_bundle`] judges one, except that its key is the one `csr_pem`, the CSR it was issued for,
+/// carries, since there is no key file. `Ok` is when it expires.
+pub fn judge_certificate(
+    cert_pem: &[u8],
+    csr_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        Key::Csr(csr_pem),
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
+/// Whether a certificate the custody daemon already holds in a slot can still be used: judged as [`judge_certificate`]
+/// judges one, but for its key, which the daemon checked was the slot's when it installed it, and which no one else can
+/// see. polar-init run again in the same pod judges this way what its run before left sealed in the daemon
+/// (docs/architecture/key-custody.md, "A retry in place"). `Ok` is when it expires.
+pub fn judge_held(
+    cert_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        Key::Held,
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
+/// Where the certificate's key is to be found, for the judgement to check the certificate is for it.
+enum Key<'a> {
+    /// `key.pem`, the key itself.
+    File(&'a [u8]),
+    /// The CSR the certificate was issued for, whose key another holds.
+    Csr(&'a [u8]),
+    /// The custody daemon's, which checked the certificate is for it when it installed it.
+    Held,
+}
+
+/// The one judgement every caller makes. `ca_name` names the CA in the reasons.
+#[allow(clippy::too_many_arguments)]
+fn judge(
+    cert_pem: &[u8],
+    key: Key<'_>,
+    ca_pem: &[u8],
+    ca_name: &str,
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    use x509_parser::prelude::{ASN1Time, GeneralName};
+
+    let (_, cert_block) = x509_parser::pem::parse_x509_pem(cert_pem)
+        .map_err(|e| format!("cert.pem is not PEM: {e}"))?;
+    let cert = cert_block
+        .parse_x509()
+        .map_err(|e| format!("cert.pem is not a certificate: {e}"))?;
+    let (_, ca_block) = x509_parser::pem::parse_x509_pem(ca_pem)
+        .map_err(|e| format!("{ca_name} is not PEM: {e}"))?;
+    let ca = ca_block
+        .parse_x509()
+        .map_err(|e| format!("{ca_name} is not a certificate: {e}"))?;
+
+    cert.verify_signature(Some(ca.public_key()))
+        .map_err(|e| format!("the certificate is not signed by {ca_name}: {e}"))?;
+
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let at = ASN1Time::from_timestamp(secs)
+        .map_err(|e| format!("the time to judge it at is out of range: {e}"))?;
+    let not_after = cert.validity().not_after;
+    if !cert.validity().is_valid_at(at) {
+        return Err(format!(
+            "the certificate is not valid now (valid {} to {not_after})",
+            cert.validity().not_before
+        ));
+    }
+
+    let dns_names: Vec<&str> = match cert.subject_alternative_name() {
+        Ok(Some(san)) => san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|n| match n {
+                GeneralName::DNSName(name) => Some(*name),
+                _ => None,
+            })
+            .collect(),
+        Ok(None) => vec![],
+        Err(e) => return Err(format!("its subject alternative names cannot be read: {e}")),
+    };
+    if let Some(missing) = std::iter::once(identity)
+        .chain(names.iter().map(String::as_str))
+        .find(|wanted| !dns_names.contains(wanted))
+    {
+        return Err(format!("the certificate does not name '{missing}'"));
+    }
+
+    let has_usage = match cert.extended_key_usage() {
+        Ok(Some(eku)) => match usage {
+            Usage::Server => eku.value.server_auth,
+            Usage::Client => eku.value.client_auth,
+        },
+        Ok(None) => false,
+        Err(e) => return Err(format!("its extended key usage cannot be read: {e}")),
+    };
+    if !has_usage {
+        return Err(format!("the certificate is not for {usage:?} use"));
+    }
+
+    let certified = cert.public_key().subject_public_key.data.as_ref();
+    match key {
+        Key::File(key_pem) => {
+            let key = std::str::from_utf8(key_pem)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| rcgen::KeyPair::from_pem(pem).map_err(|e| e.to_string()))
+                .map_err(|e| format!("key.pem is not a private key: {e}"))?;
+            if key.public_key_raw() != certified {
+                return Err("key.pem is not the certificate's key".to_string());
+            }
+        }
+        Key::Csr(csr_pem) => {
+            use x509_parser::prelude::FromDer as _;
+            let (_, block) = x509_parser::pem::parse_x509_pem(csr_pem)
+                .map_err(|e| format!("the CSR is not PEM: {e}"))?;
+            let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(
+                &block.contents,
+            )
+            .map_err(|e| format!("the CSR is not a CSR: {e}"))?;
+            if csr
+                .certification_request_info
+                .subject_pki
+                .subject_public_key
+                .data
+                .as_ref()
+                != certified
+            {
+                return Err("the certificate is not for the key the CSR carries".to_string());
+            }
+        }
+        Key::Held => {}
+    }
+
+    Ok(not_after.to_string())
 }
 
 fn write_atomic(dir: &Path, filename: &str, contents: &[u8], mode: u32) -> Result<(), OutputError> {

@@ -1,127 +1,35 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sha2::{Digest, Sha256};
+/*
+   ACE Tool
 
-pub use cassini_types::trace::WireTraceCtx;
+   Copyright 2026 Carnegie Mellon University.
 
-pub mod client;
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-pub enum SupervisorMessage {
-    ControllerConnected,
-    CommandReceived { command: ControllerCommand },
-    TransportError { reason: String },
-    AgentError { reason: String },
-    SinkReady,
-}
-pub enum ConnectionState {
-    Connected,
-    NotContacted,
-}
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub enum AgentRole {
-    Producer,
-    Sink,
-}
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub enum ControllerCommand {
-    Hello {
-        role: AgentRole,
-    },
-    ProducerConfig {
-        producer: ProducerConfig,
-    },
-    SinkConfig {
-        topic: String,
-        expected_count: Option<usize>,
-    },
-    SinkReady,
-    TestComplete {
-        client_id: String,
-        role: AgentRole,
-    },
-    Shutdown,
-    /// a message to the sink to tell it that it can go about cleanup and validation
-    ProducerFinished,
-    ShutDownComplete {
-        role: AgentRole,
-    },
-    TestError {
-        error: String,
-    },
-}
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
 
-/// Messaging pattern that mimics user behavior over the network.
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub enum MessagePattern {
-    Drip {
-        idle_time_seconds: u64,
-    },
-    Burst {
-        burst_size: usize,
-        idle_time_seconds: u64,
-    },
-}
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub enum PayloadSpec {
-    Fixed(String),
-    Random { seed: u64 },
-    FromFile { path: String },
-    Template { template: String },
-}
-// Config for the supervisor
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub struct ProducerConfig {
-    pub topic: String,
-    pub message_size: u64,
-    pub duration: u64,
-    pub pattern: MessagePattern,
-}
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-/// Expectations are evaluated locally by sinks.
-/// The controller only aggregates failures.
-#[derive(
-    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub enum Expectation {
-    /// At least N messages observed within a window.
-    AtLeast { messages: u64, within_seconds: u64 },
-    /// No duplicate message identifiers observed.
-    NoDuplicates,
-    /// Payloads must deserialize and match expected schema.
-    NoCorruption,
-}
-///A general message envelope that gets exchanged between the sink and producer.
-/// Dhall already has strong typing, so testers can describe structured values with guaranteed shape.
-/// We can import their Dhall config in Rust and convert it to JSON.
-/// That JSON can then be wrapped in this envelope (metadata: topic, seqno, checksum if needed, etc).
-#[derive(
-    Debug, Clone, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
-)]
-pub struct Envelope {
-    pub seqno: u64,
-    pub data: String,
-    pub checksum: String,
-    pub trace_ctx: WireTraceCtx,
-}
+   DM26-0670
+*/
 
-pub fn compute_checksum(payload: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(payload);
-    let result = hasher.finalize();
-    hex::encode(result) // hex string, e.g. "9c56cc51..."
-}
+//! What the load harness's producer and sink share (docs/architecture/policy-enforcement.md, stage 5a): the topics
+//! they meet on, the message they exchange, the run they are given, how a run is paced and measured, and the line
+//! each reports at the end. Everything here is pure, so it is tested here; the agents only carry it out.
 
-pub fn validate_checksum(payload: &[u8], expected: &str) -> bool {
-    let actual = compute_checksum(payload);
-    actual == expected
-}
+#![deny(clippy::disallowed_methods)]
+
+pub mod envelope;
+pub mod lanes;
+pub mod report;
+pub mod schedule;
+pub mod settings;
+pub mod stats;

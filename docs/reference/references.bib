@@ -1,0 +1,107 @@
+% ACE Tool
+%
+% Copyright 2026 Carnegie Mellon University.
+%
+% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%
+% Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+% for full terms.
+%
+% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%
+% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%
+% DM26-0670
+%
+% docs/reference/references.bib: the works in citations.md, for tools. Keep the two in step.
+
+@inproceedings{sahebolamri2022ascent,
+  author    = {Sahebolamri, Arash and Gilray, Thomas and Micinski, Kristopher},
+  title     = {Seamless Deductive Inference via Macros},
+  booktitle = {Proceedings of the 31st ACM SIGPLAN International Conference on Compiler Construction},
+  series    = {CC '22},
+  year      = {2022},
+  address   = {Seoul, South Korea},
+  publisher = {ACM},
+  doi       = {10.1145/3497776.3517779},
+  url       = {https://s-arash.github.io/ascent/cc22main-p95-seamless-deductive-inference-via-macros.pdf},
+  note      = {12 pages}
+}
+
+@article{sahebolamri2023byods,
+  author  = {Sahebolamri, Arash and Barrett, Langston and Moore, Scott and Micinski, Kristopher},
+  title   = {Bring Your Own Data Structures to Datalog},
+  journal = {Proceedings of the ACM on Programming Languages},
+  volume  = {7},
+  number  = {OOPSLA2},
+  articleno = {264},
+  month   = oct,
+  year    = {2023},
+  doi     = {10.1145/3622840},
+  note    = {26 pages. CC BY 4.0}
+}
+
+@article{ceri1989datalog,
+  author  = {Ceri, Stefano and Gottlob, Georg and Tanca, Letizia},
+  title   = {What You Always Wanted to Know About {Datalog} (And Never Dared to Ask)},
+  journal = {IEEE Transactions on Knowledge and Data Engineering},
+  volume  = {1},
+  number  = {1},
+  pages   = {146--166},
+  year    = {1989}
+}
+
+@article{cutler2024cedar,
+  author  = {Cutler, Joseph W. and Disselkoen, Craig and Eline, Aaron and others},
+  title   = {Cedar: A New Language for Expressive, Fast, Safe, and Analyzable Authorization},
+  journal = {Proceedings of the ACM on Programming Languages},
+  number  = {OOPSLA},
+  year    = {2024},
+  doi     = {10.1145/3649835},
+  eprint  = {2403.04651},
+  archivePrefix = {arXiv}
+}
+
+@techreport{oasis2013xacml,
+  author      = {{OASIS}},
+  editor      = {Rissanen, Erik},
+  title       = {{eXtensible Access Control Markup Language (XACML)} Version 3.0},
+  institution = {OASIS},
+  type        = {OASIS Standard},
+  month       = jan,
+  year        = {2013},
+  url         = {https://docs.oasis-open.org/xacml/3.0/xacml-3.0-core-spec-os-en.html}
+}
+
+@inproceedings{pang2019zanzibar,
+  author    = {Pang, Ruoming and others},
+  title     = {Zanzibar: {Google}'s Consistent, Global Authorization System},
+  booktitle = {2019 USENIX Annual Technical Conference},
+  series    = {USENIX ATC '19},
+  pages     = {33--46},
+  year      = {2019},
+  address   = {Renton, WA},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/conference/atc19/presentation/pang}
+}
+
+@software{ascent,
+  author  = {Sahebolamri, Arash},
+  title   = {ascent: Logic programming in {Rust}},
+  url     = {https://github.com/s-arash/ascent},
+  version = {0.8.1},
+  date    = {2026-08-29},
+  license = {MIT}
+}
+
+@software{polonius,
+  author = {{The Rust Project Developers}},
+  title  = {Polonius: the {Rust} borrow checker formulated in {Datalog}},
+  url    = {https://github.com/rust-lang/polonius}
+}

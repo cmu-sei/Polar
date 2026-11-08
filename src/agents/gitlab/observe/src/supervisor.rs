@@ -1,3 +1,26 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::BROKER_CLIENT_NAME;
 use crate::GITLAB_GROUPS_OBSERVER;
 use crate::GITLAB_JOBS_OBSERVER;
@@ -85,8 +108,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config: client_config,
                 registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
+                delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+                answers: None,
             },
             myself.clone().into(),
         )
@@ -110,7 +133,6 @@ impl Actor for ObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { registration_id } => {
@@ -126,66 +148,68 @@ impl Actor for ObserverSupervisor {
                             tcp_client: state.tcp_client.clone(),
                         };
 
+                        // On every registration, as after a session the broker ended: an observer still running is
+                        // kept (it subscribes to nothing; it only publishes).
                         //TODO: Should other observers wait until the meta observer is online and observing?
                         //TODO: decide which observers to start based off of some configuration
-                        Actor::spawn_linked(
-                            Some(META_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            META_OBSERVER,
                             MetaObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_USERS_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_USERS_OBSERVER,
                             GitlabUserObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_PROJECT_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_PROJECT_OBSERVER,
                             GitlabProjectObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_PIPELINE_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_PIPELINE_OBSERVER,
                             GitlabPipelineObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_JOBS_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_JOBS_OBSERVER,
                             GitlabJobObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_GROUPS_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_GROUPS_OBSERVER,
                             GitlabGroupObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_RUNNER_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_RUNNER_OBSERVER,
                             GitlabRunnerObserver,
                             args.clone(),
                             myself.clone().into(),
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                        polar::spawn_linked_unless_running(
+                            GITLAB_REPOSITORY_OBSERVER,
                             GitlabRepositoryObserver,
                             args.clone(),
                             myself.clone().into(),

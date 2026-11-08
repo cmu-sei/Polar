@@ -1,10 +1,33 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # polar-git-server
 
 A minimal local git HTTP server for Polar development. Serves local git
 working trees over HTTP using `nginx` + `fcgiwrap` + `git-http-backend`.
 
 **This is a development tool only.** It runs on the host via podman and is
-NOT deployed into the Polar cluster. Agents inside the usernetes cluster
+NOT deployed into the Polar cluster. Agents inside the cluster
 reach it via the host's LAN IP.
 
 ## Why this exists
@@ -37,7 +60,7 @@ http://localhost:3000/Polar.git
 http://localhost:3000/polar-schedules.git
 ```
 
-From inside the usernetes cluster:
+From inside the cluster:
 ```
 http://172.26.26.88:3000/Polar.git
 http://172.26.26.88:3000/polar-schedules.git

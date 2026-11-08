@@ -1,19 +1,58 @@
-use std::{env, fmt};
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+#![deny(clippy::disallowed_methods)]
+pub mod agent;
+pub mod authority;
 pub mod broker;
+pub mod budget;
+pub mod budget_report;
 pub mod control;
+pub mod deliveries;
 pub mod listener;
+pub mod pressure;
+pub mod runtime_budget;
 pub mod session;
+pub mod settings;
 pub mod subscriber;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod topic;
 
 /// Constant names of core supervisors, should remain constant
 /// as they are used to conduct lookups in the ractor registry
+/// How long a session whose client has gone away is kept, with what was held for it, before it is
+/// ended. A client that returns inside this window resumes its session and is replayed what it
+/// missed.
+pub const DEFAULT_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(600);
+
 pub const BROKER_NAME: &str = "BROKER_SUPERVISOR";
 pub const LISTENER_MANAGER_NAME: &str = "LISTENER_MANAGER";
 pub const SESSION_MANAGER_NAME: &str = "SESSION_MANAGER";
 pub const TOPIC_MANAGER_NAME: &str = "TOPIC_MANAGER";
 pub const SUBSCRIBER_MANAGER_NAME: &str = "SUBSCRIBER_MANAGER";
 pub const CONTROL_MANAGER_NAME: &str = "CONTROL_MANAGER";
+pub const PRESSURE_MANAGER_NAME: &str = "PRESSURE_MANAGER";
 pub const ACTOR_STARTUP_MSG: &str = "Started {myself:?}";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub const SESSION_NOT_NAMED: &str = "Expected session to have been named.";
@@ -30,23 +69,6 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
-pub const SHUTDOWN_AUTH_TOKEN: &str = "CASSINI_SHUTDOWN_TOKEN";
-
-#[derive(Debug, Clone)]
-pub enum BrokerConfigError {
-    EnvVar { var: String, source: env::VarError },
-}
-
-impl fmt::Display for BrokerConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::BrokerConfigError::EnvVar;
-        match self {
-            EnvVar { var, source } => {
-                write!(f, "{source}. Pleaes provide a value for {var}")
-            }
-        }
-    }
-}
 
 ///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.

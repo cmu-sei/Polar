@@ -1,24 +1,24 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 
 use std::time::Duration;
@@ -103,8 +103,8 @@ impl Actor for GitlabRunnerObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GitlabObserverMessage::Tick(command) => match command {
-                Command::GetRunners(op) => {
+            GitlabObserverMessage::Tick(command) => {
+                if let Command::GetRunners(op) = command {
                     debug!("Sending query: {:?}", op.query);
 
                     match state
@@ -133,26 +133,22 @@ impl Actor for GitlabRunnerObserver {
                                             error!("{e}");
                                             myself.stop(Some(e.to_string()))
                                         }
-                                    } else if let Some(query) = deserialized.data {
-                                        if let Some(connection) = query.runners {
-                                            let mut read_runners = Vec::new();
+                                    } else if let Some(query) = deserialized.data
+                                        && let Some(connection) = query.runners
+                                    {
+                                        let mut read_runners = Vec::new();
 
-                                            if let Some(runners) = connection.nodes {
-                                                for option in runners {
-                                                    if let Some(runner) = option {
-                                                        read_runners.push(runner);
-                                                    }
-                                                }
-                                            }
-
-                                            if let Err(e) = send_to_broker(
-                                                state,
-                                                GitlabData::Runners(read_runners),
-                                                RUNNERS_CONSUMER_TOPIC,
-                                            ) {
-                                                return Err(e);
+                                        if let Some(runners) = connection.nodes {
+                                            for runner in runners.into_iter().flatten() {
+                                                read_runners.push(runner);
                                             }
                                         }
+
+                                        send_to_broker(
+                                            state,
+                                            GitlabData::Runners(read_runners),
+                                            RUNNERS_CONSUMER_TOPIC,
+                                        )?;
                                     }
                                 }
                                 Err(e) => {
@@ -179,8 +175,7 @@ impl Actor for GitlabRunnerObserver {
                         }
                     }
                 }
-                _ => (),
-            },
+            }
             GitlabObserverMessage::Backoff(reason) => {
                 // cancel old event loop and start a new one with updated state, if observer hasn't stopped
                 if let Some(handle) = &state.task_handle {

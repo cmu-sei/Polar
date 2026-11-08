@@ -1,64 +1,75 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 use crate::{
-    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff,
+    Command, JIRA_PROJECT_OBSERVER, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    publish_data,
 };
-use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
-use cassini_types::WireTraceCtx;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraProject};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
-use rkyv::rancor::Error;
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use std::time::Duration;
 use tracing::{debug, info};
+
+const PROJECTS_OP: &str = "/rest/api/2/project";
 
 pub struct JiraProjectObserver;
 
 impl JiraProjectObserver {
+    fn tick() -> JiraObserverMessage {
+        JiraObserverMessage::Tick(Command::GetProjects(PROJECTS_OP.to_string()))
+    }
+
     fn observe(
-        myself: ActorRef<JiraObserverMessage>,
-        state: &mut JiraObserverState,
-        _duration: Duration,
-    ) {
-        info!(
-            "Observing every {} seconds",
-            state.backoff_interval.as_secs()
-        );
+        myself: &ActorRef<JiraObserverMessage>,
+        state: &JiraObserverState,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        let handle = myself
-            .send_interval(state.backoff_interval, || {
-                //build query
-                let op = "/rest/api/2/project";
-                // pass query in message
-                JiraObserverMessage::Tick(Command::GetProjects(op.to_string()))
-            })
-            .abort_handle();
+        // Poll straight away rather than leaving the graph empty for a
+        // whole interval after every start. Each pull schedules the next
+        // (`JiraObserverState::settle`): an interval away after a success,
+        // sooner after a failure.
+        myself.cast(Self::tick())?;
+        Ok(())
+    }
 
-        state.task_handle = Some(handle);
+    /// Pulls the projects and publishes them.
+    async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
+        state.ensure_token().await?;
+        debug!("{op}");
+
+        let projects: Vec<JiraProject> =
+            state.get_json(&format!("{}{}", state.jira_url, op)).await?;
+
+        publish_data(
+            &state.tcp_client,
+            JIRA_PROJECTS_CONSUMER_TOPIC,
+            &JiraData::Projects(projects),
+        )
+        .await
     }
 }
+
 #[async_trait]
 impl Actor for JiraProjectObserver {
     type Msg = JiraObserverMessage;
@@ -72,16 +83,16 @@ impl Actor for JiraProjectObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = JiraObserverState::new(
+        Ok(JiraObserverState::new(
             args.jira_url,
             args.auth,
             args.deployment,
             args.web_client,
-            args.registration_id,
+            args.tcp_client,
             Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-        Ok(state)
+        )
+        .with_retry(args.retry, args.clock)
+        .with_health(args.health))
     }
 
     async fn post_start(
@@ -89,8 +100,7 @@ impl Actor for JiraProjectObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        JiraProjectObserver::observe(myself, state, state.base_interval);
-        Ok(())
+        JiraProjectObserver::observe(&myself, state)
     }
 
     async fn handle(
@@ -100,54 +110,11 @@ impl Actor for JiraProjectObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            JiraObserverMessage::Resync => {}
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetProjects(op) = command {
-                    debug!("{}", op.to_string());
-
-                    let res = state
-                        .auth
-                        .apply(state.web_client.get(format!("{}{}", state.jira_url, op)))
-                        .send()
-                        .await?
-                        .json::<Vec<JiraProject>>()
-                        .await?;
-
-                    let tcp_client =
-                        where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
-
-                    let data = JiraData::Projects(res.clone());
-                    println!("{:#?}", data);
-                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                    let msg = ClientMessage::PublishRequest {
-                        topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-                        payload: bytes.to_vec().into(),
-                        registration_id: state.registration_id.clone(),
-                        trace_ctx: None,
-                    };
-
-                    // Serialize the inner client message before sending
-                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                        .expect("Failed to serialize ClientMessage::PublishRequest");
-
-                    tcp_client.send_message(TcpClientMessage::Publish {
-                        topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-                        payload: payload.into_vec(),
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    })?
-                }
-            }
-            JiraObserverMessage::Backoff(reason) => {
-                // cancel old event loop and start a new one with updated state, if observer hasn't stopped
-                if let Some(handle) = &state.task_handle {
-                    handle.abort();
-                    // start new loop
-                    match handle_backoff(state, reason) {
-                        Ok(duration) => {
-                            JiraProjectObserver::observe(myself, state, duration);
-                        }
-                        Err(e) => myself.stop(Some(e.to_string())),
-                    }
+                    let pulled = JiraProjectObserver::pull(&op, state).await;
+                    state.settle(&myself, JIRA_PROJECT_OBSERVER, pulled, Self::tick)?;
                 }
             }
         }

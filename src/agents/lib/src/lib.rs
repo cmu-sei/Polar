@@ -1,15 +1,46 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 pub mod cassini;
+pub mod egress;
+pub mod event_log;
 pub mod events;
 pub mod graph;
+pub mod logging;
+pub mod request_reply;
+pub mod time;
 pub mod topics;
 pub use events::*;
 
-use cassini_client::{OfflineBehavior, PublishRequest};
+use cassini_client::{
+    OfflineBehavior, PublishRequest, TCPClientConfig, TcpClientActor, TcpClientArgs,
+    TcpClientMessage,
+};
 use cassini_types::{ClientEvent, WireTraceCtx};
 pub use polar_health;
 pub use polar_health as health;
-use ractor::ActorProcessingErr;
 use ractor::OutputPort;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -68,7 +99,6 @@ pub enum SupervisorMessage {
         event: ClientEvent,
     },
     Heartbeat,
-    PrepareShutdown,
     /// Graph controller availability/failure signal, translated from
     /// polar::graph::GraphSignal via an OutputPort subscription in
     /// supervisors that hold a graph controller.
@@ -82,6 +112,64 @@ pub enum SupervisorMessage {
     /// dead-letter queue, publish drained messages there instead of only
     /// logging them.
     ForceExit,
+}
+
+/// Spawns `actor` linked under `supervisor` as `name`, unless an actor of that name is already running: then that one is
+/// kept, and returned. For the children an agent spawns when its Cassini client registers, which it does again after a
+/// reconnection, and after the broker ended its session (cassini-backpressure.md, the decisions reviewed with the
+/// maintainer, 14): spawning again under the same name failed, and the agent with it. Whatever the agent does on each
+/// registration besides (its subscriptions) it goes on doing.
+pub async fn spawn_linked_unless_running<A: Actor>(
+    name: &str,
+    actor: A,
+    args: A::Arguments,
+    supervisor: ractor::ActorCell,
+) -> Result<ActorRef<A::Msg>, ActorProcessingErr> {
+    if let Some(running) = ractor::registry::where_is(name.to_string()) {
+        debug!(%name, "already running: kept");
+        return Ok(running.into());
+    }
+    let (spawned, _) = Actor::spawn_linked(Some(name.to_string()), actor, args, supervisor)
+        .await
+        .map_err(ActorProcessingErr::from)?;
+    Ok(spawned)
+}
+
+/// Spawn a TCP client to connect to the Cassini message broker.
+///
+/// CAUTION: There is a known bug in the ractor framework that makes output
+/// ports drop messages and freeze under high load.
+/// See: https://github.com/slawlor/ractor/issues/225
+#[deprecated = "There is a known bug in the ractor framework that makes output ports drop messages and freeze under high load. Functionality moved to TcpClient::spawn()"]
+pub async fn spawn_tcp_client<M, F>(
+    service_name: &str,
+    supervisor: ActorRef<M>,
+    map_event: F,
+) -> Result<ActorRef<TcpClientMessage>, ActorProcessingErr>
+where
+    M: Send + 'static,
+    F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+{
+    let events_output = std::sync::Arc::new(OutputPort::default());
+
+    events_output.subscribe(supervisor.clone(), map_event);
+
+    let config = TCPClientConfig::new()?;
+
+    let (tcp_client, _) = Actor::spawn_linked(
+        Some(format!("{service_name}.tcp")),
+        TcpClientActor,
+        TcpClientArgs {
+            config,
+            registration_id: None,
+            delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+            answers: None,
+        },
+        supervisor.into(),
+    )
+    .await?;
+
+    Ok(tcp_client)
 }
 
 // ── Provenance emission helper ─────────────────────────────────────────────────
@@ -104,6 +192,7 @@ pub fn emit_provenance_event(
         payload,
         trace_ctx,
         offline_behavior: OfflineBehavior::Drop,
+        share_identity: true,
     })?;
 
     Ok(())
@@ -265,81 +354,58 @@ pub struct NormalizedSbom {
 // ── Logging ────────────────────────────────────────────────────────────────────
 
 pub fn init_logging(service_name: String) {
-    use opentelemetry::{KeyValue, global};
-    use opentelemetry_otlp::Protocol;
-    use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::{
-        Resource,
-        trace::{self, RandomIdGenerator},
-    };
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    logging::init_with(service_name, &logging::LoggingSettings::from_process_env());
+}
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
 
-    let enable_jaeger = std::env::var("JAEGER_ENABLE_TRACING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    struct Child;
 
-    if enable_jaeger {
-        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
+    #[ractor::async_trait]
+    impl Actor for Child {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
 
-        if !endpoint.is_empty()
-            && let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(endpoint)
-                .build()
-        {
-            let tracer_provider = trace::SdkTracerProvider::builder()
-                .with_batch_exporter(exporter)
-                .with_sampler(trace::Sampler::AlwaysOn)
-                .with_id_generator(RandomIdGenerator::default())
-                .with_resource(
-                    Resource::builder()
-                        .with_service_name(service_name.clone())
-                        .with_attributes([
-                            KeyValue::new("service.name", service_name.clone()),
-                            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                        ])
-                        .build(),
-                )
-                .build();
-
-            global::set_tracer_provider(tracer_provider);
-
-            let tracer = global::tracer("cassini-tracing");
-            let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-            let filtered_telemetry_layer =
-                telemetry_layer.with_filter(EnvFilter::from_default_env());
-
-            if tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .with(filtered_telemetry_layer)
-                .try_init()
-                .is_err()
-            {
-                eprintln!("Logging registry already initialized");
-            }
+        async fn pre_start(&self, _myself: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
         }
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .pretty()
-            .with_thread_ids(true)
-            .with_target(true)
-            .with_file(true)
-            .with_line_number(true);
+    }
 
-        if tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .try_init()
-            .is_err()
-        {
-            eprintln!("Logging registry already initialized");
+    struct Parent;
+
+    #[ractor::async_trait]
+    impl Actor for Parent {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _myself: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
         }
+    }
+
+    /// An agent's child spawned on each registration, registered twice (as after a session the broker ended): the
+    /// second keeps the first, and nothing fails; once it has ended, the next registration spawns it again.
+    #[tokio::test]
+    async fn a_child_spawned_on_each_registration_survives_a_second_registration() {
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let name = "polar.test.spawned-on-registration";
+        let first = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("the first registration spawns it");
+        let second = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("a second registration does not fail");
+        assert_eq!(first.get_id(), second.get_id(), "the running one is kept");
+        first.stop_and_wait(None, None).await.unwrap();
+        let third = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("once ended, spawned again");
+        assert_ne!(third.get_id(), first.get_id());
+        third.stop_and_wait(None, None).await.unwrap();
+        parent.stop(None);
     }
 }

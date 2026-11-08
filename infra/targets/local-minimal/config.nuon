@@ -1,0 +1,124 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/targets/local-minimal/config.nuon
+#
+# Overrides applied on top of infra/config for this target:
+#   cluster    any field of cluster.nuon
+#   workloads  per-workload fields, keyed by workload name
+{
+  # cert-issuer signs only the bootstrap identities on a token alone; everything else is vouched for by the
+  # credentials agent (docs/architecture/cert-issuer-isolation.md). On once no workload asked it directly.
+  #
+  # The registry is in the cluster (infra/cluster-registry.nu): the nodes pull from localhost:30500, and nothing on this machine
+  # runs one. This machine pushes through a port-forward on local 5001, since the host registry (`just registry-up`, which the
+  # other targets use) listens on 5000.
+  cluster: { issuance: { floor_enforced: true }, registry_in_cluster: { node_port: 30500, local_port: 5001 } }
+  workloads: {
+    # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): the issuers it trusts and the
+    # lifetimes that differ here. Written as values, and given to it as JSON.
+    cert-issuer: {
+      env: [
+        { name: "CERT_ISSUER_ISSUERS", value: [
+        {
+          issuer: "https://kubernetes.default.svc.cluster.local"
+          audience: ["polar-cert-issuer.local" "polar-cert-issuer-neo4j.local"]
+          jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+          workload_identity_claim: "sub"
+          instance_binding_claim: "kubernetes.io/pod/uid"
+          instance_name_claim: "kubernetes.io/pod/name"
+          identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
+          identity_scope_claim: null
+          allowed_algorithms: ["RS256" "ES256" "EdDSA"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        # People's tokens, from Keycloak. `issuer` is what the tokens carry, which with --hostname-strict=false is how
+        # the person reached Keycloak to log in: the port-forward at localhost:8080. `jwks_uri` is where cert-issuer,
+        # in the cluster, fetches the keys: the Service.
+        {
+          issuer: "http://localhost:8080/realms/polar"
+          audience: ["polar-cert-issuer.local"]
+          jwks_uri: "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar/protocol/openid-connect/certs"
+          workload_identity_claim: "preferred_username"
+          instance_binding_claim: "sid"
+          identity_normalization: { strategy: "suffixed_claim" }
+          identity_scope_claim: "identity_scope"
+          allowed_algorithms: ["RS256"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        ] }
+        { name: "CERT_ISSUER_SERVER_LIFETIME_SECS", value: "43200" }
+        # A year, for the identities whose certificates are not renewed by rejuvenation.
+        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000, "ace.polar.serviceaccount.cluster.local": 31536000 } }
+      ]
+    }
+    # The git server's administrators are this cluster's first account, an identity that only exists once the admin flow has run on the
+    # live cluster. `up.nu` records it in infra/targets/<target>/cluster-inputs.nuon (gitignored), renders and publishes again, and the
+    # signed provenance names that file. Nothing about it belongs here.
+    polar-git-server: {
+      # Group 4: its client certificate and its server certificate, one of each, come from the credentials agent.
+      issuer: "credentials-agent"
+    }
+    # The OCI registry resolver is not part of this cluster (2026-10-14). It is in the catalog, and the
+    # `local` target still runs it.
+    oci-registry-resolver: { enabled: false }
+    # Rollout of cert-issuer isolation (docs/architecture/cert-issuer-isolation.md, phase 6), in groups. A
+    # workload on the credentials agent gets its certificates through the observer, so the credentials agent
+    # has a record of it. Group 1 is the secret harness, which is the check on the rest.
+    # The secret harness is test code (src/agents/secret-harness): deployed only when it is what is being tested
+    # (2026-10-21). To run it, set `enabled: true` on both and add their four manifests back to the agents layer
+    # in target.nu (secret-harness-owner-resources.yaml, secret-harness-owner.yaml, and the same for the intruder).
+    secret-harness-owner: { enabled: false, issuer: "credentials-agent" }
+    secret-harness-intruder: { enabled: false, issuer: "credentials-agent" }
+    # The load harness is test code too (src/agents/cassini/test): enabled only while the broker is measured. To
+    # measure, set `enabled: true` on both and add harness-producer-resources.yaml and harness-sink-resources.yaml (not
+    # their Jobs: infra/load-harness.nu makes those per run) to the agents layer in target.nu.
+    harness-producer: { enabled: false, issuer: "credentials-agent" }
+    harness-sink: { enabled: false, issuer: "credentials-agent" }
+    # Group 2: the workloads that ask for one client certificate. The ones that also open a Neo4j connection ask
+    # for a second client certificate, which the credentials agent does not issue (one client and one server
+    # certificate per pod instance). They moved in group 3, once the graph connection presented the pod's one
+    # client certificate instead (the graph-write capability).
+    kube-observer: { issuer: "credentials-agent" }
+    git-repo-observer: { issuer: "credentials-agent" }
+    git-repo-controller: { issuer: "credentials-agent" }
+    polar-scheduler-observer: { issuer: "credentials-agent" }
+    # Group 3: the graph agents, which present their one client certificate to Neo4j too (graph-write).
+    kube-consumer: { issuer: "credentials-agent" }
+    jira-processor: { issuer: "credentials-agent" }
+    polar-scheduler: { issuer: "credentials-agent" }
+    git-repo-processor: { issuer: "credentials-agent" }
+    # The state agent's reader (docs/architecture/soft-state.md), which presents its one client certificate to Neo4j
+    # too (graph-read).
+    soft-state-observer: { issuer: "credentials-agent" }
+    # The state agent's writer (pulled health, docs/architecture/soft-state.md), which presents its one client
+    # certificate to Neo4j too (graph-write).
+    soft-state-processor: { issuer: "credentials-agent" }
+    jira-observer: {
+      issuer: "credentials-agent"
+      env: [
+        { name: "JIRA_URL", value: "https://example.atlassian.net" }
+      ]
+    }
+  }
+}

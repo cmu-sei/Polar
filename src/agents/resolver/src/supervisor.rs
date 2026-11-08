@@ -1,0 +1,469 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! The resolver's supervisor: the builder's infrastructure (health, the Cassini client and the
+//! subscription), the resolver actor, and the order in which they come down.
+
+use crate::resolver::{ResolverAgent, ResolverAgentState};
+use crate::settings::ResolverSettings;
+use crate::{BROKER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
+use cassini_types::ClientEvent;
+use oci_client::Client as OciClient;
+use oci_client::client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol};
+use polar::ProvenanceEvent;
+use polar::cassini::{CassiniClient, UnsubscribeRequest};
+use polar::egress::Egress;
+use polar::topics::PROVENANCE_DISCOVERY;
+use polar_agent_builder::{
+    AgentBuilder, Configured, HealthClient, InfrastructureEvent, InfrastructureSupervisorMessage,
+    Subscription,
+};
+use ractor::concurrency::Duration;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use std::path::PathBuf;
+use tracing::{debug, error, info, warn};
+
+/// What the resolver needs to drain: the pull in flight (up to 10 s) and a margin. If it is not
+/// done by then the process exits 1 regardless.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10 + 10);
+
+/// How long an unfinished resolution is given to finish once the shutdown has begun.
+const IN_FLIGHT_GRACE: Duration = Duration::from_secs(10);
+
+pub enum ResolverSupervisorMessage {
+    /// Lifecycle events from the Cassini client.
+    ClientEvent { event: ClientEvent },
+    /// An image reference was discovered, decoded from the topic.
+    Discovered(ProvenanceEvent),
+    /// The infrastructure has decided the agent should end: finish, then say so.
+    PrepareShutdown,
+}
+
+pub struct ResolverSupervisor;
+
+/// The OCI client's configuration: https for every registry except those named as insecure, which
+/// are spoken to over http (a development registry), the extra root certificates, if any, and the
+/// egress proxy with the hosts that bypass it, if one is set.
+pub fn client_config(
+    insecure_registries: &[String],
+    egress: &Egress,
+    certs: Vec<Certificate>,
+) -> ClientConfig {
+    if certs.is_empty() {
+        debug!("Initializing OCI client without extra certificates");
+    } else {
+        debug!(
+            "Initializing OCI client with {} extra root certificates",
+            certs.len()
+        );
+    }
+    ClientConfig {
+        protocol: ClientProtocol::HttpsExcept(insecure_registries.to_vec()),
+        extra_root_certificates: certs,
+        https_proxy: egress.proxy.clone(),
+        http_proxy: egress.proxy.clone(),
+        no_proxy: egress.proxy.as_ref().and(egress.no_proxy.clone()),
+        ..ClientConfig::default()
+    }
+}
+
+pub struct ResolverSupervisorState {
+    resolver: Option<ActorRef<ProvenanceEvent>>,
+    tcp_client: polar::cassini::TcpClient,
+    healthcheck: polar_agent_builder::HealthHandle,
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    shutting_down: bool,
+}
+
+impl ResolverSupervisor {
+    /// The OCI client, trusting every certificate of the egress CA as well as the system's, and
+    /// going out through the egress proxy if one is set. A CA that is named and cannot be read or
+    /// used stops the agent: a trust root that was asked for must not be silently left out. Each
+    /// certificate is given as one PEM block of its own, since the client reads only the first
+    /// certificate of what it is given; and the client is made with `try_from`, since `new` falls
+    /// back to a default client, without the CA, on an error.
+    pub async fn oci_client(
+        settings: &ResolverSettings,
+        egress: &Egress,
+    ) -> Result<OciClient, ActorProcessingErr> {
+        let certs = egress
+            .pem_blocks()
+            .await?
+            .into_iter()
+            .map(|data| Certificate {
+                encoding: CertificateEncoding::Pem,
+                data,
+            })
+            .collect();
+        OciClient::try_from(client_config(&settings.insecure_registries, egress, certs))
+            .map_err(|e| ActorProcessingErr::from(format!("cannot make the OCI client: {e}")))
+    }
+
+    /// Decodes what was published on the discovery topic. Anything that does not decode is logged
+    /// and dropped, never fatal.
+    pub fn decode(payload: &[u8]) -> Option<ProvenanceEvent> {
+        match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(payload) {
+            Ok(event) => Some(event),
+            Err(e) => {
+                error!("Failed to deserialize provenance event! {e}");
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Actor for ResolverSupervisor {
+    type Msg = ResolverSupervisorMessage;
+    type State = ResolverSupervisorState;
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        configured: Configured,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("{myself:?} starting");
+        let settings = ResolverSettings::read(configured.config())?;
+        let egress = Egress::read(configured.config())?;
+
+        // The subscription: what is published on the discovery topic reaches the supervisor,
+        // which hands it to the resolver. The builder subscribes on the wire when the client
+        // registers, and again after a reconnect.
+        let deliver_to = myself.clone();
+        let discovery = Subscription::new(PROVENANCE_DISCOVERY, move |incoming| {
+            if let Some(event) = Self::decode(&incoming.payload)
+                && let Err(e) =
+                    deliver_to.send_message(ResolverSupervisorMessage::Discovered(event))
+            {
+                warn!("failed to hand a discovered image to the supervisor: {e}");
+            }
+        });
+
+        // The resolver never touches the graph: Cassini only.
+        let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_subscription(discovery)
+            .with_lifecycle_handler(|event| Some(ResolverSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
+            .build()
+            .await?;
+
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ResolverSupervisorMessage::PrepareShutdown)
+                }
+            });
+
+        let oci_client = Self::oci_client(&settings, &egress).await?;
+        let (resolver, _) = Actor::spawn_linked(
+            Some(format!("{RESOLVER_SUPERVISOR_NAME}.resolver")),
+            ResolverAgent,
+            ResolverAgentState {
+                cassini_client: resources.tcp_client.clone(),
+                oci_client,
+                docker_config: settings.docker_config.map(PathBuf::from),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to spawn resolver agent: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
+
+        Ok(ResolverSupervisorState {
+            resolver: Some(resolver),
+            tcp_client: resources.tcp_client,
+            healthcheck: resources.healthcheck,
+            infrastructure: resources.infrastructure,
+            shutting_down: false,
+        })
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            ResolverSupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cassini_connected();
+                }
+                ClientEvent::TransportError { reason } => {
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cassini_disconnected();
+                }
+                _ => (),
+            },
+            ResolverSupervisorMessage::Discovered(event) => {
+                if state.shutting_down {
+                    warn!("shutting down -- dropping a discovered image: {event:?}");
+                } else if let Some(resolver) = &state.resolver {
+                    resolver.send_message(event)?;
+                }
+            }
+            ResolverSupervisorMessage::PrepareShutdown => {
+                info!(
+                    "RESOLVER_SUPERVISOR: PrepareShutdown received -- unsubscribing and letting the resolution in flight finish"
+                );
+                state.shutting_down = true;
+                if let Err(e) = state.tcp_client.unsubscribe(UnsubscribeRequest {
+                    topic: PROVENANCE_DISCOVERY.to_string(),
+                    trace_ctx: None,
+                }) {
+                    warn!("unsubscribe from '{PROVENANCE_DISCOVERY}' failed (continuing): {e}");
+                }
+                if let Some(resolver) = state.resolver.take()
+                    && let Err(e) = resolver
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(IN_FLIGHT_GRACE),
+                        )
+                        .await
+                {
+                    error!(
+                        "the resolver did not stop within {}s, continuing: {e:?}",
+                        IN_FLIGHT_GRACE.as_secs()
+                    );
+                }
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        event: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match event {
+            SupervisionEvent::ActorStarted(actor) => debug!("{actor:?} started!"),
+            SupervisionEvent::ActorTerminated(actor, _, reason) => {
+                info!("RESOLVER_SUPERVISOR: {actor:?} terminated. {reason:?}");
+                // The infrastructure is this supervisor's linked child from build(); its ending
+                // means the shutdown handshake is done, or that it failed. Either way exit
+                // non-zero so the Job creates a new pod with fresh certificates.
+                if actor.get_id() == state.infrastructure.get_id() {
+                    info!("RESOLVER_SUPERVISOR: infrastructure is down, exiting");
+                    std::process::exit(1);
+                }
+                if !state.shutting_down {
+                    error!("RESOLVER_SUPERVISOR: the resolver ended unexpectedly; exiting");
+                    std::process::exit(1);
+                }
+            }
+            SupervisionEvent::ActorFailed(actor, reason) => {
+                error!("RESOLVER_SUPERVISOR: {actor:?} failed! {reason:?}");
+                if !state.shutting_down {
+                    std::process::exit(1);
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registries_named_as_insecure_are_spoken_to_over_http_and_no_other() {
+        let config = client_config(
+            &["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()],
+            &Egress::default(),
+            Vec::new(),
+        );
+        match config.protocol {
+            ClientProtocol::HttpsExcept(except) => {
+                assert_eq!(
+                    except,
+                    vec!["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()]
+                )
+            }
+            other => panic!("expected https except the named ones, got {other:?}"),
+        }
+        // and none named means https for every registry
+        assert!(matches!(
+            client_config(&[], &Egress::default(), Vec::new()).protocol,
+            ClientProtocol::HttpsExcept(ref e) if e.is_empty()
+        ));
+    }
+
+    #[test]
+    fn extra_certificates_do_not_change_which_registries_are_insecure() {
+        let cert = Certificate {
+            encoding: CertificateEncoding::Pem,
+            data: b"x".to_vec(),
+        };
+        let config = client_config(
+            &["10.0.2.2:5000".to_string()],
+            &Egress::default(),
+            vec![cert],
+        );
+        assert_eq!(config.extra_root_certificates.len(), 1);
+        assert!(matches!(config.protocol, ClientProtocol::HttpsExcept(ref e) if e.len() == 1));
+    }
+
+    #[test]
+    fn the_egress_proxy_and_its_bypass_list_are_the_clients_and_none_is_none() {
+        let egress = Egress {
+            proxy: Some("http://proxy.corp.example:3128".to_string()),
+            no_proxy: Some(".svc,.cluster.local".to_string()),
+            ca_cert: None,
+        };
+        let config = client_config(&[], &egress, Vec::new());
+        assert_eq!(
+            config.https_proxy.as_deref(),
+            Some("http://proxy.corp.example:3128")
+        );
+        assert_eq!(
+            config.http_proxy.as_deref(),
+            Some("http://proxy.corp.example:3128")
+        );
+        assert_eq!(config.no_proxy.as_deref(), Some(".svc,.cluster.local"));
+
+        let none = client_config(&[], &Egress::default(), Vec::new());
+        assert_eq!(
+            (none.https_proxy, none.http_proxy, none.no_proxy),
+            (None, None, None)
+        );
+    }
+
+    /// Every certificate of the egress CA is trusted: the client reads only the first certificate of
+    /// each one it is given, so a bundle given whole would leave the second registry untrusted.
+    #[tokio::test]
+    async fn every_certificate_of_the_egress_ca_is_trusted_by_the_oci_client() {
+        use polar::egress::testing::{TestCa, https_server};
+        let dir = tempfile::tempdir().unwrap();
+        let first = TestCa::new("first registry root");
+        let second = TestCa::new("second registry root");
+        let bundle = dir.path().join("bundle.pem");
+        std::fs::write(&bundle, format!("{}{}", first.pem, second.pem)).unwrap();
+        let one = https_server(&first).await;
+        let two = https_server(&second).await;
+        let egress = Egress {
+            ca_cert: Some(bundle.display().to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        let client = ResolverSupervisor::oci_client(&settings, &egress)
+            .await
+            .unwrap();
+
+        for server in [&one, &two] {
+            let registry = server.url.trim_start_matches("https://").to_string();
+            let reference =
+                oci_client::Reference::with_tag(registry, "repo".to_string(), "1".to_string());
+            // The stand-in is no registry, so what it answers is not a manifest; only that the
+            // request got past the handshake matters.
+            let _ = client
+                .fetch_manifest_digest(&reference, &oci_client::secrets::RegistryAuth::Anonymous)
+                .await;
+            assert!(server.served() > 0, "{} was not trusted", server.url);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_egress_ca_that_cannot_be_read_stops_the_resolver() {
+        let egress = Egress {
+            ca_cert: Some("/nonexistent/egress-ca.pem".to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        let error = ResolverSupervisor::oci_client(&settings, &egress)
+            .await
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(
+            error.contains("POLAR_EGRESS_CA_CERT") && error.contains("/nonexistent/egress-ca.pem"),
+            "{error}"
+        );
+    }
+
+    /// A certificate the client cannot use is an error, not a client made without it.
+    #[tokio::test]
+    async fn an_egress_ca_that_does_not_parse_stops_the_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.pem");
+        std::fs::write(
+            &bad,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let egress = Egress {
+            ca_cert: Some(bad.display().to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        assert!(
+            ResolverSupervisor::oci_client(&settings, &egress)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_event_is_dropped_not_fatal() {
+        assert!(ResolverSupervisor::decode(b"not an archived event").is_none());
+        assert!(ResolverSupervisor::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn an_event_that_was_archived_decodes_to_the_same_event() {
+        let event = ProvenanceEvent::OCIArtifactDiscovered {
+            uri: "ghcr.io/org/app:1".to_string(),
+            source_ref: polar::DiscoverySourceRef::OCIRepository {
+                repo_uri: "ghcr.io/org/app".to_string(),
+            },
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event).unwrap();
+        let decoded = ResolverSupervisor::decode(&bytes).expect("it decodes");
+        match decoded {
+            ProvenanceEvent::OCIArtifactDiscovered { uri, .. } => {
+                assert_eq!(uri, "ghcr.io/org/app:1")
+            }
+            other => panic!("expected the discovery, got {other:?}"),
+        }
+    }
+}

@@ -1,0 +1,117 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/config/kinds.nuon
+#
+# Defaults shared by every workload of a kind. A workload entry overrides any
+# of these by naming the field; `needs` is unioned with the kind's.
+{
+  agent: {
+    # Every agent is a Cassini client, and sends its traces to Jaeger. Its polar-init trusts cert-issuer's CA as a
+    # mounted file, and verifies what it is issued against it (docs/architecture/core-restarts.md, "The plan", step 1).
+    needs: ["cassini", "tracing", "pinned-ca"]
+    namespace: "polar"
+    # The registry is where an image comes from, and `latest` moves: a node that keeps the first copy it pulled never sees a rebuild
+    # (infra/rules.nu checks that no tag that moves is left to IfNotPresent).
+    pull_policy: "Always"
+    pull_secrets: []
+
+    # A Deployment of one whose pod restarts in place at every ending, polar-init with it (docs/architecture/deployments.md,
+    # step 4); `job` is null. The `run` kind sets it, for what runs to completion as a Job.
+    job: null
+
+    # How many pods of the workload run at once: "one", or "many", each an instance of its one identity, with its own
+    # certificate and session (docs/architecture/authority-model.md, "Multi-instance workloads"). Many is only for what
+    # the credentials agent issues; a Deployment of it may have more than one replica, and a run's Job more than one pod
+    # in parallel.
+    instances: "one"
+
+    probe: { initial_delay_secs: 150, period_secs: 30, failure_threshold: 2, timeout_secs: 5 }
+
+    # Read by HealthCheckActor and the polar-healthcheck probe. These become the agent's
+    # configuration (POLAR_HEALTH_*), and `resolve.nu check` runs the agent's own check of
+    # its document over every workload (`<agent> --check --config`), so a combination the agent
+    # would refuse to start on, such as no room to rejuvenate before the certificate expires,
+    # fails the render and names the variables. The rules live in the Rust code, not here.
+    health: {
+      dir: "/var/run/polar-health"
+      volume: "polar-health"
+      # The agent is failed outright when its certificate has less than this left.
+      expiry_secs: 60
+      tick_secs: 30
+      # It starts to rejuvenate when its certificate has this much left.
+      rejuvenation_secs: 300
+      # The liveness probe fails when the health file is older than this.
+      stale_secs: 90
+    }
+
+    # How long the agent has to drain once told to shut down. The agent builder
+    # exits the process 1 when the budget runs out (its watchdog). The pod's
+    # terminationGracePeriodSeconds is derived: budget plus the margin, so Kubernetes
+    # does not SIGKILL the pod before the watchdog has ended it. It cannot be set
+    # separately. A workload overrides the budget; its code declares the least it
+    # needs (with_shutdown_budget), and the agent refuses to start if this is less.
+    shutdown: { budget_secs: 20, grace_margin_secs: 10 }
+
+    # Where polar-init gets the pod's certificates: `cert-issuer` (what every workload does until it is moved,
+    # and what the bootstrap identities always do) or `credentials-agent`. A target moves a workload by
+    # setting its `issuer`; the rollout goes in groups. `bootstrap: true` marks the few workloads that
+    # cannot go through the credentials agent; only they may name cert-issuer once the floor is enforced
+    # (cluster.nuon, `issuance`).
+    issuer: "cert-issuer"
+    bootstrap: false
+
+    # The projected token polar-init presents to cert-issuer.
+    sa_token: { volume: "sa-token", path: "/workspace/token", expiration_secs: 3600 }
+
+    # Whether the pod's keys are the custody daemon's, when the cluster has it on (cluster.nuon, `custody`). A workload
+    # whose code can only read a key file sets it false.
+    custody: true
+  }
+
+  # What runs to completion: the load harness's producer and sink, whose Jobs infra/load-harness.nu copies for each run
+  # (docs/architecture/deployments.md, step 4; the maintainer, 2026-10-28). The Job controller replaces a pod that failed;
+  # nothing restarts in place.
+  run: {
+    extends: "agent"
+    job: { backoff_limit: 1000000, ttl_after_finished_secs: 300 }
+  }
+
+  # A service that is not a Cassini client: the broker itself. The same pod, health, shutdown and
+  # certificate arrangements as an agent, and none of the client's needs.
+  service: {
+    extends: "agent"
+    needs: ["tracing", "pinned-ca"]
+  }
+
+  # The certificate authority's front, cert-issuer, alone (docs/architecture/cert-issuer-isolation.md, step 1c). Its own
+  # template, schema/ca.dhall: it is the issuer, so its pod has no polar-init; the kind's projected token is mounted in
+  # its own container, on which it signs itself its client certificate through its own floor; the Kubernetes API token
+  # is mounted, for fetching the API server's keys; and its files are readable by this group, as a Secret's are.
+  ca: {
+    extends: "service"
+    # Not pinned-ca: it is the CA, and has no polar-init.
+    needs: ["tracing"]
+    fs_group: 1000
+    # It makes its own key and signs itself its client certificate: the daemon is not its (key-custody.md, step 2).
+    custody: false
+  }
+}

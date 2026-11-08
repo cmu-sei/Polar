@@ -1,5 +1,28 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::QueueEntry;
-use crate::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use crate::{DeliveryMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use anyhow::Result;
 use cassini_types::{ClientEvent, ControlError, ControlOp, ControlResult};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -7,7 +30,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -378,7 +401,7 @@ impl Actor for CompletionBridge {
             (BridgeMode::Registration, ClientEvent::Registered { registration_id }) => {
                 Some(CompletionEvent::Registered(registration_id))
             }
-            (BridgeMode::Publish, ClientEvent::PublishAcknowledged { topic }) => {
+            (BridgeMode::Publish, ClientEvent::PublishAcknowledged { topic, .. }) => {
                 Some(CompletionEvent::Published { topic })
             }
             (BridgeMode::Control, ClientEvent::ControlResponse { result, .. }) => {
@@ -390,10 +413,10 @@ impl Actor for CompletionBridge {
             _ => None,
         };
 
-        if let Some(event) = terminal {
-            if let Some(tx) = state.sender.lock().unwrap().take() {
-                let _ = tx.send(event);
-            }
+        if let Some(event) = terminal
+            && let Some(tx) = state.sender.lock().unwrap().take()
+        {
+            let _ = tx.send(event);
         }
 
         Ok(())
@@ -480,8 +503,7 @@ pub async fn append_to_queue(queue_path: &PathBuf, entry: &QueueEntry) -> std::i
         .create(true)
         .append(true)
         .open(queue_path)?;
-    let line = serde_json::to_string(entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     writeln!(file, "{}", line)
 }
 
@@ -520,11 +542,7 @@ pub async fn drain_queue(
 
         session
             .send_and_await(
-                TcpClientMessage::Publish {
-                    topic: entry.topic.clone(),
-                    payload,
-                    trace_ctx: None,
-                },
+                TcpClientMessage::publish(entry.topic.clone(), payload, None),
                 BridgeMode::Publish,
                 Duration::from_secs(10),
                 "Timed out waiting for publish ack",
@@ -565,14 +583,18 @@ pub async fn register(
     )
     .await?;
 
+    let events_output: Arc<ractor::OutputPort<ClientEvent>> =
+        Arc::new(ractor::OutputPort::default());
+    events_output.subscribe(bridge_ref, Some);
+
     let (client_ref, client_handle) = Actor::spawn(
         Some("cassini.cli.tcp_client".to_string()),
         TcpClientActor,
         TcpClientArgs {
             config: client_config,
             registration_id: None,
-            events_output: None,
-            event_handler: Some(bridge_ref),
+            delivery: DeliveryMode::Broadcast(events_output),
+            answers: None,
         },
     )
     .await?;
@@ -678,11 +700,7 @@ async fn handle_ipc_connection(
                 };
                 match s
                     .send_and_await(
-                        TcpClientMessage::Publish {
-                            topic: topic.clone(),
-                            payload,
-                            trace_ctx: None,
-                        },
+                        TcpClientMessage::publish(topic.clone(), payload, None),
                         BridgeMode::Publish,
                         Duration::from_secs(10),
                         "Timed out waiting for publish ack",
@@ -831,7 +849,7 @@ async fn handle_control_ipc(
     }
 }
 
-fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
+fn resolve_pid_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
@@ -839,7 +857,7 @@ fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
 /// way `resolve_pid_path` derives the pidfile path. Used to redirect the
 /// daemonized child's stdout/stderr so that startup failures are no longer
 /// silently swallowed by `Stdio::null()`.
-fn resolve_log_path(socket_path: &PathBuf) -> PathBuf {
+fn resolve_log_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("log")
 }
 
@@ -1094,11 +1112,7 @@ pub async fn run_publish_direct(
 
     let result = session
         .send_and_await(
-            TcpClientMessage::Publish {
-                topic,
-                payload,
-                trace_ctx: None,
-            },
+            TcpClientMessage::publish(topic, payload, None),
             BridgeMode::Publish,
             publish_timeout,
             "Timed out waiting for publish ack",

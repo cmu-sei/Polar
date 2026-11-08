@@ -1,24 +1,24 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 
 use ractor::concurrency::Duration;
@@ -244,7 +244,7 @@ impl GitlabGroupObserver {
                             connection: conn.clone(),
                         });
 
-                        return send_to_broker(state, data, GROUPS_CONSUMER_TOPIC);
+                        send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)
                     });
 
                     Ok(())
@@ -317,87 +317,77 @@ impl Actor for GitlabGroupObserver {
                                                     BackoffReason::GraphqlError(errors),
                                                 ))
                                                 .expect(MESSAGE_FORWARDING_FAILED);
-                                        } else if let Some(query) = deserialized.data {
-                                            if let Some(connection) = query.groups {
-                                                let mut read_groups = Vec::new();
+                                        } else if let Some(query) = deserialized.data
+                                            && let Some(connection) = query.groups
+                                        {
+                                            let mut read_groups = Vec::new();
 
-                                                if let Some(groups) = connection.nodes {
-                                                    for option in groups {
-                                                        if let Some(group) = option {
-                                                            // find this group's members
-                                                            let get_group_members =
-                                                                GroupMembersQuery::build(
-                                                                    GroupPathVariable {
-                                                                        full_path: group
-                                                                            .full_path
-                                                                            .clone(),
-                                                                    },
-                                                                );
+                                            if let Some(groups) = connection.nodes {
+                                                for group in groups.into_iter().flatten() {
+                                                    // find this group's members
+                                                    let get_group_members =
+                                                        GroupMembersQuery::build(
+                                                            GroupPathVariable {
+                                                                full_path: group.full_path.clone(),
+                                                            },
+                                                        );
 
-                                                            if let Err(e) = GitlabGroupObserver::get_group_members(
-                                                                state,
-                                                                get_group_members,
-                                                            )
-                                                            .await
-                                                            {
-                                                                error!("Failed to get group members {e}");
-                                                                return Err(ActorProcessingErr::from(e))
-                                                            }
-
-                                                            let get_group_projects =
-                                                                GroupProjectsQuery::build(
-                                                                    GroupPathVariable {
-                                                                        full_path: group
-                                                                            .full_path
-                                                                            .clone(),
-                                                                    },
-                                                                );
-
-                                                            if let Err(e) = GitlabGroupObserver::get_group_projects(
-                                                                state,
-                                                                get_group_projects,
-                                                            )
-                                                            .await
-                                                            {
-                                                                error!("Failed to get group projects {e}");
-                                                                return Err(ActorProcessingErr::from(e));
-                                                            }
-
-                                                            let get_group_runners =
-                                                                GroupRunnersQuery::build(
-                                                                    GroupPathVariable {
-                                                                        full_path: group
-                                                                            .full_path
-                                                                            .clone(),
-                                                                    },
-                                                                );
-
-                                                            if let Err(e) =GitlabGroupObserver::get_group_runners(
-                                                                state,
-                                                                get_group_runners,
-                                                            )
-                                                            .await {
-                                                                error!("Failed to get group runners {e}");
-                                                                return Err(ActorProcessingErr::from(e));
-                                                            }
-
-                                                            read_groups.push(group);
-                                                        }
+                                                    if let Err(e) =
+                                                        GitlabGroupObserver::get_group_members(
+                                                            state,
+                                                            get_group_members,
+                                                        )
+                                                        .await
+                                                    {
+                                                        error!("Failed to get group members {e}");
+                                                        return Err(ActorProcessingErr::from(e));
                                                     }
-                                                }
 
-                                                info!("Observed {0} group(s)", read_groups.len());
+                                                    let get_group_projects =
+                                                        GroupProjectsQuery::build(
+                                                            GroupPathVariable {
+                                                                full_path: group.full_path.clone(),
+                                                            },
+                                                        );
 
-                                                let data = GitlabData::Groups(read_groups);
+                                                    if let Err(e) =
+                                                        GitlabGroupObserver::get_group_projects(
+                                                            state,
+                                                            get_group_projects,
+                                                        )
+                                                        .await
+                                                    {
+                                                        error!("Failed to get group projects {e}");
+                                                        return Err(ActorProcessingErr::from(e));
+                                                    }
 
-                                                if let Err(e) = send_to_broker(
-                                                    state,
-                                                    data,
-                                                    GROUPS_CONSUMER_TOPIC,
-                                                ) {
-                                                    return Err(e);
+                                                    let get_group_runners =
+                                                        GroupRunnersQuery::build(
+                                                            GroupPathVariable {
+                                                                full_path: group.full_path.clone(),
+                                                            },
+                                                        );
+
+                                                    if let Err(e) =
+                                                        GitlabGroupObserver::get_group_runners(
+                                                            state,
+                                                            get_group_runners,
+                                                        )
+                                                        .await
+                                                    {
+                                                        error!("Failed to get group runners {e}");
+                                                        return Err(ActorProcessingErr::from(e));
+                                                    }
+
+                                                    read_groups.push(group);
                                                 }
                                             }
+
+                                            info!("Observed {0} group(s)", read_groups.len());
+
+                                            let data = GitlabData::Groups(read_groups);
+
+                                            send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)?;
                                         }
                                     }
                                     Err(e) => myself

@@ -1,0 +1,3440 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+/// ractor's actor registry is process-global, so any test spawning an
+/// actor under LEDGER_ACTOR_NAME or ISSUANCE_ACTOR_NAME -- both
+/// hardcoded, since deserialize_and_dispatch requires them by
+/// construction -- would otherwise collide nondeterministically with
+/// any other such test running concurrently (Rust's default). Every
+/// test that registers under these names, or assumes their absence,
+/// acquires this lock first.
+#[cfg(test)]
+static NAMED_ACTOR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// ---- External crates ----
+use cassini_types::ClientEvent;
+use cert_client::handshake::HandshakeClient;
+use polar::Supervisor;
+use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
+use polar::request_reply::Envelope;
+use polar_agent_builder::{
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
+};
+use ractor::registry::where_is;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
+
+// The tests below spawn stand-ins for the Cassini client; the supervisor itself no longer
+// names this type (the agent builder owns the client).
+#[cfg(test)]
+use cassini_client::TcpClientMessage;
+
+// ---- credentials_agent_common: topics ----
+use credentials_agent_common::REQUEST_TOPICS;
+use credentials_agent_common::{
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC, CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+    CREDENTIALS_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+};
+
+// ---- credentials_agent_common: wire types ----
+use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
+use credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest;
+use credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRequest;
+use credentials_agent_common::certificate::CertificateRequest;
+use credentials_agent_common::decrypt_on_behalf_of::DecryptOnBehalfOfRequest;
+use credentials_agent_common::escrow_key::EscrowKeyRequest;
+use credentials_agent_common::identity::IdentityNormalizationRequest;
+use credentials_agent_common::issuance::IssuanceRequest;
+use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
+use credentials_agent_common::secret::StoreSecretRequest;
+use credentials_agent_common::workload_issuance::WorkloadIssuanceRequest;
+
+// ---- Local: shared infrastructure ----
+use crate::authority_publisher::{AuthorityPublisher, PublisherArgs, PublisherMessage};
+use crate::introspection::IntrospectionClient;
+use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
+use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
+use crate::settings::ConsumerSettings;
+
+// ---- Local: handler + actor pairs, one per request/reply flow ----
+use crate::account::AccountHandler;
+use crate::account_actor::{AccountActor, AccountActorArgs};
+use crate::admin_action::AdminActionHandler;
+use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
+use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
+use crate::agent_escrow_key::AgentEscrowKeyHandler;
+use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
+use crate::agent_escrow_keypair_bootstrap::AgentEscrowKeypairBootstrapHandler;
+use crate::agent_escrow_keypair_bootstrap_actor::{
+    AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
+    AgentEscrowKeypairBootstrapDispatch,
+};
+use crate::certificate::CertificateHandler;
+use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
+use crate::decrypt_on_behalf_of::DecryptOnBehalfOfHandler;
+use crate::decrypt_on_behalf_of_actor::{
+    DecryptOnBehalfOfActor, DecryptOnBehalfOfActorArgs, DecryptOnBehalfOfDispatch,
+};
+use crate::escrow_key::EscrowKeyHandler;
+use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
+use crate::identity_normalization::IdentityNormalizationHandler;
+use crate::identity_normalization_actor::{
+    IdentityNormalizationActor, IdentityNormalizationActorArgs,
+};
+use crate::issuance::IssuanceHandler;
+use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
+use crate::retrieve_secret::RetrieveSecretHandler;
+use crate::retrieve_secret_actor::{
+    RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch,
+};
+use crate::store_secret::StoreSecretHandler;
+use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
+use crate::workload_issuance::WorkloadIssuanceHandler;
+use crate::workload_issuance_actor::{WorkloadIssuanceActor, WorkloadIssuanceActorArgs};
+
+const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
+
+/// Name given to the agent builder. It registers the Cassini client as
+/// "<SERVICE_NAME>.tcp".
+pub const SERVICE_NAME: &str = "credentials-agent";
+
+/// How the handler actors find the Cassini client to publish their replies:
+/// by registry name, on every publish. It must equal the name the builder
+/// registers (checked by a test), and because it is looked up each time, a
+/// client the builder respawns under the same name is picked up with no
+/// further wiring.
+pub const BROKER_CLIENT_NAME: &str = "credentials-agent.tcp";
+
+/// How long in-flight requests get to finish once shutdown has begun, with
+/// new ones no longer arriving, before the ledger and projection are stopped.
+const DRAIN_WINDOW_SECS: u64 = 5;
+
+/// How long the infrastructure supervisor gives this agent to drain, from being
+/// told to shut down to releasing it: the drain window, the ledger's stop (10 s)
+/// and the projection's stop (30 s), plus a margin. If it is not done by then the
+/// process exits 1 regardless.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
+
+const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
+const WORKLOAD_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.workload-issuance";
+const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
+const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
+const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
+const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
+const ADMIN_ACTION_ACTOR_NAME: &str = "polar.credentials-agent.admin-action";
+const ACCOUNT_ACTOR_NAME: &str = "polar.credentials-agent.account";
+const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secret";
+const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
+    "polar.credentials-agent.agent-escrow-keypair-bootstrap";
+const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
+const CUSTODIAN_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.custodian-issuance";
+const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
+const DECRYPT_ON_BEHALF_OF_ACTOR_NAME: &str = "polar.credentials-agent.decrypt-on-behalf-of";
+
+/// This supervisor's own message type. The shared `polar::SupervisorMessage`
+/// cannot carry the infrastructure signals (respawn, prepare-shutdown) without
+/// `polar-agent-builder` depending back on `polar`, so, like the other
+/// builder-based supervisors, this one defines exactly the messages it handles.
+pub enum ConsumerSupervisorMessage {
+    /// Connection lifecycle events from the Cassini client, and, re-wrapped by
+    /// the subscriptions, every message published on a request topic.
+    ClientEvent { event: ClientEvent },
+    /// The health check ended for rejuvenation. Drain, stop this agent's own
+    /// children, then answer `ProceedWithShutdown`.
+    PrepareShutdown,
+    /// The drain window has elapsed.
+    DrainElapsed,
+    /// Time to say how many requests have arrived since the last time.
+    ReportActivity,
+    /// A runtime section was replaced: if it is one that is published, read it and hand it on.
+    RuntimeChanged { section: String },
+    /// An agent asked for the current authority.
+    AuthorityRequested,
+    /// Time to ask cert-issuer for its record again (docs/architecture/cert-issuer-isolation.md, "Step 2").
+    AskRecord,
+    /// cert-issuer's answer arrived, published (the broker says) by `published_by`.
+    RecordAnswered {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
+    /// cert-issuer offered a held request, published (the broker says) by `published_by`
+    /// (docs/architecture/core-restarts.md, "3 in detail").
+    HeldOffered {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
+    /// Time to poll cert-issuer's held requests over mTLS, if the Cassini session is lost.
+    PollHeld,
+}
+
+/// How often the consumer says how many requests it has seen.
+const ACTIVITY_REPORT_EVERY: Duration = Duration::from_secs(60);
+
+pub struct ConsumerSupervisor;
+
+/// Every topic this agent's own subscriptions take: its requests, the authority snapshots it answers, cert-issuer's
+/// record answers and its held requests. A draining agent lets go of them all (docs/architecture/health-and-shutdown.md,
+/// section 4).
+/// The successor ticket as this agent publishes it at `now` (Unix seconds).
+pub(crate) fn successor_ticket(now: i64) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&cert_issuer_common::ticket::SuccessorTicket { issued_at: now })
+}
+
+pub(crate) fn drain_topics() -> Vec<&'static str> {
+    REQUEST_TOPICS
+        .iter()
+        .copied()
+        .chain([
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+        ])
+        .collect()
+}
+
+/// Whether `message` is something a draining agent no longer does: work of its own (asking for the record, polling
+/// held requests, publishing a changed section) or answering what arrives (an authority request, a record answer, a
+/// held offer). The ledger is not written by an agent on its way out; its successor carries on from what is there.
+pub(crate) fn dropped_while_draining(message: &ConsumerSupervisorMessage) -> bool {
+    use ConsumerSupervisorMessage as M;
+    matches!(
+        message,
+        M::AuthorityRequested
+            | M::AskRecord
+            | M::RecordAnswered { .. }
+            | M::HeldOffered { .. }
+            | M::PollHeld
+            | M::RuntimeChanged { .. }
+    )
+}
+
+pub struct ConsumerSupervisorState {
+    /// Owns the graph projection, and its own GraphControllerActor as
+    /// a direct child -- see projection.rs's own module doc. The other
+    /// handler actors are tied to this supervisor by spawn_linked and nothing
+    /// here reads them, so only the two the shutdown sequence stops by hand
+    /// are held.
+    projection_actor: ActorRef<ProjectionMessage>,
+    /// The source of truth: stopped first at shutdown, which waits for the
+    /// append in progress.
+    ledger: ActorRef<LedgerMessage>,
+    healthcheck: HealthHandle,
+    /// Signs, numbers and publishes the policy, the groups and the revoked certificates.
+    publisher: ActorRef<PublisherMessage>,
+    /// Where the policy and groups sections are read from when one changes.
+    configuration: polar_agent_builder::ConfigurationHandle,
+    /// Used only to unsubscribe at shutdown; replaced when the builder
+    /// respawns the client.
+    broker_client: TcpClient,
+    /// Answered with `ProceedWithShutdown` once this agent's own children are
+    /// down.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    /// Requests seen, reported periodically so that silence can be told from idleness.
+    activity: crate::activity::Activity,
+    draining: bool,
+    /// Asks cert-issuer for its record; none with no authority model, or one with no cert-issuer.
+    record_asker: Option<ActorRef<crate::record_asker::RecordAskerMessage>>,
+    /// Vouches for the requests cert-issuer holds; none when the record asker is none.
+    held_voucher: Option<ActorRef<crate::held_voucher::HeldVoucherMessage>>,
+    /// Judges every request before its handler sees it (docs/architecture/authority-model.md, slice 9).
+    request_gate: ActorRef<crate::request_gate::RequestGateMessage>,
+    /// The drain was started by `PrepareShutdown` (as opposed to a failure),
+    /// so it ends by releasing the infrastructure and not by exiting.
+    rejuvenating: bool,
+}
+
+impl Supervisor for ConsumerSupervisor {
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        if topic == credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<
+                Envelope<credentials_agent_common::admin_action::SignedAdminAction>,
+                rkyv::rancor::Error,
+            >(&payload)
+            {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ADMIN_ACTION_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward admin action to actor: {e}");
+                        }
+                    } else {
+                        warn!("Admin action actor not yet registered, dropping admin action");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize admin action request: {e}");
+                }
+            }
+        } else if topic == credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<
+                Envelope<credentials_agent_common::account_claim::AccountRequest>,
+                rkyv::rancor::Error,
+            >(&payload)
+            {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ACCOUNT_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward account request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Account actor not yet registered, dropping account request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize account request: {e}");
+                }
+            }
+        } else if topic == CREDENTIALS_ISSUANCE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<IssuanceRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(issuance_actor) = where_is(ISSUANCE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = issuance_actor.send_message(envelope) {
+                            warn!("Failed to forward issuance request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Issuance actor not yet registered, dropping issuance request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize issuance request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<WorkloadIssuanceRequest>, rkyv::rancor::Error>(
+                &payload,
+            ) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(
+                            crate::workload_issuance_actor::WorkloadIssuanceMsg::Request(envelope),
+                        ) {
+                            warn!("Failed to forward workload issuance request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Workload issuance actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize workload issuance request: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload)
+            {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward agent escrow-key request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Agent escrow-key actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize agent escrow-key request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<IdentityNormalizationRequest>, rkyv::rancor::Error>(
+                &payload,
+            ) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward identity-normalization request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Identity-normalization actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize identity-normalization request from topic {topic}: {e}"
+                    );
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<EscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ESCROW_KEY_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward escrow-key request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Escrow-key actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize escrow-key request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<CertificateRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(CERTIFICATE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward certificate request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Certificate actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize certificate request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        // Nothing reaches the ledger as it arrives: every event in it is the consumer's own, made from a request it
+        // judged (a signed admin action, a validated token). Three topics once appended whatever event they carried,
+        // unsigned; they were removed (docs/architecture/authority-model.md, "The consumer's request topics, audited").
+        warn!("CONSUMER_SUPERVISOR: no handler for topic {topic}; the message is dropped");
+    }
+}
+
+impl ConsumerSupervisor {
+    /// Not part of the shared Supervisor trait -- see its own call
+    /// site's comment for why. Deserializes and forwards to
+    /// StoreSecretActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry.
+    fn dispatch_store_secret_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        match rkyv::from_bytes::<Envelope<StoreSecretRequest>, rkyv::rancor::Error>(&payload) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(STORE_SECRET_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(StoreSecretDispatch {
+                        envelope,
+                        published_by,
+                        published_instance,
+                    }) {
+                        warn!("Failed to forward store-secret request to actor: {e}");
+                    }
+                } else {
+                    warn!("Store-secret actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize store-secret request: {e}");
+            }
+        }
+    }
+
+    /// Mirrors dispatch_store_secret_request's own reasoning exactly
+    /// -- see its own doc comment. Deserializes and forwards to
+    /// RetrieveSecretActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry.
+    fn dispatch_retrieve_secret_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<RetrieveSecretRequest>, rkyv::rancor::Error>(&payload) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(RETRIEVE_SECRET_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(RetrieveSecretDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward retrieve-secret request to actor: {e}");
+                    }
+                } else {
+                    warn!("Retrieve-secret actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize retrieve-secret request: {e}");
+            }
+        }
+    }
+
+    /// An agent escrow-issuance request, forwarded with the broker-verified published_by: only the workload's
+    /// custodian is answered (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    fn dispatch_agent_escrow_issuance_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(
+            &payload,
+        ) {
+            Ok(envelope) => match where_is(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()) {
+                Some(actor) => {
+                    if let Err(e) = actor.send_message(
+                        crate::agent_escrow_issuance_actor::AgentEscrowIssuanceDispatch {
+                            envelope,
+                            published_by,
+                            published_instance,
+                        },
+                    ) {
+                        warn!("Failed to forward agent escrow-issuance request to actor: {e}");
+                    }
+                }
+                None => warn!("Agent escrow-issuance actor not yet registered, dropping request"),
+            },
+            Err(e) => warn!("Failed to deserialize agent escrow-issuance request: {e}"),
+        }
+    }
+
+    /// A custodian's request for one of its workload's certificates, forwarded with the broker-verified published_by,
+    /// which is the custodian.
+    fn dispatch_custodian_issuance_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        use credentials_agent_common::custodian::CustodianIssuanceRequest;
+        match rkyv::from_bytes::<Envelope<CustodianIssuanceRequest>, rkyv::rancor::Error>(&payload)
+        {
+            Ok(envelope) => match where_is(CUSTODIAN_ISSUANCE_ACTOR_NAME.to_string()) {
+                Some(actor) => {
+                    if let Err(e) = actor.send_message(
+                        crate::custodian_issuance_actor::CustodianIssuanceDispatch {
+                            envelope,
+                            published_by,
+                            published_instance,
+                        },
+                    ) {
+                        warn!("Failed to forward a custodian's issuance request to actor: {e}");
+                    }
+                }
+                None => warn!("Custodian issuance actor not yet registered, dropping request"),
+            },
+            Err(e) => warn!("Failed to deserialize a custodian's issuance request: {e}"),
+        }
+    }
+
+    /// Mirrors dispatch_store_secret_request's own reasoning exactly
+    /// -- see its own doc comment. Deserializes and forwards to
+    /// AgentEscrowKeypairBootstrapActor, bundled with the
+    /// broker-verified published_by this dispatch path exists
+    /// specifically to carry.
+    fn dispatch_agent_escrow_keypair_bootstrap_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairRequest>, rkyv::rancor::Error>(
+            &payload,
+        ) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string())
+                {
+                    if let Err(e) = actor.send_message(AgentEscrowKeypairBootstrapDispatch {
+                        envelope,
+                        published_by,
+                        published_instance,
+                    }) {
+                        warn!(
+                            "Failed to forward agent escrow-keypair bootstrap request to actor: {e}"
+                        );
+                    }
+                } else {
+                    warn!(
+                        "Agent escrow-keypair bootstrap actor not yet registered, dropping request"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize agent escrow-keypair bootstrap request: {e}");
+            }
+        }
+    }
+
+    /// Mirrors dispatch_retrieve_secret_request's own reasoning
+    /// exactly -- see its own doc comment. Deserializes and forwards
+    /// to DecryptOnBehalfOfActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry
+    /// -- the requesting identity PolicyActor's own resolution is
+    /// derived from, never self-reported.
+    fn dispatch_decrypt_on_behalf_of_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<DecryptOnBehalfOfRequest>, rkyv::rancor::Error>(&payload)
+        {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(DecryptOnBehalfOfDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward decrypt-on-behalf-of request to actor: {e}");
+                    }
+                } else {
+                    warn!("Decrypt-on-behalf-of actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize decrypt-on-behalf-of request: {e}");
+            }
+        }
+    }
+}
+
+impl ConsumerSupervisor {
+    /// One subscription per request topic. Each re-wraps what the router
+    /// delivers (topic, payload, the broker-verified `published_by`, trace
+    /// context) as a `ClientEvent::MessagePublished` for this supervisor, so
+    /// the draining check and the dispatch below stay where they were and a
+    /// request can never be dispatched without having gone through them.
+    /// A subscription binds registering the topic with the router to
+    /// subscribing on the wire, so neither can be forgotten.
+    fn request_subscriptions(
+        supervisor: &ActorRef<ConsumerSupervisorMessage>,
+    ) -> Vec<Subscription> {
+        REQUEST_TOPICS
+            .iter()
+            .map(|topic| {
+                let supervisor = supervisor.clone();
+                Subscription::new(*topic, move |incoming| {
+                    let event = ClientEvent::MessagePublished {
+                        topic: incoming.topic,
+                        payload: incoming.payload,
+                        trace_ctx: incoming.trace_ctx,
+                        published_by: incoming.published_by,
+                        published_instance: incoming.published_instance,
+                    };
+                    if let Err(e) =
+                        supervisor.send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                    {
+                        warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Agents ask for the current authority on this topic; this agent is the only one that answers.
+    fn authority_request_subscription(
+        supervisor: &ActorRef<ConsumerSupervisorMessage>,
+    ) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            move |_| {
+                if let Err(e) =
+                    supervisor.send_message(ConsumerSupervisorMessage::AuthorityRequested)
+                {
+                    warn!("could not pass on a request for the authority: {e}");
+                }
+            },
+        )
+    }
+
+    /// A request as the broker delivered it. While the agent drains it is logged and dropped; otherwise the request gate
+    /// judges it before any handler sees it (docs/architecture/authority-model.md, slice 9).
+    fn on_request(
+        draining: bool,
+        gate: &ActorRef<crate::request_gate::RequestGateMessage>,
+        topic: String,
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        if draining {
+            warn!(
+                "CONSUMER_SUPERVISOR: draining -- logging message on topic \
+                 '{topic}' ({} bytes) instead of dispatching; will be lost on \
+                 exit",
+                payload.len()
+            );
+            // TODO: publish to dead-letter queue once Cassini supports one.
+        } else if let Err(e) = gate.send_message(crate::request_gate::RequestGateMessage::Request {
+            topic,
+            payload,
+            published_by,
+            published_instance,
+        }) {
+            warn!("CONSUMER_SUPERVISOR: the request gate did not take a request: {e}");
+        }
+    }
+
+    /// cert-issuer's answers to this agent's requests for its record, each with who the broker says published it: the
+    /// asker takes an answer only from cert-issuer.
+    fn record_reply_subscription(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            move |incoming| {
+                if let Err(e) = supervisor.send_message(ConsumerSupervisorMessage::RecordAnswered {
+                    payload: incoming.payload,
+                    published_by: incoming.published_by,
+                }) {
+                    warn!("could not pass on cert-issuer's answer for its record: {e}");
+                }
+            },
+        )
+    }
+
+    /// cert-issuer's held requests, each with who the broker says published it: the voucher takes one only from
+    /// cert-issuer.
+    fn held_offer_subscription(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+            move |incoming| {
+                if let Err(e) = supervisor.send_message(ConsumerSupervisorMessage::HeldOffered {
+                    payload: incoming.payload,
+                    published_by: incoming.published_by,
+                }) {
+                    warn!("could not pass on a request cert-issuer holds: {e}");
+                }
+            },
+        )
+    }
+
+    /// Reads a replaced section and hands it to the publisher. A section that cannot be read says so and is
+    /// left for the next republish; it is never published half-read.
+    async fn pass_on_section(state: &ConsumerSupervisorState, section: &str) {
+        match state.configuration.runtime(section).await {
+            Ok(Some(value)) => {
+                let _ = state.publisher.cast(PublisherMessage::SectionChanged {
+                    section: section.to_string(),
+                    version: value.version,
+                    body: value.body,
+                    authored_by: Some(value.signer),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => warn!(%section, "could not read the section to publish it: {e}"),
+        }
+    }
+
+    /// Routes one request to its handler actor. Four topics carry the
+    /// broker-verified `published_by`, which the shared `Supervisor` trait
+    /// cannot (it is cross-cutting and cannot gain a parameter for one
+    /// agent's need): stored_by, requested_by and the like must be verified by
+    /// the broker, never self-reported.
+    /// The custodian's requests carry the instance the broker stamped beside it too: a multi-instance workload's pods
+    /// each have a custodian of the one identity, told apart by their pod (docs/architecture/authority-model.md,
+    /// "Multi-instance workloads").
+    fn dispatch_request(
+        topic: String,
+        payload: Vec<u8>,
+        published_by: Option<String>,
+        published_instance: Option<String>,
+    ) {
+        if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_store_secret_request(
+                payload,
+                published_by,
+                published_instance,
+            );
+        } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
+        } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+                payload,
+                published_by,
+                published_instance,
+            );
+        } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(payload, published_by);
+        } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_agent_escrow_issuance_request(
+                payload,
+                published_by,
+                published_instance,
+            );
+        } else if topic == credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_custodian_issuance_request(
+                payload,
+                published_by,
+                published_instance,
+            );
+        } else {
+            ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+        }
+    }
+
+    /// Schedules `DrainElapsed`. Not awaited: the timer runs detached, so this
+    /// supervisor keeps handling (and logging) messages while the window is open.
+    /// The start of a controlled shutdown: nothing new is taken (every subscription let go of, and what arrives
+    /// anyway dropped), and the actors that act on their own (the record asker, the held-request voucher) are
+    /// stopped, so in the drain window only work already under way finishes and nothing new reaches the ledger.
+    fn begin_drain(state: &mut ConsumerSupervisorState) {
+        state.draining = true;
+        Self::unsubscribe_from_topics(&state.broker_client);
+        if let Some(asker) = state.record_asker.take() {
+            asker.stop(Some("draining".to_string()));
+        }
+        if let Some(voucher) = state.held_voucher.take() {
+            voucher.stop(Some("draining".to_string()));
+        }
+    }
+
+    /// Publishes the successor ticket for cert-issuer, which binds it to this pod by its own record. A failure is
+    /// logged and stops nothing: the successor then waits for the crash window, as before tickets.
+    fn leave_successor_ticket(client: &TcpClient) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let payload = match successor_ticket(now) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("CONSUMER_SUPERVISOR: the successor ticket could not be written: {e}");
+                return;
+            }
+        };
+        if let Err(e) =
+            client
+                .as_actor_ref()
+                .send_message(cassini_client::TcpClientMessage::publish(
+                    cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC.to_string(),
+                    payload,
+                    None,
+                ))
+        {
+            warn!("CONSUMER_SUPERVISOR: the successor ticket could not be left (continuing): {e}");
+        } else {
+            info!("CONSUMER_SUPERVISOR: left cert-issuer a successor ticket for this pod");
+        }
+    }
+
+    fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
+        // Dropping the handle detaches the timer; it still fires.
+        drop(
+            myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                ConsumerSupervisorMessage::DrainElapsed
+            }),
+        );
+    }
+
+    /// Tells the broker this agent is going dark, so it stops routing anything
+    /// here. Failures are logged and do not stop the shutdown.
+    fn unsubscribe_from_topics(client: &TcpClient) {
+        for topic in drain_topics() {
+            if let Err(e) = client.unsubscribe(UnsubscribeRequest {
+                topic: topic.to_string(),
+                trace_ctx: None,
+            }) {
+                warn!("CONSUMER_SUPERVISOR: unsubscribe from '{topic}' failed (continuing): {e}");
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Actor for ConsumerSupervisor {
+    type Msg = ConsumerSupervisorMessage;
+    type State = ConsumerSupervisorState;
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        judged: Configured,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("{myself:?} starting");
+
+        // The environment is read and judged first, before any actor is spawned, and the
+        // agent's own settings come from that one snapshot. Declaring the graph section here
+        // rather than requiring the graph-write capability is deliberate: this agent
+        // projects to the graph but its health must not depend on Neo4j (the ledger is its
+        // source of truth and the graph only a projection of it). Deliberately NOT
+        // `with_encryption()` either: CryptoActor is the gateway to the Credentials Agent,
+        // and its requests go to the very topics this agent serves, so this agent would be
+        // asking itself for its own keys (and its polar-init must never run the escrow
+        // bootstrap against itself). The dependency endpoints (Cassini and Neo4j
+        // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
+        let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
+        builder = builder.with_subscription(Self::authority_request_subscription(&myself));
+        builder = builder.with_subscription(Self::record_reply_subscription(&myself));
+        builder = builder.with_subscription(Self::held_offer_subscription(&myself));
+        for subscription in Self::request_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let configured = builder.into_configured(judged);
+        let graph_settings =
+            polar::graph::environment::GraphSettings::from_env(&**configured.config())
+                .map_err(ActorProcessingErr::from)?;
+
+        let mut settings =
+            ConsumerSettings::read(configured.config()).map_err(ActorProcessingErr::from)?;
+        let log_path = settings.event_log_path.clone();
+        let authority_model = settings.authority_model.take().map(std::sync::Arc::new);
+        if authority_model.is_none() {
+            warn!(
+                "no authority model was given; a policy or groups document will be accepted without being judged, a workload's certificates will carry no topics or groups, and no request is admitted but by a policy's permit"
+            );
+        }
+
+        // ProjectionActor owns the graph projection as its own,
+        // genuinely separate concern -- see projection.rs's own
+        // module doc for why this isn't LedgerActor's job despite
+        // being where the events originate. Spawned eagerly, unlike
+        // every other graph-writing agent in this codebase -- the
+        // Credentials Agent's own health must never depend on Neo4j's
+        // availability at all. No technical dependency requires
+        // waiting for Cassini registration first; a Bolt connection
+        // to Neo4j is entirely independent of Cassini/TCP client
+        // registration.
+        //
+        // Spawned before LedgerActor, with ledger: None -- the two
+        // actors need references to each other, which can't both be
+        // constructor arguments (neither ActorRef exists before its
+        // own actor is spawned). ProjectionActor's need for the
+        // ledger reference is deferred via SetLedger below, since
+        // nothing calls into it until an actual event or catch-up
+        // happens, well after both actors exist.
+        let (projection_actor, _) = ProjectionActor::spawn_linked(
+            Some("credentials-agent.consumer.projection".to_string()),
+            ProjectionActor,
+            ProjectionActorArgs {
+                ledger: None,
+                graph: graph_settings,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let (ledger, _) = LedgerActor::spawn_linked(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path,
+                projection_actor: projection_actor.clone(),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let _ = projection_actor.cast(ProjectionMessage::SetLedger(ledger.clone()));
+
+        let cert_issuer_url = settings.cert_issuer_url.clone();
+
+        // How this consumer trusts cert-issuer. With the CA path set it
+        // verifies against that file from its first request; without it,
+        // the CA is fetched once from GET /ca and pinned (the degraded
+        // self-bootstrap mode). Each handler owns its own client, so the
+        // trust setup runs once per handler.
+        //
+        // Every client also presents this agent's own mTLS certificate (the
+        // files its Cassini client uses). cert-issuer vouches for what the
+        // credentials agent asks of it by that certificate: the issuance
+        // flow forwards a workload's token, which on its own proves only
+        // whose workload it is. Without the certificate a request would be
+        // treated as that workload's own, and refused once the issuance
+        // floor is configured (docs/architecture/cert-issuer-isolation.md).
+        let cert_issuer_ca_path = settings.ca_cert.clone();
+        let own_cert_path = settings.own_cert_path.clone();
+        let own_key = settings.own_key.clone();
+        let make_cert_issuer_client = || async {
+            HandshakeClient::for_trust_mode_with_identity(
+                cert_issuer_url.clone(),
+                cert_issuer_ca_path.as_deref(),
+                &own_cert_path,
+                &own_key,
+            )
+            .await
+            .map_err(|e| {
+                ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
+            })
+        };
+
+        let escrow_keypair = {
+            std::sync::Arc::new(
+                crate::escrow::EscrowKeypair::load_or_generate(&settings.escrow_key_path)
+                    .map_err(ActorProcessingErr::from)?,
+            )
+        };
+
+        // Two actors issue: the one for requests that arrive with a clear credential (the admin tool and
+        // people) and the one for a workload's, whose token arrives sealed. Each owns its own handler, so each
+        // is built the same way from the same settings.
+        // What each workload's client certificates carry, from the authority model (slice 8).
+        let issuing_model = authority_model.clone();
+        let make_issuance_handler = || async {
+            Ok::<_, ActorProcessingErr>(IssuanceHandler {
+                ledger: ledger.clone(),
+                cert_issuer: make_cert_issuer_client().await?,
+                // Introspection is genuinely optional at the deployment
+                // level -- a cluster that never has LikelyIdp credentials
+                // in practice doesn't need it configured. If one does
+                // arrive without introspection configured, the handler
+                // itself refuses it (TokenIntrospectionFailed) rather
+                // than silently proceeding unintrospected.
+                introspection: settings.introspection.as_ref().map(|i| {
+                    IntrospectionClient::new(
+                        i.endpoint.clone(),
+                        i.client_id.clone(),
+                        i.client_secret.clone(),
+                    )
+                }),
+                known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
+                escrow_keypair: escrow_keypair.clone(),
+                authority_model: issuing_model.clone(),
+            })
+        };
+
+        let (_issuance_actor, _) = IssuanceActor::spawn_linked(
+            Some(ISSUANCE_ACTOR_NAME.to_string()),
+            IssuanceActor,
+            IssuanceActorArgs {
+                handler: make_issuance_handler().await?,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // Its session offers are signed for the identity cert-issuer reads off this agent's connection, which is
+        // the first DNS name of its own certificate.
+        let own_cert_identity = std::fs::read_to_string(&settings.own_cert_path)
+            .map_err(|e| format!("cannot read this agent's certificate: {e}"))
+            .and_then(|pem| {
+                cert_issuer_common::permission::extract_own_identity(&pem)
+                    .map_err(|e| format!("this agent's certificate names no identity: {e}"))
+            })
+            .map_err(ActorProcessingErr::from)?;
+        let (_workload_issuance_actor, _) = WorkloadIssuanceActor::spawn_linked(
+            Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
+            WorkloadIssuanceActor,
+            WorkloadIssuanceActorArgs {
+                handler: WorkloadIssuanceHandler::new(
+                    make_issuance_handler().await?,
+                    own_cert_identity.clone(),
+                ),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let agent_escrow_issuance_handler = AgentEscrowIssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: make_cert_issuer_client().await?,
+            escrow_keypair: escrow_keypair.clone(),
+            in_flight: Default::default(),
+        };
+        // A custodian's requests for its workload's certificates (docs/architecture/key-custody.md, "Part A's
+        // bootstrap: the custodian").
+        let (_custodian_issuance_actor, _) =
+            crate::custodian_issuance_actor::CustodianIssuanceActor::spawn_linked(
+                Some(CUSTODIAN_ISSUANCE_ACTOR_NAME.to_string()),
+                crate::custodian_issuance_actor::CustodianIssuanceActor,
+                crate::custodian_issuance_actor::CustodianIssuanceActorArgs {
+                    handler: crate::custodian::CustodianIssuanceHandler {
+                        ledger: ledger.clone(),
+                        cert_issuer: make_cert_issuer_client().await?,
+                        escrow_keypair: escrow_keypair.clone(),
+                        authority_model: authority_model.clone(),
+                    },
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
+        let (_agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn_linked(
+            Some(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()),
+            AgentEscrowIssuanceActor,
+            AgentEscrowIssuanceActorArgs {
+                handler: agent_escrow_issuance_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let agent_escrow_key_handler = AgentEscrowKeyHandler {
+            ledger: ledger.clone(),
+        };
+        let (_agent_escrow_key_actor, _) = AgentEscrowKeyActor::spawn_linked(
+            Some(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()),
+            AgentEscrowKeyActor,
+            AgentEscrowKeyActorArgs {
+                handler: agent_escrow_key_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let identity_normalization_handler = IdentityNormalizationHandler {
+            cert_issuer: make_cert_issuer_client().await?,
+        };
+
+        let (_identity_normalization_actor, _) = IdentityNormalizationActor::spawn_linked(
+            Some(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()),
+            IdentityNormalizationActor,
+            IdentityNormalizationActorArgs {
+                handler: identity_normalization_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let escrow_key_handler = EscrowKeyHandler {
+            escrow_keypair: escrow_keypair.clone(),
+        };
+        let (_escrow_key_actor, _) = EscrowKeyActor::spawn_linked(
+            Some(ESCROW_KEY_ACTOR_NAME.to_string()),
+            EscrowKeyActor,
+            EscrowKeyActorArgs {
+                handler: escrow_key_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let certificate_handler = CertificateHandler {
+            ledger: ledger.clone(),
+        };
+        let (_certificate_actor, _) = CertificateActor::spawn_linked(
+            Some(CERTIFICATE_ACTOR_NAME.to_string()),
+            CertificateActor,
+            CertificateActorArgs {
+                handler: certificate_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let store_secret_handler = StoreSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
+        };
+        let (_store_secret_actor, _) = StoreSecretActor::spawn_linked(
+            Some(STORE_SECRET_ACTOR_NAME.to_string()),
+            StoreSecretActor,
+            StoreSecretActorArgs {
+                handler: store_secret_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let admin_action_handler = AdminActionHandler {
+            ledger: ledger.clone(),
+        };
+        let (_admin_action_actor, _) = AdminActionActor::spawn_linked(
+            Some(ADMIN_ACTION_ACTOR_NAME.to_string()),
+            AdminActionActor,
+            AdminActionActorArgs {
+                handler: admin_action_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // The account claim signs through /internal/issue, which identifies its caller by the
+        // client certificate on the connection, as every client above now does.
+        let account_cert_issuer = make_cert_issuer_client().await?;
+        let account_handler = AccountHandler {
+            ledger: ledger.clone(),
+            cert_issuer: account_cert_issuer,
+            bootstrap_identity: settings.bootstrap_identity.clone(),
+        };
+        let (_account_actor, _) = AccountActor::spawn_linked(
+            Some(ACCOUNT_ACTOR_NAME.to_string()),
+            AccountActor,
+            AccountActorArgs {
+                handler: account_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let agent_escrow_keypair_bootstrap_handler = AgentEscrowKeypairBootstrapHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+        };
+        let (_agent_escrow_keypair_bootstrap_actor, _) =
+            AgentEscrowKeypairBootstrapActor::spawn_linked(
+                Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
+                AgentEscrowKeypairBootstrapActor,
+                AgentEscrowKeypairBootstrapActorArgs {
+                    handler: agent_escrow_keypair_bootstrap_handler,
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
+
+        let retrieve_secret_handler = RetrieveSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
+        };
+        let (_retrieve_secret_actor, _) = RetrieveSecretActor::spawn_linked(
+            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
+            RetrieveSecretActor,
+            RetrieveSecretActorArgs {
+                handler: retrieve_secret_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let decrypt_on_behalf_of_handler = DecryptOnBehalfOfHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
+        };
+        let (_decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn_linked(
+            Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),
+            DecryptOnBehalfOfActor,
+            DecryptOnBehalfOfActorArgs {
+                handler: decrypt_on_behalf_of_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // The health check, the router, the request subscriptions and the Cassini
+        // client come from the agent builder, spawned last so every handler
+        // actor exists before a request can arrive. It was configured first, above.
+        let configured_authority_publisher = configured
+            .config()
+            .read(&polar_agent_builder::environment::AUTHORITY_PUBLISHER)
+            .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+        // A policy or groups document is judged by the authority model before it is accepted, its usernames
+        // converted to account IDs (docs/architecture/authority-model.md); what is accepted is what the publisher
+        // puts in force, and what it does is recorded when it is published.
+        let acceptances = crate::authority_judge::Acceptances::default();
+        let record_target = crate::record_asker::record_target(authority_model.as_deref());
+        let gate_model = authority_model.clone();
+        let configured = configured.with_section_judge(std::sync::Arc::new(
+            crate::authority_judge::AuthorityJudge {
+                model: authority_model,
+                ledger: ledger.clone(),
+                acceptances: acceptances.clone(),
+            },
+        ));
+        let resources = configured.build().await?;
+
+        // The "infrastructure -> domain" half of the respawn/shutdown protocol.
+        // Without this subscription the infrastructure supervisor would wait
+        // forever for a ProceedWithShutdown after rejuvenation.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ConsumerSupervisorMessage::PrepareShutdown)
+                }
+            });
+
+        // The authority publisher. The sections it publishes arrive as signed documents, so it is told when
+        // one is replaced, and once now for any already held; the ledger tells it when a certificate is
+        // revoked.
+        let own_identity = configured_authority_publisher;
+        let broker = BROKER_CLIENT_NAME.to_string();
+        let (publisher, _) = AuthorityPublisher::spawn_linked(
+            None,
+            AuthorityPublisher,
+            PublisherArgs {
+                ledger: ledger.clone(),
+                acceptances,
+                key: escrow_keypair.private_key().clone(),
+                publish: std::sync::Arc::new(move |topic: &str, payload: Vec<u8>| {
+                    match where_is(broker.clone()) {
+                        Some(client) => {
+                            if let Err(e) =
+                                client.send_message(cassini_client::TcpClientMessage::publish(
+                                    topic.to_string(),
+                                    payload,
+                                    None,
+                                ))
+                            {
+                                error!("could not publish on '{topic}': {e}");
+                            }
+                        }
+                        None => error!("no broker client to publish on '{topic}'"),
+                    }
+                }),
+                local: resources.authority.clone(),
+                own_identity,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+        // The signing key certified, so that leaves pin it under the CA they pin (docs/architecture/
+        // authority-distribution.md, "Pinning the key to the CA"): the publisher publishes no snapshot until then.
+        let (_authority_certifier, _) =
+            crate::authority_certificate::AuthorityCertifier::spawn_linked(
+                None,
+                crate::authority_certificate::AuthorityCertifier,
+                crate::authority_certificate::AuthorityCertifierArgs {
+                    cert_issuer: make_cert_issuer_client().await?,
+                    identity: own_cert_identity.clone(),
+                    key: escrow_keypair.private_key().clone(),
+                    publisher: publisher.clone(),
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
+        match ractor::call!(ledger, LedgerMessage::RevocationChanges) {
+            Ok(port) => port.subscribe(publisher.clone(), |_| {
+                Some(PublisherMessage::RevocationsChanged)
+            }),
+            Err(e) => {
+                return Err(ActorProcessingErr::from(format!(
+                    "the ledger did not give its revocation port: {e}"
+                )));
+            }
+        }
+        resources
+            .configuration
+            .runtime_changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(ConsumerSupervisorMessage::RuntimeChanged {
+                    section: changed.section,
+                })
+            });
+        for section in ["policy", "groups"] {
+            let _ = myself.cast(ConsumerSupervisorMessage::RuntimeChanged {
+                section: section.to_string(),
+            });
+        }
+        publisher.cast(PublisherMessage::Start)?;
+
+        drop(myself.send_interval(ACTIVITY_REPORT_EVERY, || {
+            ConsumerSupervisorMessage::ReportActivity
+        }));
+
+        // cert-issuer's record of every certificate it signs, asked for when this agent registers and on an interval,
+        // so that no certificate it signs stays unknown here (docs/architecture/cert-issuer-isolation.md, "Step 2").
+        let held_target = record_target.clone();
+        let record_asker = match record_target {
+            Some((cert_issuer, bootstrap)) => {
+                let (asker, _) = crate::record_asker::RecordAsker::spawn_linked(
+                    None,
+                    crate::record_asker::RecordAsker,
+                    crate::record_asker::RecordAskerArgs {
+                        client: resources.tcp_client.as_actor_ref(),
+                        ledger: ledger.clone(),
+                        cert_issuer,
+                        bootstrap: Some(bootstrap),
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                .map_err(ActorProcessingErr::from)?;
+                drop(myself.send_interval(crate::record_asker::ASK_EVERY, || {
+                    ConsumerSupervisorMessage::AskRecord
+                }));
+                Some(asker)
+            }
+            None => {
+                warn!(
+                    "no authority model names cert-issuer, so its record of the certificates it signs is not asked for"
+                );
+                None
+            }
+        };
+
+        // The requests cert-issuer holds for this agent to vouch for: offered over Cassini, and polled over mTLS while
+        // the Cassini session is lost (docs/architecture/core-restarts.md, "3 in detail").
+        let held_voucher = match held_target {
+            Some((cert_issuer, bootstrap)) => {
+                let (voucher, _) = crate::held_voucher::HeldVoucher::spawn_linked(
+                    None,
+                    crate::held_voucher::HeldVoucher,
+                    crate::held_voucher::HeldVoucherArgs {
+                        client: resources.tcp_client.as_actor_ref(),
+                        ledger: ledger.clone(),
+                        cert_issuer,
+                        bootstrap,
+                        own_identity: own_cert_identity.clone(),
+                        cert_issuer_http: make_cert_issuer_client().await?,
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                .map_err(ActorProcessingErr::from)?;
+                drop(
+                    myself.send_interval(crate::held_voucher::HELD_POLL_EVERY, || {
+                        ConsumerSupervisorMessage::PollHeld
+                    }),
+                );
+                Some(voucher)
+            }
+            None => None,
+        };
+
+        // Every request is judged before its handler sees it: Cedar, then the topic's publishers in the model.
+        let (request_gate, _) = crate::request_gate::RequestGate::spawn_linked(
+            None,
+            crate::request_gate::RequestGate,
+            crate::request_gate::RequestGateArgs {
+                ledger: ledger.clone(),
+                policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
+                model: gate_model,
+                record_asker: record_asker.clone(),
+                dispatch: std::sync::Arc::new(
+                    |topic, payload, published_by, published_instance| {
+                        ConsumerSupervisor::dispatch_request(
+                            topic,
+                            payload,
+                            published_by,
+                            published_instance,
+                        )
+                    },
+                ),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        Ok(ConsumerSupervisorState {
+            projection_actor,
+            ledger,
+            healthcheck: resources.healthcheck,
+            publisher,
+            configuration: resources.configuration,
+            broker_client: resources.tcp_client,
+            infrastructure: resources.infrastructure,
+            activity: crate::activity::Activity::new(),
+            draining: false,
+            record_asker,
+            held_voucher,
+            request_gate,
+            rejuvenating: false,
+        })
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if state.draining && dropped_while_draining(&message) {
+            debug!("CONSUMER_SUPERVISOR: draining: not taken");
+            return Ok(());
+        }
+        match message {
+            ConsumerSupervisorMessage::PrepareShutdown => {
+                if state.draining {
+                    // A failure already started a drain that ends in exit(1);
+                    // the handshake is moot.
+                    warn!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received while already draining; \
+                         the pending exit will end the process"
+                    );
+                } else {
+                    state.rejuvenating = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
+                         unsubscribing from Cassini and entering drain window"
+                    );
+                    // Before the drain lets go of anything: cert-issuer may sign this pod's successor on its token
+                    // (docs/architecture/core-restarts.md, "Step 5, the ticket"). Once, since a second PrepareShutdown
+                    // finds the drain begun.
+                    Self::leave_successor_ticket(&state.broker_client);
+                    Self::begin_drain(state);
+                    Self::schedule_drain_end(&myself);
+                }
+            }
+
+            ConsumerSupervisorMessage::RuntimeChanged { section } => {
+                Self::pass_on_section(state, &section).await;
+            }
+
+            ConsumerSupervisorMessage::AuthorityRequested => {
+                let _ = state.publisher.cast(PublisherMessage::SnapshotRequested);
+            }
+
+            ConsumerSupervisorMessage::AskRecord => {
+                if let Some(asker) = &state.record_asker {
+                    let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Ask);
+                }
+            }
+            ConsumerSupervisorMessage::RecordAnswered {
+                payload,
+                published_by,
+            } => {
+                if let Some(asker) = &state.record_asker {
+                    let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Answered {
+                        payload,
+                        published_by,
+                    });
+                }
+            }
+            ConsumerSupervisorMessage::HeldOffered {
+                payload,
+                published_by,
+            } => {
+                if let Some(voucher) = &state.held_voucher {
+                    let _ =
+                        voucher.send_message(crate::held_voucher::HeldVoucherMessage::Offered {
+                            payload,
+                            published_by,
+                        });
+                }
+            }
+            ConsumerSupervisorMessage::PollHeld => {
+                if let Some(voucher) = &state.held_voucher {
+                    let _ = voucher.send_message(crate::held_voucher::HeldVoucherMessage::Poll);
+                }
+            }
+            ConsumerSupervisorMessage::ReportActivity => {
+                let report = state.activity.take_report(std::time::Instant::now());
+                info!("CONSUMER_SUPERVISOR: {report}");
+            }
+
+            ConsumerSupervisorMessage::DrainElapsed => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning shutdown");
+
+                // Nothing more is published once the drain is over.
+                state
+                    .publisher
+                    .stop(Some("supervisor shutting down".into()));
+
+                // The ledger first: it is the source of truth, and stopping it
+                // waits for the append in progress. The projection is derived
+                // and rebuilt from the ledger at startup, so anything still
+                // queued for it is not lost.
+                match state
+                    .ledger
+                    .stop_and_wait(
+                        Some("supervisor shutting down".into()),
+                        Some(Duration::from_secs(10)),
+                    )
+                    .await
+                {
+                    Ok(()) => info!("CONSUMER_SUPERVISOR: ledger stopped cleanly"),
+                    Err(e) => error!(
+                        "CONSUMER_SUPERVISOR: ledger did not stop cleanly within 10s, \
+                         exiting anyway: {e:?}"
+                    ),
+                }
+
+                // The projection owns its own graph controller as a linked
+                // child, so stopping it flushes the graph controller too.
+                match state
+                    .projection_actor
+                    .stop_and_wait(
+                        Some("supervisor shutting down".into()),
+                        Some(Duration::from_secs(30)),
+                    )
+                    .await
+                {
+                    Ok(()) => info!("CONSUMER_SUPERVISOR: projection actor stopped cleanly"),
+                    Err(e) => error!(
+                        "CONSUMER_SUPERVISOR: projection actor did not stop cleanly \
+                         within 30s, exiting anyway: {e:?}"
+                    ),
+                }
+
+                if state.rejuvenating {
+                    // Our own children are down; let the infrastructure stop.
+                    // Its termination (handle_supervisor_evt) exits the process
+                    // with a non-zero status.
+                    info!(
+                        "CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure"
+                    );
+                    if let Err(e) = state
+                        .infrastructure
+                        .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+                    {
+                        error!(
+                            "CONSUMER_SUPERVISOR: could not tell infrastructure to proceed ({e}); \
+                             exiting now"
+                        );
+                        std::process::exit(1);
+                    }
+                } else {
+                    warn!("CONSUMER_SUPERVISOR: exiting now");
+                    std::process::exit(1);
+                }
+            }
+
+            ConsumerSupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { registration_id } => {
+                    // The builder has already (re)subscribed to every request
+                    // topic; this is only the health signal. No graph signal:
+                    // this agent's health never depends on graph availability.
+                    info!(
+                        %registration_id,
+                        topics = REQUEST_TOPICS.len(),
+                        "CONSUMER_SUPERVISOR: registered; the builder subscribes to every request topic"
+                    );
+                    let _ = state.healthcheck.cassini_connected();
+                    if let Some(voucher) = &state.held_voucher {
+                        let _ = voucher
+                            .send_message(crate::held_voucher::HeldVoucherMessage::CassiniUp);
+                    }
+                    // As soon as the two can talk: the bootstrap certificates were signed before this agent ran.
+                    if let Some(asker) = &state.record_asker {
+                        let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Ask);
+                    }
+                }
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    published_instance,
+                    ..
+                } => {
+                    state.activity.record(&topic, std::time::Instant::now());
+                    info!(
+                        %topic,
+                        bytes = payload.len(),
+                        requester = published_by.as_deref().unwrap_or("unverified"),
+                        draining = state.draining,
+                        "CONSUMER_SUPERVISOR: request received"
+                    );
+                    Self::on_request(
+                        state.draining,
+                        &state.request_gate,
+                        topic,
+                        payload,
+                        published_by,
+                        published_instance.map(|instance| instance.uid),
+                    );
+                }
+                ClientEvent::TransportError { reason } => {
+                    // Reported so the health check can fail and the Job restart
+                    // this pod. Without it a consumer that lost its Cassini
+                    // session stays up but subscribed to nothing.
+                    warn!("Transport error (awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cassini_disconnected();
+                    // Cassini gone: cert-issuer's held requests are polled over mTLS meanwhile.
+                    if let Some(voucher) = &state.held_voucher {
+                        let _ = voucher
+                            .send_message(crate::held_voucher::HeldVoucherMessage::CassiniLost);
+                    }
+                }
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SupervisionEvent::ActorTerminated(actor, _, reason) => {
+                // The infrastructure supervisor is a direct child (the builder
+                // spawned it linked; the health check is its child, so
+                // rejuvenation arrives as PrepareShutdown, not as a termination
+                // here). Its termination is the end of the shutdown handshake,
+                // or the infrastructure dying on its own; either way the process
+                // exits so the Job starts a pod with fresh certificates. It is
+                // spawned unnamed, so match by id.
+                if actor.get_id() == state.infrastructure.get_id() {
+                    info!(
+                        "CONSUMER_SUPERVISOR: infrastructure terminated ({reason:?}), exiting so the Job restarts the pod"
+                    );
+                    std::process::exit(1);
+                } else if actor.get_id() == state.ledger.get_id() && !state.draining {
+                    // Not our own doing: the ledger is this agent's source of
+                    // truth and nothing can safely continue without it.
+                    error!(
+                        "CONSUMER_SUPERVISOR: ledger actor terminated ({reason:?}) unexpectedly -- exiting"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            SupervisionEvent::ActorFailed(actor, err) => {
+                error!("CONSUMER_SUPERVISOR: child {actor:?} failed: {err}");
+                if actor.get_id() == state.ledger.get_id() {
+                    error!("CONSUMER_SUPERVISOR: the ledger failed -- exiting");
+                    std::process::exit(1);
+                }
+                // Any other child failure is fatal too, but give in-flight
+                // work a bounded window first (handle() logs, not dispatches,
+                // while draining), then DrainElapsed stops the ledger and
+                // projection and exits.
+                if !state.draining {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: entering drain window before exit; any \
+                         requests that arrive will be logged, not processed"
+                    );
+                    Self::begin_drain(state);
+                    Self::schedule_drain_end(&myself);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    /// docs/architecture/core-restarts.md, "Step 5, the ticket": what this agent leaves is what cert-issuer reads, it
+    /// names no pod, and the agent declares publishing it.
+    #[test]
+    fn the_successor_ticket_is_what_cert_issuer_reads() {
+        let payload = super::successor_ticket(1_798_000_000).unwrap();
+        let read: cert_issuer_common::ticket::SuccessorTicket =
+            serde_json::from_slice(&payload).unwrap();
+        assert_eq!(read.issued_at, 1_798_000_000);
+        let scaffold =
+            polar_agent_builder::agent::scaffold_document::<crate::agent::CredentialsConsumer>();
+        assert!(
+            scaffold.topics.iter().any(|t| t.name
+                == cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC
+                && t.access == polar_agent_builder::Access::Publish),
+            "the ticket's topic is declared"
+        );
+    }
+
+    #[test]
+    fn a_draining_agent_lets_go_of_every_topic_it_subscribes_to() {
+        // docs/architecture/health-and-shutdown.md, section 4: a draining agent takes nothing new. Every subscription it
+        // declares is let go of, so a new one cannot be forgotten here.
+        use polar_agent_builder::{Access, PolarAgent};
+        let declared: std::collections::BTreeSet<&str> =
+            <crate::agent::CredentialsConsumer as PolarAgent>::TOPICS
+                .iter()
+                .filter(|t| t.access == Access::Subscribe)
+                .map(|t| t.name)
+                .collect();
+        let let_go: std::collections::BTreeSet<&str> = drain_topics().into_iter().collect();
+        assert_eq!(let_go, declared);
+    }
+
+    #[test]
+    fn what_the_agent_would_do_on_its_own_or_answer_is_dropped_while_draining_and_the_shutdown_is_not()
+     {
+        use ConsumerSupervisorMessage as M;
+        for dropped in [
+            M::AuthorityRequested,
+            M::AskRecord,
+            M::RecordAnswered {
+                payload: vec![],
+                published_by: None,
+            },
+            M::HeldOffered {
+                payload: vec![],
+                published_by: None,
+            },
+            M::PollHeld,
+            M::RuntimeChanged {
+                section: "policy".to_string(),
+            },
+        ] {
+            assert!(dropped_while_draining(&dropped));
+        }
+        for kept in [M::PrepareShutdown, M::DrainElapsed, M::ReportActivity] {
+            assert!(!dropped_while_draining(&kept));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GrantRecord;
+    use credentials_agent_common::events::{CredentialsEvent, GrantReason};
+
+    async fn spawn_ledger_registered(log_path: &str) -> ActorRef<LedgerMessage> {
+        let (ledger, _) = Actor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .expect("ledger should spawn cleanly");
+        ledger
+    }
+
+    async fn check_grant(ledger: &ActorRef<LedgerMessage>, identity: &str) -> Option<GrantRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckGrant {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_raw_ledger_event_is_appended_from_no_topic() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger_registered(path.to_str().unwrap()).await;
+
+        let grant = CredentialsEvent::Grant {
+            target_identity: "alice".to_string(),
+            permissions: vec![cert_issuer_common::permission::Permission {
+                scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                target: None,
+            }],
+            granted_by: "admin".to_string(),
+            timestamp: 1000,
+            reason: GrantReason::UserOnboarding,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&grant)
+            .unwrap()
+            .to_vec();
+
+        // The three topics that once appended whatever event they carried, unsigned (removed: the signed admin
+        // actions are the only way to grant, revoke and provision), and one no one has heard of.
+        for topic in [
+            "credentials-grants",
+            "credentials-revocations",
+            "credentials-account-provisioning",
+            "no-such-topic",
+        ] {
+            ConsumerSupervisor::deserialize_and_dispatch(topic.to_string(), bytes.clone());
+        }
+
+        // A call returns only after every earlier message to the ledger has been handled.
+        assert!(check_grant(&ledger, "alice").await.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "nothing was appended"
+        );
+
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod issuance_wiring_tests {
+    use super::*;
+    use crate::state::GrantRecord;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_token(iss: &str) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}"}}"#));
+        format!("{header}.{payload}.")
+    }
+
+    async fn check_grant(ledger: &ActorRef<LedgerMessage>, identity: &str) -> Option<GrantRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckGrant {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    async fn check_renewal(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+        instance_binding: &str,
+    ) -> bool {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckRenewal {
+                identity: identity.to_string(),
+                instance_binding: instance_binding.to_string(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_to_a_recorded_issuance() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Real, end-to-end proof: raw bytes arriving on
+        // CREDENTIALS_ISSUANCE_REQUESTS_TOPIC -> deserialize_and_dispatch
+        // -> IssuanceActor's real async handle() -> IssuanceHandler's
+        // real logic (classify, validate, grant/renewal checks, sign)
+        // -> a genuinely recorded IssuanceCompleted event in the ledger.
+        // No shortcuts -- every real component in the actual chain.
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
+                    instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
+                    instance_name: None,
+                    normalized_identity: Some(
+                        "admin-tool.polar.serviceaccount.cluster.local".to_string(),
+                    ),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::IssueResponse {
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    serial_number: "full-pipeline-test-serial".to_string(),
+                    session_id: "00000000-0000-0000-0000-000000000099".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        let handler = IssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+            introspection: None,
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+            authority_model: None,
+        };
+
+        let (issuance_actor, _) = IssuanceActor::spawn(
+            Some(ISSUANCE_ACTOR_NAME.to_string()),
+            IssuanceActor,
+            IssuanceActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = IssuanceRequest {
+            csr_pem: "fake-csr".to_string(),
+            credential: make_token("https://kubernetes.default.svc.cluster.local"),
+            cert_type: Default::default(),
+            names: vec![],
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message on this
+        // topic actually goes through.
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        // IssuanceActor processes on its own independent mailbox, so
+        // (unlike LedgerActor's own sequential-mailbox synchronization
+        // trick) there's no single deterministic checkpoint to await
+        // here -- a short sleep is a real, honest compromise, not a
+        // fully deterministic wait.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        assert!(
+            check_renewal(
+                &ledger,
+                "admin-tool.polar.serviceaccount.cluster.local",
+                "admin-tool-uid"
+            )
+            .await,
+            "IssuanceCompleted must have actually been recorded in the ledger by now"
+        );
+        assert!(
+            check_grant(&ledger, "system:serviceaccount:polar:admin-tool")
+                .await
+                .is_none()
+        );
+
+        issuance_actor.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+
+    /// Each message the consumer publishes: its topic and payload.
+    type Published = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// Everything the consumer publishes, in order, for tests that follow a conversation.
+    struct RecordingBrokerClient {
+        published: Published,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for RecordingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { topic, payload, .. } = message {
+                self.published.lock().await.push((topic, payload));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sealed_issuance_goes_from_raw_bytes_through_dispatch_and_two_replies_to_a_recorded_certificate()
+     {
+        use credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC;
+        use credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload;
+        use credentials_agent_common::issuance::IssuanceReply;
+        use credentials_agent_common::workload_issuance::{
+            SealedIssuanceRequest, WorkloadIssuanceReply, WorkloadIssuanceRequest,
+        };
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+
+        // The conversation, as the real components have it: open a session, seal the token to it, ask. The
+        // replies are what reaches the broker, so a recording client stands where Cassini would.
+        let published = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            RecordingBrokerClient {
+                published: published.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:git-server".to_string(),
+                    instance_binding: Some("pod-1".to_string()),
+                    jti: None,
+                    instance_name: None,
+                    normalized_identity: Some(
+                        "git-server.polar.serviceaccount.cluster.local".to_string(),
+                    ),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::IssueResponse {
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    serial_number: "sealed-pipeline-serial".to_string(),
+                    session_id: "00000000-0000-0000-0000-000000000042".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+        // The actor's signing certificate, which it asks for when it starts.
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(crate::workload_issuance::tests::CertifiesSigning)
+            .mount(&cert_issuer)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: dir
+                    .path()
+                    .join("events.jsonl")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+        let (actor, _) = WorkloadIssuanceActor::spawn(
+            Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
+            WorkloadIssuanceActor,
+            WorkloadIssuanceActorArgs {
+                handler: WorkloadIssuanceHandler::new(
+                    IssuanceHandler {
+                        ledger: ledger.clone(),
+                        cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+                        introspection: None,
+                        known_kubernetes_issuers: vec![
+                            "https://kubernetes.default.svc.cluster.local".to_string(),
+                        ],
+                        escrow_keypair: crate::escrow::tests::test_keypair(),
+                        authority_model: None,
+                    },
+                    crate::workload_issuance::tests::OWN_IDENTITY.to_string(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+
+        async fn send(request: WorkloadIssuanceRequest, correlation_id: &str) {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&Envelope {
+                correlation_id: correlation_id.to_string(),
+                payload: request,
+            })
+            .unwrap()
+            .to_vec();
+            ConsumerSupervisor::deserialize_and_dispatch(
+                CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
+                bytes,
+            );
+        }
+        async fn reply_number(published: &Published, n: usize) -> Envelope<WorkloadIssuanceReply> {
+            for _ in 0..60 {
+                if let Some((topic, bytes)) = published.lock().await.get(n).cloned() {
+                    assert_eq!(topic, CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC);
+                    return rkyv::from_bytes::<Envelope<WorkloadIssuanceReply>, rkyv::rancor::Error>(
+                        &bytes,
+                    )
+                    .unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("reply {n} never arrived");
+        }
+
+        send(WorkloadIssuanceRequest::OpenSession, "open-1").await;
+        let offered = reply_number(&published, 0).await;
+        assert_eq!(offered.correlation_id, "open-1");
+        let WorkloadIssuanceReply::Offer(offer) = offered.payload else {
+            panic!("expected an offer");
+        };
+        // Signed with the certificate the actor was issued when it started.
+        assert_eq!(
+            crate::workload_issuance::tests::check()
+                .check(&offer, time::OffsetDateTime::now_utc().unix_timestamp()),
+            Ok(())
+        );
+
+        let token = make_token("https://kubernetes.default.svc.cluster.local");
+        send(
+            WorkloadIssuanceRequest::Issue(SealedIssuanceRequest {
+                session_id: offer.session_id,
+                csr_pem: "fake-csr".to_string(),
+                cert_type: Default::default(),
+                names: vec![],
+                sealed_credential: EphemeralEncryptedPayload::encrypt(
+                    token.as_bytes(),
+                    &offer.public_key,
+                )
+                .unwrap(),
+            }),
+            "issue-1",
+        )
+        .await;
+        let issued = reply_number(&published, 1).await;
+        assert_eq!(issued.correlation_id, "issue-1");
+        assert!(
+            matches!(
+                issued.payload,
+                WorkloadIssuanceReply::Issuance(IssuanceReply::Issued { .. })
+            ),
+            "{:?}",
+            issued.payload
+        );
+        assert!(
+            check_renewal(
+                &ledger,
+                "git-server.polar.serviceaccount.cluster.local",
+                "pod-1"
+            )
+            .await,
+            "the issuance must be recorded in the ledger"
+        );
+        // And nowhere on the wire is the token in the clear.
+        for (_, bytes) in published.lock().await.iter() {
+            assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
+        }
+
+        actor.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_escrow_wiring_tests {
+    use super::*;
+    use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+    use crate::agent_escrow_issuance_actor::{
+        AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs,
+    };
+    use crate::agent_escrow_key::AgentEscrowKeyHandler;
+    use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
+    use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
+    use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn check_agent_escrow_key(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> Option<crate::state::AgentEscrowCertificateRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckAgentEscrowKey {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_to_a_recorded_agent_escrow_issuance() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors issuance_wiring_tests's own
+        // full_pipeline_from_raw_bytes_through_dispatch_to_a_recorded_issuance
+        // exactly, proving the same real, end-to-end chain for the new
+        // topic/actor pair specifically: raw bytes on
+        // CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC ->
+        // deserialize_and_dispatch -> AgentEscrowIssuanceActor's real
+        // async handle() -> AgentEscrowIssuanceHandler's real logic ->
+        // a genuinely recorded AgentEscrowIssuanceCompleted event.
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(cert_issuer_common::IssueResponse {
+                    certificate_pem:
+                        "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n"
+                            .to_string(),
+                    ca_chain_pem:
+                        "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                            .to_string(),
+                    serial_number: "agent-escrow-wiring-test-serial".to_string(),
+                    session_id: "00000000-0000-0000-0000-000000000098".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                }),
+            )
+            .mount(&cert_issuer)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The workload's custodian, which alone is answered.
+        crate::issuance::call_append(
+            &ledger,
+            credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                identity: crate::custodian::tests::CUSTODIAN.to_string(),
+                instance_binding: crate::custodian::tests::POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: crate::custodian::tests::custodian_pem(
+                    &[cert_issuer_common::custody::CustodyPermission::Escrow],
+                    3600,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        let handler = AgentEscrowIssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+            in_flight: Default::default(),
+        };
+
+        let (agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn(
+            Some(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()),
+            AgentEscrowIssuanceActor,
+            AgentEscrowIssuanceActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = AgentEscrowIssuanceRequest {
+            csr_pem: "fake-csr".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message on this
+        // topic actually goes through, with the publisher the broker verified.
+        ConsumerSupervisor::dispatch_request(
+            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            bytes,
+            Some(crate::custodian::tests::CUSTODIAN.to_string()),
+            None,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let record = check_agent_escrow_key(&ledger, crate::custodian::tests::X).await;
+        assert!(
+            record.is_some(),
+            "AgentEscrowIssuanceCompleted must have actually been recorded in the ledger by now"
+        );
+        assert_eq!(record.unwrap().serial, "agent-escrow-wiring-test-serial");
+
+        agent_escrow_issuance_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_answers_the_agent_escrow_key_query() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Same real-chain proof as the issuance test above, for the
+        // agent escrow-key query specifically -- a genuinely separate
+        // actor and topic pair. A real, capturing fake broker client
+        // (registered under BROKER_CLIENT_NAME, the exact name
+        // AgentEscrowKeyActor's own handle() looks up via where_is)
+        // lets this test assert on the actual, real published reply
+        // bytes, not merely that dispatch didn't panic -- this query
+        // has no ledger side effect of its own to poll for the way
+        // the issuance test above does.
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real requester certificate.
+        let certificate_pem = {
+            let mut rng = rand::rng();
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+            let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+                &private_key,
+                rsa::pkcs8::LineEnding::LF,
+            )
+            .unwrap();
+            let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
+            let params = rcgen::CertificateParams::new(vec![
+                "git-observer.polar.svc.cluster.local".to_string(),
+            ])
+            .unwrap();
+            params.self_signed(&key_pair).unwrap().pem()
+        };
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::AgentEscrowIssuanceCompleted {
+                    identity: "git-observer".to_string(),
+                    instance_binding: "pod-uid-1".to_string(),
+                    serial: "agent-escrow-key-wiring-test-serial".to_string(),
+                    timestamp: 2000,
+                    certificate_pem: certificate_pem.clone(),
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handler = AgentEscrowKeyHandler {
+            ledger: ledger.clone(),
+        };
+        let (agent_escrow_key_actor, _) = AgentEscrowKeyActor::spawn(
+            Some(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()),
+            AgentEscrowKeyActor,
+            AgentEscrowKeyActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = AgentEscrowKeyRequest {
+            identity: "git-observer".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-2".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope =
+            rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(&captured_bytes)
+                .unwrap();
+        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-2");
+        match reply_envelope.payload {
+            AgentEscrowKeyReply::Found {
+                public_key_pem,
+                certificate_pem: replied_certificate,
+            } => {
+                let expected =
+                    cert_issuer_common::public_key::extract_public_key_pem(&certificate_pem)
+                        .unwrap();
+                assert_eq!(public_key_pem, expected);
+                assert_eq!(replied_certificate.trim(), certificate_pem.trim());
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        agent_escrow_key_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retrieve_secret_wiring_tests {
+    use super::*;
+    use crate::retrieve_secret::RetrieveSecretHandler;
+    use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs};
+    use credentials_agent_common::retrieve_secret::{RetrieveSecretReply, RetrieveSecretRequest};
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_reply() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Proves the actual thing dispatch_store_secret_request's own
+        // doc comment named as the real reason this dispatch path
+        // exists outside the shared Supervisor trait: published_by
+        // genuinely reaches the handler, derived from this call's own
+        // argument, not from anything in the serialized request
+        // bytes -- the same real, end-to-end proof
+        // agent_escrow_wiring_tests already established for the
+        // ordinary-path actors, applied here to the one, special
+        // dispatch path this crate has that they don't use.
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // As in a real cluster: the requester's mTLS certificate cannot encrypt, its RSA agent escrow
+        // key can, and a policy permits it this one secret.
+        use crate::retrieve_secret::tests as fixtures;
+        fixtures::seed_mtls_certificate(&ledger, "requester").await;
+        let requester_private_key = fixtures::seed_escrow_certificate(&ledger, "requester").await;
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real secret via the real dispatch path";
+        fixtures::store_secret(&ledger, &escrow_keypair, "gitlab-token", original_plaintext).await;
+
+        let handler = RetrieveSecretHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+            policy: fixtures::policy_actor(Some(("requester", "gitlab-token"))).await,
+        };
+        let (retrieve_secret_actor, _) = RetrieveSecretActor::spawn(
+            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
+            RetrieveSecretActor,
+            RetrieveSecretActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = RetrieveSecretRequest {
+            name: "gitlab-token".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-retrieve".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise -- not deserialize_and_dispatch, since
+        // this specific topic is deliberately routed elsewhere (see
+        // ConsumerSupervisor's own ClientEvent::MessagePublished
+        // handler and dispatch_retrieve_secret_request's own doc
+        // comment for why).
+        ConsumerSupervisor::dispatch_retrieve_secret_request(bytes, Some("requester".to_string()));
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope =
+            rkyv::from_bytes::<Envelope<RetrieveSecretReply>, rkyv::rancor::Error>(&captured_bytes)
+                .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-retrieve"
+        );
+        match reply_envelope.payload {
+            RetrieveSecretReply::Found { secret } => {
+                let decrypted = secret.decrypt(&requester_private_key).unwrap();
+                assert_eq!(&*decrypted, original_plaintext);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        retrieve_secret_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_escrow_keypair_bootstrap_wiring_tests {
+    use super::*;
+    use crate::agent_escrow_keypair_bootstrap::AgentEscrowKeypairBootstrapHandler;
+    use crate::agent_escrow_keypair_bootstrap_actor::{
+        AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
+    };
+    use credentials_agent_common::agent_escrow_keypair_bootstrap::{
+        RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRequest,
+        agent_escrow_keypair_secret_name,
+    };
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
+    use x25519_dalek::{EphemeralSecret, PublicKey};
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_reply() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors retrieve_secret_wiring_tests's own test of the
+        // identical shape -- proves published_by genuinely reaches
+        // this handler too, via this crate's second dispatch path
+        // outside the shared Supervisor trait.
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The workload's custodian, which alone is answered, and a real, stored "escrow keypair" secret.
+        crate::issuance::call_append(
+            &ledger,
+            credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                identity: crate::custodian::tests::CUSTODIAN.to_string(),
+                instance_binding: crate::custodian::tests::POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: crate::custodian::tests::custodian_pem(
+                    &[cert_issuer_common::custody::CustodyPermission::Escrow],
+                    3600,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real escrowed keypair, via the real dispatch path";
+        let stored_secret =
+            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::SecretStored {
+                    name: agent_escrow_keypair_secret_name(crate::custodian::tests::X),
+                    secret: stored_secret,
+                    stored_by: crate::custodian::tests::CUSTODIAN.to_string(),
+                    timestamp: 1000,
+                    labels: Default::default(),
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handler = AgentEscrowKeypairBootstrapHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+        };
+        let (agent_escrow_keypair_bootstrap_actor, _) = AgentEscrowKeypairBootstrapActor::spawn(
+            Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
+            AgentEscrowKeypairBootstrapActor,
+            AgentEscrowKeypairBootstrapActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let requester_secret = EphemeralSecret::random();
+        let requester_public_key = PublicKey::from(&requester_secret).to_bytes();
+
+        let request = RetrieveAgentEscrowKeypairRequest {
+            ephemeral_public_key: requester_public_key,
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-bootstrap".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise.
+        ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+            bytes,
+            Some(crate::custodian::tests::CUSTODIAN.to_string()),
+            None,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<
+            Envelope<RetrieveAgentEscrowKeypairReply>,
+            rkyv::rancor::Error,
+        >(&captured_bytes)
+        .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-bootstrap"
+        );
+        match reply_envelope.payload {
+            RetrieveAgentEscrowKeypairReply::Found { payload } => {
+                let decrypted = payload.decrypt(requester_secret).unwrap();
+                assert_eq!(decrypted.as_slice(), original_plaintext);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        agent_escrow_keypair_bootstrap_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod identity_normalization_wiring_tests {
+    use super::*;
+    use crate::identity_normalization::IdentityNormalizationHandler;
+    use crate::identity_normalization_actor::{
+        IdentityNormalizationActor, IdentityNormalizationActorArgs,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_reaches_cert_issuer() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "testuser".to_string(),
+                    instance_binding: None,
+                    jti: None,
+                    instance_name: None,
+                    normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+
+        let handler = IdentityNormalizationHandler {
+            cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+        };
+
+        let (_actor, _) = IdentityNormalizationActor::spawn(
+            Some(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()),
+            IdentityNormalizationActor,
+            IdentityNormalizationActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = IdentityNormalizationRequest {
+            credential: "any-token".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message on this
+        // topic actually goes through.
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        // The actor processes on its own independent mailbox -- same
+        // honest compromise as issuance's own full-pipeline test, a
+        // short sleep rather than a fully deterministic wait.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // No real broker is registered in this test, so the actor's
+        // final publish-the-reply step is expected to fail/log (no
+        // BROKER_CLIENT_NAME actor exists here) -- what this proves
+        // instead is that the full chain up to that point genuinely
+        // ran: dispatch -> actor -> handler -> a real HTTP call to
+        // cert-issuer's /validate, confirmed by the mock's own
+        // request count, not just assumed from no panic occurring.
+        let received = cert_issuer.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "cert-issuer's /validate must have been called exactly once"
+        );
+    }
+}
+
+#[cfg(test)]
+mod decrypt_on_behalf_of_wiring_tests {
+    use super::*;
+    use crate::decrypt_on_behalf_of::DecryptOnBehalfOfHandler;
+    use crate::decrypt_on_behalf_of_actor::{DecryptOnBehalfOfActor, DecryptOnBehalfOfActorArgs};
+    use credentials_agent_common::decrypt_on_behalf_of::{
+        DecryptOnBehalfOfReply, DecryptOnBehalfOfRequest,
+    };
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    use crate::decrypt_on_behalf_of::tests::spawn_policy_actor_permitting;
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_allowed_reply()
+     {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors retrieve_secret_wiring_tests's own test of the
+        // identical shape -- proves published_by genuinely reaches
+        // this handler too, via this crate's real, new
+        // dispatch_decrypt_on_behalf_of_request path, and that the
+        // real, complete flow (certificate lookup, live PolicyActor
+        // query, decrypt, re-encrypt) actually works end-to-end
+        // through the real dispatch function, not merely the
+        // handler in isolation (already proven directly in
+        // decrypt_on_behalf_of.rs's own test module).
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real requester certificate.
+        let mut rng = rand::rng();
+        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+            &requester_private_key,
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                    identity: "requester".to_string(),
+                    instance_binding: "pod-uid-1".to_string(),
+                    serial: "requester-serial-1".to_string(),
+                    timestamp: 1000,
+                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                    grant_key: None,
+                    certificate_pem: requester_certificate_pem,
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let resource_id = r#"KubeSecret::"namespace/pod/ENV_VAR""#;
+        let policy_actor = spawn_policy_actor_permitting("requester", resource_id).await;
+
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real, plaintext env var value, via the real dispatch path";
+        let ciphertext =
+            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
+
+        let handler = DecryptOnBehalfOfHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+            policy: policy_actor,
+        };
+        let (decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn(
+            Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),
+            DecryptOnBehalfOfActor,
+            DecryptOnBehalfOfActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = DecryptOnBehalfOfRequest {
+            ciphertext,
+            resource_id: resource_id.to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-decrypt-on-behalf-of".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise.
+        ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(
+            bytes,
+            Some("requester".to_string()),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<
+            Envelope<DecryptOnBehalfOfReply>,
+            rkyv::rancor::Error,
+        >(&captured_bytes)
+        .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-decrypt-on-behalf-of"
+        );
+        match reply_envelope.payload {
+            DecryptOnBehalfOfReply::Allowed { secret } => {
+                let decrypted = secret.decrypt(&requester_private_key).unwrap();
+                assert_eq!(&*decrypted, original_plaintext);
+            }
+            other => panic!("expected Allowed, got {other:?}"),
+        }
+
+        decrypt_on_behalf_of_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod builder_wiring_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    /// The handler actors publish their replies through
+    /// `where_is(BROKER_CLIENT_NAME)`. If this name and the one the agent
+    /// builder registers ever differ, every reply is silently dropped: the
+    /// lookup finds nothing, and nothing is logged.
+    #[test]
+    fn handler_actors_find_the_client_under_the_name_the_builder_registers() {
+        assert_eq!(BROKER_CLIENT_NAME, format!("{SERVICE_NAME}.tcp"));
+    }
+
+    #[test]
+    fn there_are_fourteen_distinct_request_topics_and_none_takes_a_raw_ledger_event() {
+        let distinct: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
+        assert_eq!(REQUEST_TOPICS.len(), 14);
+        for removed in [
+            "credentials-grants",
+            "credentials-revocations",
+            "credentials-account-provisioning",
+        ] {
+            assert!(!distinct.contains(removed), "{removed} is served again");
+        }
+        assert_eq!(
+            distinct.len(),
+            14,
+            "a topic is listed twice: {REQUEST_TOPICS:?}"
+        );
+    }
+
+    /// The topics whose requester must be broker-verified are all subscribed
+    /// to; dropping one from the list would silently stop that flow.
+    #[test]
+    fn every_topic_that_needs_the_verified_sender_is_subscribed() {
+        for topic in [
+            CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+            CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+            CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+        ] {
+            assert!(
+                REQUEST_TOPICS.contains(&topic),
+                "{topic} is not subscribed to"
+            );
+        }
+    }
+
+    /// A minimal stand-in for the supervisor: records the client events it is
+    /// sent, so the subscriptions' delivery closures can be exercised without
+    /// a broker.
+    struct FakeSupervisor {
+        received: Arc<Mutex<Vec<ClientEvent>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeSupervisor {
+        type Msg = ConsumerSupervisorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let ConsumerSupervisorMessage::ClientEvent { event } = message {
+                self.received.lock().unwrap().push(event);
+            }
+            Ok(())
+        }
+    }
+
+    /// Every subscription hands its message to the supervisor as a
+    /// `MessagePublished` with the topic, the payload and, above all, the
+    /// broker-verified sender intact: the handlers derive who is asking from
+    /// it, so losing or rewriting it would be a security bug.
+    #[tokio::test]
+    async fn each_subscription_forwards_its_topic_payload_and_verified_sender() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let subscriptions = ConsumerSupervisor::request_subscriptions(&supervisor);
+        let subscribed: HashSet<&str> = subscriptions.iter().map(|s| s.topic.as_str()).collect();
+        let expected: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
+        assert_eq!(
+            subscribed, expected,
+            "one subscription per request topic, and no others"
+        );
+
+        for subscription in &subscriptions {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: vec![1, 2, 3],
+                published_by: Some("a.verified.identity".to_string()),
+                published_instance: None,
+                trace_ctx: None,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), REQUEST_TOPICS.len());
+        let mut forwarded = HashSet::new();
+        for event in events.iter() {
+            match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } => {
+                    assert_eq!(payload, &vec![1, 2, 3]);
+                    assert_eq!(published_by.as_deref(), Some("a.verified.identity"));
+                    forwarded.insert(topic.as_str());
+                }
+                other => panic!("expected MessagePublished, got {other:?}"),
+            }
+        }
+        assert_eq!(forwarded, expected);
+    }
+
+    /// Every request goes to the request gate, publisher and all, before any handler sees it; while the agent drains,
+    /// none does (docs/architecture/authority-model.md, slice 9).
+    #[tokio::test]
+    async fn a_request_is_handed_to_the_request_gate_unless_the_agent_is_draining() {
+        use crate::request_gate::RequestGateMessage;
+        type Handed = Arc<Mutex<Vec<(String, Vec<u8>, Option<String>)>>>;
+        struct Gate(Handed);
+
+        #[async_trait]
+        impl Actor for Gate {
+            type Msg = RequestGateMessage;
+            type State = ();
+            type Arguments = ();
+
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                let RequestGateMessage::Request {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } = message;
+                self.0.lock().unwrap().push((topic, payload, published_by));
+                Ok(())
+            }
+        }
+
+        let handed: Handed = Arc::new(Mutex::new(Vec::new()));
+        let (gate, _) = Actor::spawn(None, Gate(handed.clone()), ()).await.unwrap();
+        let by = Some("credentials-agent-observer.polar.serviceaccount.cluster.local".to_string());
+        ConsumerSupervisor::on_request(
+            true,
+            &gate,
+            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            vec![1],
+            by.clone(),
+            None,
+        );
+        ConsumerSupervisor::on_request(
+            false,
+            &gate,
+            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            vec![2],
+            by.clone(),
+            None,
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            handed.lock().unwrap().clone(),
+            vec![(CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(), vec![2], by)]
+        );
+    }
+
+    /// cert-issuer's answer reaches the asker with its broker-verified publisher intact: the asker takes an answer only
+    /// from cert-issuer, so losing or rewriting it would let anyone write the ledger's record.
+    #[tokio::test]
+    async fn cert_issuer_s_answer_is_forwarded_with_its_verified_publisher() {
+        /// Each answer's payload and publisher, as the supervisor was handed them.
+        type Handed = Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>>;
+        struct Answers(Handed);
+
+        #[async_trait]
+        impl Actor for Answers {
+            type Msg = ConsumerSupervisorMessage;
+            type State = ();
+            type Arguments = ();
+
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                if let ConsumerSupervisorMessage::RecordAnswered {
+                    payload,
+                    published_by,
+                } = message
+                {
+                    self.0.lock().unwrap().push((payload, published_by));
+                }
+                Ok(())
+            }
+        }
+
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let (supervisor, _) = Actor::spawn(None, Answers(answers.clone()), ())
+            .await
+            .unwrap();
+        let subscription = ConsumerSupervisor::record_reply_subscription(&supervisor);
+        assert_eq!(
+            subscription.topic,
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC
+        );
+        for published_by in [
+            Some("cert-issuer.polar.serviceaccount.cluster.local".to_string()),
+            None,
+        ] {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: vec![4, 5, 6],
+                published_by,
+                published_instance: None,
+                trace_ctx: None,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            answers.lock().unwrap().clone(),
+            vec![
+                (
+                    vec![4, 5, 6],
+                    Some("cert-issuer.polar.serviceaccount.cluster.local".to_string())
+                ),
+                (vec![4, 5, 6], None),
+            ]
+        );
+    }
+}

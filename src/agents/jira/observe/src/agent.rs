@@ -1,0 +1,369 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! What the Jira observer is, as the infrastructure asks to be told: see
+//! `polar_agent_builder::PolarAgent`.
+
+use crate::JiraDeployment;
+use crate::settings::{self, JiraSettings};
+use crate::supervisor::{
+    Infrastructure, ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET,
+};
+use polar_agent_builder::held::Retry;
+use polar_agent_builder::{
+    Cause, Configured, GraphDecl, HoldReason, PolarAgent, StartError, TopicDecl,
+};
+use polar_env::Section;
+use ractor::Actor;
+use std::time::Duration;
+use tracing::info;
+
+const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
+
+/// How often the observers poll Jira, in seconds. Not configurable yet.
+const BASE_INTERVAL_SECS: u64 = 1800;
+
+pub struct JiraObserver;
+
+/// What the observers are started with, made from the configuration. The credential is not here: it is the signed
+/// `credentials` runtime section, which the supervisor hands to the CryptoActor (`crate::credentials`).
+#[derive(Clone)]
+pub struct Prepared {
+    pub jira_url: String,
+    /// Read without a credential (JIRA_ANONYMOUS).
+    pub anonymous: bool,
+    /// The host the credential is asked for: JIRA_URL's, which must then be https and a name. None reading
+    /// anonymously.
+    pub credential_host: Option<String>,
+    pub deployment: JiraDeployment,
+    pub egress: polar::egress::Egress,
+    pub query_date: Option<String>,
+}
+
+/// The observers' settings from `config`, or why they cannot work: an address that cannot be the site's (the
+/// placeholder; one that is not https for a credential), or any other configuration error. Never a secret's value:
+/// polar-env never shows one.
+pub fn prepare(config: &polar_env::Config) -> Result<Prepared, String> {
+    // Declared and judged with the rest of the configuration, so a missing address was reported before this point,
+    // with every other problem.
+    let settings = JiraSettings::read(config).map_err(|e| e.to_string())?;
+    // An address that cannot be the site's is a configuration error, with what to set; so are a deployment that is
+    // not one and a QUERY_DATE that is not a date.
+    let jira_url = settings::normalise_jira_url(&settings.url)?;
+    let deployment = settings
+        .deployment
+        .as_deref()
+        .map(settings::parse_deployment)
+        .transpose()?;
+    let query_date = settings
+        .query_date
+        .as_deref()
+        .filter(|date| !date.trim().is_empty())
+        .map(settings::parse_query_date)
+        .transpose()?
+        .map(|date| date.to_string());
+    let credential_host = if settings.anonymous {
+        None
+    } else {
+        Some(crate::credentials::credential_host(&jira_url)?)
+    };
+    Ok(Prepared {
+        anonymous: settings.anonymous,
+        credential_host,
+        deployment: JiraDeployment::resolve(deployment, &jira_url),
+        jira_url,
+        egress: polar::egress::Egress::read(config).map_err(|e| e.to_string())?,
+        query_date,
+    })
+}
+
+/// What the start log says of reading anonymously.
+fn log_anonymous(prepared: &Prepared) {
+    if prepared.anonymous {
+        info!(
+            "JIRA_ANONYMOUS is true: the observer sends no credential and reads only what the site shows the public \
+             (anonymous users); what it hides from them is not read. The users observer is not started: a Data Center \
+             lists users only to a login (an anonymous user search is refused, 401)"
+        );
+    }
+}
+
+/// The way out of a hold at start: the settings made again from the configuration in force, and, if they work, the
+/// supervisor started on the infrastructure the held agent built, linked under it.
+fn try_again(
+    retry: Retry,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+    Box::pin(async move {
+        let prepared = prepare(&retry.config)?;
+        log_anonymous(&prepared);
+        Actor::spawn_linked(
+            Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
+            ObserverSupervisor,
+            ObserverSupervisorArgs {
+                prepared,
+                base_interval: BASE_INTERVAL_SECS,
+                infrastructure: Infrastructure::Built {
+                    resources: retry.resources,
+                    registered: retry.cassini_registered,
+                },
+            },
+            retry.supervisor,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            format!("the settings work now, but {JIRA_OBSERVER_SUPERVISOR} did not start: {e}")
+        })
+    })
+}
+
+impl PolarAgent for JiraObserver {
+    const NAME: &'static str = crate::BROKER_CLIENT_NAME;
+    const PURPOSE: &'static str =
+        "Polls a Jira site for projects, groups, users and issues and publishes them to Cassini";
+    // The CryptoActor holds the credential of the `credentials` runtime section and gives it for the site's host only.
+    const NEEDS: &'static [polar_agent_builder::Capability] =
+        &[polar_agent_builder::Capability::Encryption];
+    const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::publish(
+            jira_common::JIRA_PROJECTS_CONSUMER_TOPIC,
+            "the projects it reads from Jira",
+        )
+        .because(&[Cause::Timer("poll")]),
+        TopicDecl::publish(
+            jira_common::JIRA_GROUPS_CONSUMER_TOPIC,
+            "the groups it reads from Jira",
+        )
+        .because(&[Cause::Timer("poll")]),
+        TopicDecl::publish(
+            jira_common::JIRA_USERS_CONSUMER_TOPIC,
+            "the users it reads from Jira",
+        )
+        .because(&[Cause::Timer("poll")]),
+        TopicDecl::publish(
+            jira_common::JIRA_ISSUES_CONSUMER_TOPIC,
+            "the issues it reads from Jira",
+        )
+        .because(&[Cause::Timer("poll")]),
+    ];
+    // Where its first issue pull starts: the newest update of an issue in the graph, asked of the state agent through
+    // its state actor (docs/architecture/soft-state.md, "The Jira cursor"). The read gives it the soft-state
+    // capability, and with it its request and reply topics.
+    const GRAPH: &'static [GraphDecl] = &[GraphDecl::reads(
+        crate::issues::CURSOR_LABEL,
+        "the newest updated_ms of an issue, where its first issue pull starts",
+    )];
+    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
+        &[&crate::credentials::CREDENTIALS];
+    const HELP: Option<&'static str> = Some(
+        "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
+         projects, groups, users and issues for jira-processor to write into the graph. \
+         The credential comes in the `credentials` runtime section, as ciphertext only this agent can open, \
+         used only for the hosts it is bound to: a `token` (a Data Center or Server personal access token) is \
+         sent as Bearer, a `user-password` (a Jira Cloud account's email and API token) as Basic. \
+         JIRA_ANONYMOUS=true reads without a credential, only what the site shows the public. The site's \
+         serverInfo says whether it is Cloud; JIRA_DEPLOYMENT is used where it does not say, and the \
+         address where neither does. Before its first issue pull it asks the state agent for the newest update of an \
+         issue in the graph and starts there; QUERY_DATE starts the first pull from a date only when the graph \
+         has no issue. The egress \
+         section says how the site is reached: through POLAR_EGRESS_PROXY unless the host is in \
+         POLAR_EGRESS_NO_PROXY, trusting the CA certificates of POLAR_EGRESS_CA_CERT beside the \
+         system's (the CA of a TLS-intercepting proxy).",
+    );
+
+    async fn start(configured: Configured) -> Result<(), StartError> {
+        configured.init_logging(JIRA_OBSERVER_SUPERVISOR);
+
+        // A configuration that cannot work (the placeholder address) is not fixed by starting again: the agent stays
+        // up with its infrastructure only, says why when it is asked about its health, and starts no observer
+        // (docs/architecture/soft-state.md, "As built: pulled health"). A signed update that mends it starts them.
+        let prepared = match prepare(configured.config()) {
+            Ok(prepared) => prepared,
+            Err(why) => {
+                return polar_agent_builder::held::stay_up(
+                    configured,
+                    crate::BROKER_CLIENT_NAME,
+                    HoldReason::Configuration,
+                    why,
+                    Box::new(try_again),
+                )
+                .await;
+            }
+        };
+        log_anonymous(&prepared);
+        let args = ObserverSupervisorArgs {
+            prepared,
+            // TODO: read this from configuration
+            base_interval: BASE_INTERVAL_SECS,
+            infrastructure: Infrastructure::Build(configured),
+        };
+
+        let (_, handle) = Actor::spawn(
+            Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
+            ObserverSupervisor,
+            args,
+        )
+        .await
+        .map_err(|e| format!("failed to start {JIRA_OBSERVER_SUPERVISOR}: {e}"))?;
+
+        handle
+            .await
+            .map_err(|e| format!("{JIRA_OBSERVER_SUPERVISOR} task failed: {e}"))?;
+
+        // The supervisor stopping is never a success: this agent runs as a Job and only a
+        // non-zero exit gets it restarted. `run` exits non-zero.
+        Err(format!("{JIRA_OBSERVER_SUPERVISOR} stopped").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    polar_agent_builder::polar_agent_tests!(JiraObserver);
+
+    /// It only reads the graph, so it makes no constraint: only an owner does.
+    #[test]
+    fn a_reader_makes_no_constraint() {
+        assert!(polar_agent_builder::agent::graph_key_indexes::<JiraObserver>().is_empty());
+    }
+
+    fn config(url: &str) -> polar_env::Config {
+        config_of(&[("JIRA_URL", url)])
+    }
+
+    fn config_of(pairs: &[(&str, &str)]) -> polar_env::Config {
+        let env: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        polar_env::Config::builder(&env)
+            .register(&settings::SECTION)
+            .register(&polar::egress::SECTION)
+            .build()
+    }
+
+    /// The placeholder address is a configuration problem the agent holds, and says, rather than a reason to end.
+    #[test]
+    fn the_placeholder_address_is_a_configuration_problem_with_what_to_set() {
+        let why = match prepare(&config("https://example.atlassian.net")) {
+            Ok(_) => panic!("the placeholder was taken"),
+            Err(why) => why,
+        };
+        assert!(why.contains("example placeholder"), "{why}");
+        assert!(why.contains("workloads.jira-observer.env"), "{why}");
+        let prepared = prepare(&config("https://jira.example.org")).unwrap();
+        assert_eq!(prepared.jira_url, "https://jira.example.org");
+    }
+
+    /// A site read with a credential is https and a host name, and the credential is asked for that host; one read
+    /// anonymously needs neither.
+    #[test]
+    fn a_credential_is_asked_for_the_site_s_host_and_only_over_https() {
+        let prepared = prepare(&config("https://Jira.Example.org/jira")).unwrap();
+        assert!(!prepared.anonymous);
+        assert_eq!(
+            prepared.credential_host.as_deref(),
+            Some("jira.example.org")
+        );
+
+        let why = match prepare(&config("http://jira.example.org")) {
+            Ok(_) => panic!("a credential would go over http"),
+            Err(why) => why,
+        };
+        assert!(
+            why.contains("https") && why.contains("JIRA_ANONYMOUS"),
+            "{why}"
+        );
+
+        let anonymous = prepare(&config_of(&[
+            ("JIRA_URL", "http://jira.example.org"),
+            ("JIRA_ANONYMOUS", "true"),
+        ]))
+        .unwrap();
+        assert!(anonymous.anonymous);
+        assert_eq!(anonymous.credential_host, None);
+    }
+
+    /// u7c's settings (infra/targets/sandbox-local/config.nuon): Apache's Jira, read anonymously as a Server, the
+    /// first pull of an empty graph from 2026-10-31. They start the observers.
+    #[test]
+    fn u7c_s_settings_for_apache_s_jira_start_the_observers() {
+        let prepared = prepare(&config_of(&[
+            ("JIRA_URL", "https://issues.apache.org/jira"),
+            ("JIRA_ANONYMOUS", "true"),
+            ("JIRA_DEPLOYMENT", "server"),
+            ("QUERY_DATE", "2026-10-31"),
+        ]))
+        .unwrap();
+        assert_eq!(prepared.jira_url, "https://issues.apache.org/jira");
+        assert!(prepared.anonymous);
+        assert_eq!(prepared.credential_host, None);
+        assert_eq!(prepared.deployment, JiraDeployment::ServerOrDataCenter);
+        assert_eq!(prepared.query_date.as_deref(), Some("2026-10-31"));
+    }
+
+    /// The credential is the `credentials` runtime section, opened by the CryptoActor: the agent needs encryption,
+    /// and declares the section.
+    #[test]
+    fn the_agent_needs_encryption_and_declares_the_credentials_section() {
+        assert!(JiraObserver::NEEDS.contains(&polar_agent_builder::Capability::Encryption));
+        assert!(
+            JiraObserver::RUNTIME
+                .iter()
+                .any(|section| section.name == crate::credentials::SECTION_NAME)
+        );
+    }
+
+    /// The render writes the target's egress setting only into an agent that declares the section.
+    #[test]
+    fn the_scaffold_declares_the_egress_section() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<JiraObserver>();
+        let egress = scaffold
+            .document
+            .sections
+            .iter()
+            .find(|s| s.name == "egress")
+            .expect("an egress section");
+        let names: Vec<&str> = egress.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "POLAR_EGRESS_PROXY",
+                "POLAR_EGRESS_NO_PROXY",
+                "POLAR_EGRESS_CA_CERT"
+            ]
+        );
+        assert!(
+            scaffold
+                .document
+                .sections
+                .iter()
+                .flat_map(|s| &s.variables)
+                .all(|v| v.name != "PROXY_CA_CERT"),
+            "PROXY_CA_CERT is gone"
+        );
+    }
+}

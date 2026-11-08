@@ -1,48 +1,47 @@
--- container.dhall
--- Minimal init container for Cyclops git-clone jobs.
+-- ACE Tool
 --
--- This container runs as a Kubernetes init container in Cyclops build jobs.
--- Its sole responsibility is to populate /workspace from the build's source —
--- a git repository at a specific commit SHA, or a registry archive verified
--- against its sha256 — then exit 0. The pipeline container starts only after
--- this succeeds.
+-- Copyright 2026 Carnegie Mellon University.
 --
--- The entrypoint binary (git-clone-entrypoint) is built locally via
--- writeShellApplication in package.nix and passed to mkContainer via
--- extraDerivations — it cannot be expressed as a dhall PackageRef because
--- it is not a flake input or a nixpkgs package.
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 --
--- Runtime dependencies (git, cacert) are declared here in packageLayers
--- so they are included in the image and visible to the entrypoint script.
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
 --
--- Security notes:
---   - Runs as UID 65532 (conventional non-root for k8s init containers).
---   - Credentials are injected as env vars by the orchestrator at runtime,
---     never baked into the image.
---   - The askpass script writes to /tmp (tmpfs) and is removed after clone.
---   - .git directory is stripped from /workspace after checkout.
-let Lib =
-      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/e2334448bd4bb6348a467244d474f907d3d0e36d/dhall/prelude.dhall
-        sha256:b81e69ef2fe811bc853a8a9a0202c0af802f7cd53c78f95f67083bf3dceee86b
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
+-- src/agents/build-orchestrator/container.dhall
+--
+-- build-orchestrator's image: the binary and polar-healthcheck, for the liveness probe. Pre-rendered to container.nix
+-- (`dhall-to-nix < container.dhall > container.nix`) because Nix cannot fetch the library inside its sandbox.
+
+let Lib = ../../containers/container-lib.dhall
 
 let defaults = Lib.defaults
 
+let healthcheckLayer =
+  Lib.customLayer "polar-healthcheck-bin"
+    [ Lib.flakePackage "polar-healthcheck" "default"
+    ]
+
 in defaults.minimalContainer //
-  { name       = "cyclops/git-clone"
-  , entrypoint = Some "git-clone-entrypoint"
-  , staticUid  = Some 65532
-  , staticGid  = Some 65532
-  , packageLayers =
-      [ Lib.PackageLayer.Core
-      , Lib.customLayer "git-clone-deps"
-          [ Lib.nixpkgs "git"
-          , Lib.nixpkgs "cacert"
-          , Lib.nixpkgs "curl"
-          ]
-      ]
-  , extraEnv =
-      [ Lib.buildEnv "GIT_SSL_CAINFO" "/etc/ssl/certs/ca-bundle.crt"
-      , Lib.buildEnv "GIT_TERMINAL_PROMPT" "0"
-      , Lib.buildEnv "CURL_CA_BUNDLE" "/etc/ssl/certs/ca-bundle.crt"
+  { name       = "build-orchestrator"
+  , entrypoint = Some "build-orchestrator"
+  , staticUid  = Some 1000
+  , staticGid  = Some 1000
+  , packageLayers = defaults.minimalContainer.packageLayers # [ healthcheckLayer ]
+  , extraEnv   =
+      [ Lib.buildEnv "SSL_CERT_FILE"      "/etc/ssl/certs/ca-bundle.crt"
+      , Lib.buildEnv "SSL_CERT_DIR"       "/etc/ssl/certs"
+      , Lib.buildEnv "POLAR_HEALTH_CERTS" "/etc/tls/certs/cert.pem"
       ]
   }

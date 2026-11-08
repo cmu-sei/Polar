@@ -1,3 +1,24 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 [package]
 name = "polar"
 version.workspace = true
@@ -10,11 +31,20 @@ cassini-client.workspace = true
 cassini-types.workspace = true
 chrono = { workspace = true }
 hex.workspace = true
+http.workspace = true
+# The proxy rules reqwest follows, for a client told its proxy per connection (polar::egress::Egress::proxy_for).
+hyper-util = { workspace = true, features = ["client-proxy"] }
 neo4rs.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry.workspace = true
+polar-custody.workspace = true
+rustls.workspace = true
+polar-env.workspace = true
 polar-health.workspace = true
+polar-router.workspace = true
+# service.version is the platform version (logging.rs).
+polar-version.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true
@@ -28,10 +58,23 @@ thiserror.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 k8s-openapi = { workspace = true }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 url.workspace = true
+rcgen = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+
+[features]
+# Test certificates, TLS servers and child processes for the tests of egress (`polar::egress::testing`).
+testing = ["dep:rcgen", "dep:tokio-rustls"]
+
 [dev-dependencies]
-polar.workspace = true
+# The crate's own tests use its testing module.
+polar = { workspace = true, features = ["testing"] }
+proptest.workspace = true
+rcgen.workspace = true
+tokio-rustls.workspace = true
+polar-test-graph.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 tokio.workspace = true
+tempfile.workspace = true

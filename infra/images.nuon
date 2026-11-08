@@ -1,0 +1,92 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/images.nuon
+#
+# Every image Polar knows how to produce: name, tag, and where it comes from.
+# The rendered manifests decide which of these a target needs (infra/images.nu
+# reads their `image:` fields and joins them against this table), so adding a
+# workload means adding one row here and nothing else.
+#
+# The tag must equal the tag in the Dhall that deploys the image; a mismatch
+# (or a manifest image with no row) fails before anything is built.
+#
+# kind: nix       built from the flake:  nix build .#packages.<platform>.<attr>
+#                 columns: attr
+# kind: mirror    third-party image copied into the local registry
+#                 columns: upstream
+# kind: external  built outside this repo; an existing docker-archive
+#                 columns: path (~ allowed), env (variable that overrides path),
+#                 published (where it is published, as <registry>/<account>: copied from
+#                 there, as polar-<image>:<tag>-<arch>, when there is no archive)
+[
+  # ── Infrastructure ──────────────────────────────────────────────────────
+  {image: "neo4j",    tag: "5.26.2", kind: "external", path: "~/Documents/projects/nix-neo4j/result-neo4j-image", env: "POLAR_NEO4J_IMAGE", published: "docker.io/daveman1010220"}
+  {image: "jaeger",   tag: "2.13.0", kind: "mirror", upstream: "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"}
+  {image: "flux-source-controller",    tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/source-controller:v1.9.6"}
+  {image: "flux-kustomize-controller", tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/kustomize-controller:v1.9.6"}
+  {image: "keycloak", tag: "26.7.1", kind: "mirror", upstream: "quay.io/keycloak/keycloak:26.7.1"}
+  {image: "postgres", tag: "16",     kind: "mirror", upstream: "docker.io/library/postgres:16"}
+  {image: "busybox",  tag: "latest", kind: "mirror", upstream: "docker.io/library/busybox:latest"}
+  {image: "local-path-provisioner", tag: "v0.0.35", kind: "mirror", upstream: "docker.io/rancher/local-path-provisioner:v0.0.35"}
+
+  # ── Core ────────────────────────────────────────────────────────────────
+  {image: "cassini",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.cassiniImage"}
+  {image: "cert-issuer", tag: "latest", kind: "nix", attr: "certIssuerImage"}
+  {image: "polar-init",     tag: "latest", kind: "nix", attr: "polarInitImage"}
+  {image: "polar-custody",  tag: "latest", kind: "nix", attr: "polarCustodyImage"}
+  {image: "polar-tools",    tag: "latest", kind: "nix", attr: "polarPkgs.polarTools.image"}
+  {image: "polar-nu-init",  tag: "latest", kind: "nix", attr: "nuInitImage"}
+  {image: "ace-viz",        tag: "latest", kind: "nix", attr: "aceImage"}
+
+  # ── Agents ──────────────────────────────────────────────────────────────
+  {image: "credentials-agent-observer", tag: "latest", kind: "nix", attr: "polarPkgs.credentialsAgent.observerImage"}
+  {image: "credentials-agent-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.credentialsAgent.consumerImage"}
+  {image: "kube-observer",   tag: "latest", kind: "nix", attr: "polarPkgs.kubeAgent.observerImage"}
+  {image: "kube-consumer",   tag: "latest", kind: "nix", attr: "polarPkgs.kubeAgent.consumerImage"}
+  {image: "jira-observer",   tag: "latest", kind: "nix", attr: "polarPkgs.jiraAgent.observerImage"}
+  {image: "jira-processor",  tag: "latest", kind: "nix", attr: "polarPkgs.jiraAgent.processorImage"}
+  {image: "gitlab-observer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.observerImage"}
+  {image: "gitlab-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.consumerImage"}
+  {image: "git-observer",        tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.observerImage"}
+  {image: "git-processor",       tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.processorImage"}
+  {image: "git-controller",      tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.controllerImage"}
+  {image: "soft-state-observer", tag: "latest", kind: "nix", attr: "polarPkgs.softState.observerImage"}
+  {image: "soft-state-processor", tag: "latest", kind: "nix", attr: "polarPkgs.softState.processorImage"}
+  {image: "openapi-observer",    tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.observerImage"}
+  {image: "openapi-processor",   tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.processorImage"}
+  {image: "scheduler-observer",  tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.observerImage"}
+  {image: "scheduler-processor", tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.processorImage"}
+  {image: "polar-git-server",    tag: "latest", kind: "nix", attr: "polarPkgs.polarGitServer.image"}
+  {image: "secret-harness-owner",    tag: "latest", kind: "nix", attr: "polarPkgs.secretHarness.ownerImage"}
+  {image: "secret-harness-intruder", tag: "latest", kind: "nix", attr: "polarPkgs.secretHarness.intruderImage"}
+  {image: "oci-resolver",        tag: "latest", kind: "nix", attr: "polarPkgs.ociResolver.resolverImage"}
+  {image: "build-processor",     tag: "latest", kind: "nix", attr: "buildProcessorImage"}
+
+  # ── Developer (not deployed by any target) ───────────────────────────────
+  # The dev container, which bin/polar-dev runs in the cluster: published, so a cluster can pull it before Polar exists
+  # (`nu infra/images.nu publish dev --to docker.io/<account>` makes polar-dev:latest-<arch>).
+  {image: "dev", tag: "latest", kind: "nix", attr: "devContainer"}
+
+  # ── Cassini load harness (run as Jobs by infra/load-harness.nu on a target that enables it) ──
+  {image: "harness-producer", tag: "latest", kind: "nix", attr: "polarPkgs.cassini.producerImage"}
+  {image: "harness-sink",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.sinkImage"}
+]

@@ -1,16 +1,45 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
 use crate::PUBLISH_REQ_FAILED_TXT;
 use crate::UNEXPECTED_MESSAGE_STR;
+use crate::budget::Bounds;
 use cassini_tracing::try_set_parent_otel;
-use cassini_types::{BrokerMessage, ShutdownPhase};
+use cassini_types::{Backlog, BrokerMessage, Hold, MessageId, Payload, ShutdownPhase};
 use ractor::rpc::CallResult;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
+const QUEUE_TICK_SECS: u64 = 60;
+/// How long a subscription waits for the subscriber manager before the client is told it was not made. It is waited
+/// for in a task of its own, so this holds up nothing else.
+const SUBSCRIBE_WAIT: Duration = Duration::from_secs(10);
+const QUEUE_STALE_AFTER_SECS: u64 = QUEUE_TICK_SECS * 3; // ~3 minutes
 
 // ============================== Topic Supervisor definition ============================== //
 /// Our supervisor for managing topics and their message queues
@@ -22,12 +51,15 @@ pub struct TopicManagerState {
     pub topics: HashMap<String, ActorRef<BrokerMessage>>,
     pub subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     pub is_shutting_down: bool,
+    pub bounds: Bounds,
 }
 
 pub struct TopicManagerArgs {
     pub topics: Option<Vec<String>>,
     // A reference to the SubscriberManager actor (injected at broker bootstrap).
     pub subscriber_mgr: Option<ActorRef<BrokerMessage>>, // or the concrete SubscriberMsg type
+    /// The memory budget and the stall bound, which every topic applies.
+    pub bounds: Bounds,
 }
 
 impl TopicManager {
@@ -52,7 +84,7 @@ impl TopicManager {
                 match Actor::spawn_linked(
                     Some(topic.clone()),
                     TopicAgent,
-                    (),
+                    state.bounds.clone(),
                     myself.clone().into(),
                 )
                 .await
@@ -87,11 +119,25 @@ impl TopicManager {
             .ensure_topic(topic.clone(), myself.clone(), state)
             .await?;
 
-        // Ask SubscriberManager to create the subscriber (delegation)
-        if let Some(sub_mgr) = &state.subscriber_mgr {
-            // BUGFIX: don't silently ignore call() failures (mailbox closed/actor dead/etc).
-            // Also: keep the trace context consistent through the whole subscribe flow.
-            let call_res = sub_mgr
+        // The subscriber manager is asked in a task of its own: this actor routes every publish, so it must not wait
+        // on a subscription (it used to, for up to 200 ms each, and a burst of subscriptions held up the broker's
+        // publishing). Whatever comes of it, the client is told: a subscription it is never told about is one it
+        // waits on for good.
+        let Some(sub_mgr) = state.subscriber_mgr.clone() else {
+            error!(%registration_id, %topic, "TopicManager: subscriber_mgr missing while subscribing");
+            acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("the broker cannot make subscriptions now".to_string()),
+                trace_ctx,
+            );
+            return Err(ActorProcessingErr::from(
+                "SubscriberManager not configured for TopicManager",
+            ));
+        };
+        let attach_to = topic_actor.clone();
+        tokio::spawn(async move {
+            let asked = sub_mgr
                 .call(
                     |reply| BrokerMessage::CreateSubscriber {
                         registration_id: registration_id.clone(),
@@ -99,85 +145,33 @@ impl TopicManager {
                         trace_ctx: trace_ctx.clone(),
                         reply,
                     },
-                    Some(Duration::from_millis(200)),
+                    Some(SUBSCRIBE_WAIT),
                 )
                 .await;
-
-            match call_res {
-                Ok(call_result) => match call_result {
-                    CallResult::Success(result) => match result {
-                        Ok(subscriber_ref) => {
-                            // Attach subscriber to topic
-                            if let Err(e) = topic_actor.cast(BrokerMessage::AddSubscriber {
-                                subscriber_ref,
-                                // Preserve tracing into the add-subscriber/dequeue path.
-                                trace_ctx: trace_ctx.clone(),
-                            }) {
-                                warn!(
-                                    error = %e,
-                                    registration_id = %registration_id,
-                                    topic = %topic,
-                                    "failed to cast AddSubscriber to topic actor"
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            // Don't leave a TODO landmine in the hot path; report and fail.
-                            error!(
-                                error = ?err,
-                                registration_id = %registration_id,
-                                topic = %topic,
-                                "subscriber_mgr returned subscription error"
-                            );
-                            return Err(ActorProcessingErr::from(
-                                "SubscriberManager returned subscription error",
-                            ));
-                        }
-                    },
-                    CallResult::SenderError => {
-                        error!(
-                            registration_id = %registration_id,
-                            topic = %topic,
-                            "SubscriberManager sender error while subscribing"
-                        );
-                        return Err(ActorProcessingErr::from(
-                            "SubscriberManager sender error while subscribing",
-                        ));
-                    }
-                    CallResult::Timeout => {
-                        error!(
-                            registration_id = %registration_id,
-                            topic = %topic,
-                            timeout_ms = 200u64,
-                            "SubscriberManager call timed out while subscribing"
-                        );
-                        return Err(ActorProcessingErr::from(
-                            "SubscriberManager call timed out while subscribing",
-                        ));
-                    }
-                },
-                Err(e) => {
-                    // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
-                    error!(
-                        error = %e,
-                        registration_id = %registration_id,
-                        topic = %topic,
-                        "SubscriberManager call failed while subscribing"
-                    );
-                    return Err(ActorProcessingErr::from(
-                        "SubscriberManager call failed while subscribing",
-                    ));
+            let outcome = match asked {
+                Ok(CallResult::Success(Ok(subscriber_ref))) => attach_to
+                    .cast(BrokerMessage::AddSubscriber {
+                        registration_id: registration_id.clone(),
+                        subscriber_ref,
+                        trace_ctx: trace_ctx.clone(),
+                    })
+                    .map_err(|e| format!("the topic could not take the subscriber: {e}")),
+                Ok(CallResult::Success(Err(e))) => {
+                    Err(format!("the subscriber could not be created: {e}"))
                 }
+                Ok(CallResult::Timeout) => Err(format!(
+                    "the subscriber manager did not answer within {SUBSCRIBE_WAIT:?}"
+                )),
+                Ok(CallResult::SenderError) => {
+                    Err("the subscriber manager did not answer: it dropped the request".to_string())
+                }
+                Err(e) => Err(format!("the subscriber manager did not answer: {e}")),
+            };
+            if let Err(why) = &outcome {
+                warn!(%registration_id, %topic, "subscription refused: {why}");
             }
-        } else {
-            error!(
-                "TopicManager: subscriber_mgr missing while subscribing {} -> {}",
-                registration_id, topic
-            );
-            return Err(ActorProcessingErr::from(
-                "SubscriberManager not configured for TopicManager",
-            ));
-        }
+            acknowledge_subscribe(&registration_id, &topic, outcome, trace_ctx);
+        });
 
         Ok(topic_actor)
     }
@@ -200,6 +194,7 @@ impl Actor for TopicManager {
             topics: HashMap::new(),
             subscriber_mgr: args.subscriber_mgr,
             is_shutting_down: false,
+            bounds: args.bounds,
         };
 
         if let Some(topics) = args.topics {
@@ -209,7 +204,7 @@ impl Actor for TopicManager {
                 match Actor::spawn_linked(
                     Some(topic.clone()),
                     TopicAgent,
-                    (),
+                    state.bounds.clone(),
                     myself.clone().into(),
                 )
                 .await
@@ -234,6 +229,22 @@ impl Actor for TopicManager {
         Ok(())
     }
 
+    /// Each topic is registered under its topic's name, and ractor ends a stopped actor's children with a kill it
+    /// does not wait for: left to that, a topic could still hold its name when the broker's stop returned, and a
+    /// broker started next in the process would be refused the name (`ActorAlreadyRegistered`). So the topics are
+    /// stopped, and waited for, before this stop is done.
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(Duration::from_secs(5)))
+            .await;
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -241,9 +252,9 @@ impl Actor for TopicManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::FlushTopicQueues =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::FlushTopicQueues,
+            } => {
                 self.handle_initiate_shutdown_phase(myself.clone(), state)
                     .await?;
             }
@@ -256,6 +267,10 @@ impl Actor for TopicManager {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
+                published_instance,
+                id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -265,6 +280,10 @@ impl Actor for TopicManager {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
+                    published_instance,
+                    id,
+                    window,
                 )
                 .await?;
             }
@@ -272,10 +291,20 @@ impl Actor for TopicManager {
                 topic,
                 payload,
                 trace_ctx,
+                published_by,
+                published_instance,
                 ..
             } => {
-                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx)
-                    .await?;
+                self.handle_publish_response(
+                    myself.clone(),
+                    state,
+                    topic,
+                    payload,
+                    trace_ctx,
+                    published_by,
+                    published_instance,
+                )
+                .await?;
             }
             BrokerMessage::SubscribeRequest {
                 registration_id,
@@ -359,15 +388,20 @@ impl TopicManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         myself: ActorRef<BrokerMessage>,
         state: &mut TopicManagerState,
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
+        id: MessageId,
+        window: Hold,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_request", %registration_id, topic = %topic, payload_len = payload.len());
 
@@ -378,54 +412,61 @@ impl TopicManager {
         }
 
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-
-        // Always go through ensure_topic
-        match self
-            .ensure_topic(topic.clone(), myself.clone(), state)
-            .await
-        {
-            Ok(topic_actor) => {
-                // Forward the publish to the topic actor
-                if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest {
-                    registration_id,
-                    topic: topic.clone(),
-                    payload,
-                    reply_to, // forward to topic agent
-                    trace_ctx: Some(span.context()),
-                }) {
-                    error!(error = %e, topic = %topic, "failed to forward publish");
+        async {
+            // Always go through ensure_topic
+            match self
+                .ensure_topic(topic.clone(), myself.clone(), state)
+                .await
+            {
+                Ok(topic_actor) => {
+                    // Forward the publish to the topic actor
+                    if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest {
+                        registration_id,
+                        topic: topic.clone(),
+                        payload,
+                        reply_to, // forward to topic agent
+                        trace_ctx: Some(span.context()),
+                        published_by,
+                        published_instance,
+                        id,
+                        window,
+                    }) {
+                        error!(error = %e, topic = %topic, "failed to forward publish");
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, topic = %topic, "failed to ensure topic; notifying broker");
+                    if let Some(supervisor) = myself.try_get_supervisor() {
+                        supervisor
+                            .send_message(BrokerMessage::ErrorMessage {
+                                client_id: registration_id.clone(),
+                                error: format!("Failed to ensure topic {topic}: {e:?}"),
+                            })
+                            .ok();
+                    }
                 }
             }
-            Err(e) => {
-                error!(error = %e, topic = %topic, "failed to ensure topic; notifying broker");
-                if let Some(supervisor) = myself.try_get_supervisor() {
-                    supervisor
-                        .send_message(BrokerMessage::ErrorMessage {
-                            client_id: registration_id.clone(),
-                            error: format!("Failed to ensure topic {topic}: {e:?}"),
-                        })
-                        .ok();
-                }
-            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span.clone())
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         myself: ActorRef<BrokerMessage>,
         _state: &mut TopicManagerState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
+        published_instance: Option<cassini_types::Instance>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_response", topic = %topic, payload_len = payload.len());
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-
         trace!("Topic manager received publish response for \"{topic}\"");
-
         // forward to broker
         if let Some(broker) = myself.try_get_supervisor() {
             if let Err(e) = broker.send_message(BrokerMessage::PublishResponse {
@@ -433,6 +474,11 @@ impl TopicManager {
                 payload,
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
+                published_by,
+                published_instance,
+                origin: None,
+                delivery_id: None,
+                refusal: None,
             }) {
                 error!("Failed to forward publish response to broker: {}", e);
             }
@@ -458,21 +504,23 @@ impl TopicManager {
 
         let span = trace_span!("cassini.topic_manager.subscribe_request", %registration_id, topic = %topic);
         try_set_parent_otel(&span, trace_ctx.clone());
-        let _g = span.enter();
-
-        if let Err(e) = self
-            .ensure_topic_and_subscribe(
-                registration_id.clone(),
-                topic.clone(),
-                trace_ctx,
-                myself.clone(),
-                state,
-            )
-            .await
-        {
-            error!(error = %e, "ensure_topic_and_subscribe failed");
+        async {
+            if let Err(e) = self
+                .ensure_topic_and_subscribe(
+                    registration_id.clone(),
+                    topic.clone(),
+                    trace_ctx,
+                    myself.clone(),
+                    state,
+                )
+                .await
+            {
+                error!(error = %e, "ensure_topic_and_subscribe failed");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_get_topics(
@@ -520,28 +568,74 @@ impl TopicManager {
 // ============================== Topic Worker definition ============================== //
 /// Our worker process for managing message queues on a given topic
 /// The broker supervisor is generally notified of incoming messages on the message queue.
+///
+/// A topic accepts a publish (fans it out to its subscribers, or queues it when it has none, and acknowledges it)
+/// only while none of its connected subscribers is above its high water of unacknowledged deliveries
+/// (docs/architecture/cassini-backpressure.md, phase 1). Until then the publish waits here, in order, holding its
+/// connection's window, so a publisher that outruns the slowest subscriber is slowed by TCP. Each subscriber says
+/// whether it holds the topic back (`TopicHold`); whether one has stalled is its session's to decide
+/// (`crate::pressure`), and when it ends or goes away it holds the topic back no more.
 struct TopicAgent;
 
+/// A message waiting in a topic with no subscriber: when it came, its payload, who published it (and its instance) and their number for it.
+type Queued = (
+    std::time::Instant,
+    Payload,
+    Option<String>,
+    Option<cassini_types::Instance>,
+    Option<MessageId>,
+);
+
+/// A publish the topic has not accepted yet.
+struct Pending {
+    registration_id: String,
+    payload: Payload,
+    reply_to: Option<ActorRef<BrokerMessage>>,
+    trace_ctx: Option<opentelemetry::Context>,
+    published_by: Option<String>,
+    published_instance: Option<cassini_types::Instance>,
+    id: MessageId,
+    /// The publisher's connection's credit for it, released when it is accepted.
+    window: Hold,
+}
+
 struct TopicAgentState {
-    subscribers: Vec<ActorRef<BrokerMessage>>,
-    queue: VecDeque<Arc<Vec<u8>>>, // Changed from VecDeque<Vec<u8>>
-    flushing: bool,                // whether we are in flush phase
+    name: String,
+    subscribers: HashMap<String, ActorRef<BrokerMessage>>,
+    /// The subscribers that say they hold the topic back (connected, above their high water).
+    holding: std::collections::BTreeSet<String>,
+    queue: VecDeque<Queued>,
+    /// Publishes waiting for the subscribers to catch up, oldest first.
+    waiting: VecDeque<Pending>,
+    /// The bytes this topic holds, queued or waiting, as the budget's report names its holders.
+    held: Arc<Backlog>,
+    bounds: Bounds,
+    flushing: bool,
 }
 
 #[async_trait]
 impl Actor for TopicAgent {
     type Msg = BrokerMessage;
     type State = TopicAgentState;
-    type Arguments = ();
+    type Arguments = Bounds;
 
     async fn pre_start(
         &self,
-        _: ActorRef<Self::Msg>,
-        _args: (),
+        myself: ActorRef<Self::Msg>,
+        bounds: Bounds,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let name = myself.get_name().unwrap_or_default();
+        // Never above its high water: a topic holds nothing back, it is only named in the budget's report.
+        let held = Arc::new(Backlog::new(format!("topic {name}"), usize::MAX));
+        bounds.budget.register(&held);
         Ok(TopicAgentState {
-            subscribers: Vec::new(),
+            name,
+            subscribers: HashMap::new(),
+            holding: std::collections::BTreeSet::new(),
             queue: VecDeque::new(),
+            waiting: VecDeque::new(),
+            held,
+            bounds,
             flushing: false,
         })
     }
@@ -552,6 +646,11 @@ impl Actor for TopicAgent {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started");
+        drop(
+            myself.send_interval(std::time::Duration::from_secs(QUEUE_TICK_SECS), || {
+                BrokerMessage::QueueExpiryTick
+            }),
+        );
         Ok(())
     }
 
@@ -572,28 +671,42 @@ impl Actor for TopicAgent {
             }
             BrokerMessage::PublishRequest {
                 registration_id,
-                topic,
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
+                published_instance,
+                id,
+                window,
+                ..
             } => {
-                self.handle_publish_request(
-                    myself.clone(),
-                    state,
+                trace!(topic = %state.name, %registration_id, "Topic agent received publish request");
+                state.held.add(payload.weight());
+                state.waiting.push_back(Pending {
                     registration_id,
-                    topic,
                     payload,
                     reply_to,
                     trace_ctx,
-                )
-                .await?;
+                    published_by,
+                    published_instance,
+                    id,
+                    window,
+                });
+                Self::pump(&myself, state);
             }
             BrokerMessage::AddSubscriber {
+                registration_id,
                 subscriber_ref,
                 trace_ctx,
             } => {
-                self.handle_add_subscriber(myself.clone(), state, subscriber_ref, trace_ctx)
-                    .await?;
+                self.handle_add_subscriber(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    subscriber_ref,
+                    trace_ctx,
+                )
+                .await?;
             }
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
@@ -608,6 +721,21 @@ impl Actor for TopicAgent {
                     trace_ctx,
                 )
                 .await?;
+                Self::pump(&myself, state);
+            }
+            BrokerMessage::TopicHold {
+                registration_id,
+                holds,
+            } => {
+                if holds && state.subscribers.contains_key(&registration_id) {
+                    state.holding.insert(registration_id);
+                } else {
+                    state.holding.remove(&registration_id);
+                }
+                Self::pump(&myself, state);
+            }
+            BrokerMessage::QueueExpiryTick => {
+                self.handle_queue_expiry_tick(myself.clone(), state).await?;
             }
             _ => (),
         }
@@ -616,6 +744,130 @@ impl Actor for TopicAgent {
 }
 
 impl TopicAgent {
+    /// Accepts what waits, oldest first, for as long as no subscriber holds the topic back. While the broker flushes
+    /// for its shutdown, everything is accepted.
+    fn pump(_myself: &ActorRef<BrokerMessage>, state: &mut TopicAgentState) {
+        while !state.waiting.is_empty() {
+            if !state.flushing
+                && let Some(registration_id) = state.holding.iter().next()
+            {
+                debug!(
+                    topic = %state.name,
+                    subscriber = %registration_id,
+                    waiting = state.waiting.len(),
+                    "a subscriber above its high water holds the topic back"
+                );
+                return;
+            }
+            if let Some(pending) = state.waiting.pop_front() {
+                state.held.remove(pending.payload.weight());
+                Self::accept(state, pending);
+            }
+        }
+    }
+
+    /// Fans a publish out to every subscriber, or queues it when there is none, and acknowledges it. A subscriber that
+    /// cannot take a message has ended (its session is gone): it is dropped here, once, instead of being sent every
+    /// later message and logging each loss. What reached no subscriber is kept for the next one, as when there is none,
+    /// unless the budget is exhausted: then the queue refuses it (counted, and logged) rather than grow.
+    fn accept(state: &mut TopicAgentState, pending: Pending) {
+        let topic = state.name.clone();
+        let span = trace_span!(
+            "cassini.topic_agent.publish",
+            registration_id = %pending.registration_id,
+            topic = %topic,
+            payload_len = pending.payload.len()
+        );
+        try_set_parent_otel(&span, pending.trace_ctx);
+        let _g = span.enter();
+
+        let mut delivered = 0usize;
+        let mut ended = Vec::new();
+        for (registration_id, subscriber) in &state.subscribers {
+            match subscriber.send_message(BrokerMessage::PublishResponse {
+                topic: topic.clone(),
+                payload: pending.payload.clone(),
+                result: Ok(()),
+                trace_ctx: Some(span.context()),
+                published_by: pending.published_by.clone(),
+                published_instance: pending.published_instance.clone(),
+                origin: Some(pending.id),
+                delivery_id: None,
+                refusal: None,
+            }) {
+                Ok(()) => delivered += 1,
+                Err(_) => ended.push(registration_id.clone()),
+            }
+        }
+        if !ended.is_empty() {
+            for registration_id in &ended {
+                state.subscribers.remove(registration_id);
+                state.holding.remove(registration_id);
+            }
+            warn!(%topic, ended = ?ended, "{PUBLISH_REQ_FAILED_TXT}: these subscribers have ended and are dropped");
+        }
+        let mut refused = None;
+        if delivered == 0 {
+            if state.bounds.budget.is_exhausted() {
+                state.bounds.budget.count_refused(1);
+                warn!(
+                    %topic,
+                    bytes = pending.payload.len(),
+                    queued = state.queue.len(),
+                    "the broker's memory budget is exhausted: a message for a topic with no subscriber is refused, \
+                     not queued"
+                );
+                refused = Some(
+                    "the broker's memory budget is exhausted and the topic has no subscriber to take the message"
+                        .to_string(),
+                );
+            } else {
+                state.held.add(pending.payload.weight());
+                state.queue.push_back((
+                    std::time::Instant::now(),
+                    pending.payload.clone(),
+                    pending.published_by.clone(),
+                    pending.published_instance.clone(),
+                    Some(pending.id),
+                ));
+                info!(
+                    "New message on topic \"{topic}\", queue has {} message(s) waiting.",
+                    state.queue.len()
+                );
+            }
+        }
+
+        if let Some(session) = pending.reply_to {
+            // Refused for want of memory, it is not acknowledged: the publisher is told it was refused for now, keeps
+            // it and sends it again (docs/architecture/cassini-backpressure.md, review finding 4).
+            let answer = match refused {
+                Some(reason) => BrokerMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: Payload::uncharged(Arc::new(Vec::new())),
+                    result: Err(reason),
+                    trace_ctx: Some(span.context()),
+                    published_by: None,
+                    published_instance: None,
+                    origin: Some(pending.id),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                },
+                None => BrokerMessage::PublishRequestAck {
+                    topic: topic.clone(),
+                    id: pending.id,
+                    trace_ctx: Some(span.context()),
+                },
+            };
+            if let Err(e) = session.send_message(answer) {
+                warn!("Failed to send publish Ack to session! {e}")
+            }
+        } else {
+            warn!("PublishRequest missing reply_to – cannot send ack");
+        }
+        // Accepted: the publisher's connection may read again what this frame took of its window.
+        pending.window.release();
+    }
+
     // ===== Handler methods for TopicAgent =====
     async fn handle_flush_queue(
         &self,
@@ -625,35 +877,41 @@ impl TopicAgent {
     ) -> Result<(), ActorProcessingErr> {
         debug!("Topic agent flushing queue");
         state.flushing = true;
+        // What waits is accepted now, whatever the subscribers hold: the broker is shutting down.
+        Self::pump(&myself, state);
 
         // If there are no subscribers and no queue, we're done immediately
         if state.subscribers.is_empty() && state.queue.is_empty() {
             reply_to.send_message(BrokerMessage::FlushQueueComplete {
-                topic: myself.get_name().unwrap_or_default(),
+                topic: state.name.clone(),
             })?;
             return Ok(());
         }
 
-        // If there are no subscribers but queue has messages, we cannot deliver them.
-        // According to the design, we should still consider the queue flushed?
-        // Actually, during shutdown, there are no active subscribers (they are terminated in phase 4).
-        // But phase 3 (flush) happens before phase 4 (terminate subscribers). So subscribers might still exist.
-        // We must attempt to deliver all queued messages to existing subscribers.
-        while let Some(msg) = state.queue.pop_front() {
+        // Phase 3 (flush) happens before phase 4 (terminate subscribers), so subscribers might still exist: queued
+        // messages are delivered to them.
+        while let Some((_queued_at, msg, published_by, published_instance, origin)) =
+            state.queue.pop_front()
+        {
+            state.held.remove(msg.weight());
             if state.subscribers.is_empty() {
-                // No one to deliver to; we discard the message (but log it).
                 warn!(
                     "Discarding queued message on topic {} during flush: no subscribers",
-                    myself.get_name().unwrap_or_default()
+                    state.name
                 );
                 continue;
             }
-            for subscriber in &state.subscribers {
+            for subscriber in state.subscribers.values() {
                 if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
-                    topic: myself.get_name().unwrap_or_default(),
+                    topic: state.name.clone(),
                     payload: msg.clone(),
                     result: Ok(()),
                     trace_ctx: None,
+                    published_by: published_by.clone(),
+                    published_instance: published_instance.clone(),
+                    origin,
+                    delivery_id: None,
+                    refusal: None,
                 }) {
                     warn!("Failed to deliver queued message to subscriber: {}", e);
                 }
@@ -663,7 +921,7 @@ impl TopicAgent {
         // After delivering, we signal completion.
         // Note: We don't wait for acknowledgments from subscribers; that's the subscriber's responsibility.
         reply_to.send_message(BrokerMessage::FlushQueueComplete {
-            topic: myself.get_name().unwrap_or_default(),
+            topic: state.name.clone(),
         })?;
 
         state.flushing = false;
@@ -682,115 +940,50 @@ impl TopicAgent {
         Ok(())
     }
 
-    async fn handle_publish_request(
-        &self,
-        myself: ActorRef<BrokerMessage>,
-        state: &mut TopicAgentState,
-        registration_id: String,
-        topic: String,
-        payload: Arc<Vec<u8>>,
-        reply_to: Option<ActorRef<BrokerMessage>>,
-        trace_ctx: Option<opentelemetry::Context>,
-    ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!(
-            "cassini.topic_agent.publish",
-            %registration_id,
-            topic = %topic,
-            payload_len = payload.len()
-        );
-
-        // If we are in flush phase, we should still accept publishes? Actually no,
-        // the TopicManager rejects new publishes during shutdown. But if we are here,
-        // it's because the message was already accepted before shutdown.
-        try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-
-        trace!("Topic agent received publish request for \"{topic}\"");
-
-        // alert subscribers
-        if !state.subscribers.is_empty() {
-            // If we are in flush phase, we still deliver normally.
-            for subscriber in &state.subscribers {
-                // Clone payload for each subscriber
-                let send_result = if state.flushing {
-                    // During flush, we may want to be more aggressive, but it's the same.
-                    subscriber.send_message(BrokerMessage::PublishResponse {
-                        topic: topic.clone(),
-                        payload: payload.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    })
-                } else {
-                    subscriber.send_message(BrokerMessage::PublishResponse {
-                        topic: topic.clone(),
-                        payload: payload.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    })
-                };
-                if let Err(e) = send_result {
-                    warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                }
-            }
-        } else {
-            // No subscribers, queue the message
-            state.queue.push_back(payload.clone());
-            info!(
-                "{}",
-                format!(
-                    "New message on topic \"{0:?}\", queue has {1} message(s) waiting.",
-                    myself.get_name(),
-                    state.queue.len()
-                )
-            );
-        }
-
-        // send ACK to the session that made the request (using reply_to)
-        if let Some(session) = reply_to {
-            if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
-                topic: topic.clone(),
-                trace_ctx: Some(span.context()),
-            }) {
-                warn!("Failed to send publish Ack to session! {e}")
-            }
-        } else {
-            warn!("PublishRequest missing reply_to – cannot send ack");
-        }
-        Ok(())
-    }
-
     async fn handle_add_subscriber(
         &self,
         myself: ActorRef<BrokerMessage>,
         state: &mut TopicAgentState,
+        registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
-        // If we are in flush phase and already delivered all queued messages, we may still get new subscribers?
-        // During shutdown, we shouldn't get new subscriptions, but just in case, we still add them.
         if state.flushing {
             debug!("Adding subscriber during flush phase");
         }
-
-        let span = trace_span!("cassini.topic_agent.add_subscriber");
+        let span = trace_span!("cassini.topic_agent.add_subscriber", %registration_id);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-
         trace!("Received subscribe session directive");
 
-        state.subscribers.push(subscriber_ref.clone());
+        // registration_id is the key -- inserting for an already-present
+        // registration replaces the old entry rather than accumulating a
+        // second, stale ActorRef alongside it. This is the fix for the
+        // structural one-to-many mismatch between TopicAgent's own
+        // tracking and SubscriberManager's already-enforced one-to-one
+        // (registration_id, topic) -> SubscriberAgent relationship.
+        state
+            .subscribers
+            .insert(registration_id, subscriber_ref.clone());
+        // Where it says whether it holds this topic back.
+        let _ = subscriber_ref.send_message(BrokerMessage::TopicAttached { topic: myself });
 
         // Drain queued messages now that someone is listening.
-        // This is the normal drain, not the shutdown flush.
-        while let Some(msg) = state.queue.pop_front() {
-            // if this were to fail, user probably unsubscribed while we were dequeuing
-            // It should be ok to ignore this case.
+        while let Some((_queued_at, msg, published_by, published_instance, origin)) =
+            state.queue.pop_front()
+        {
+            state.held.remove(msg.weight());
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
-                    topic: myself.get_name().unwrap(),
-                    payload: msg.clone(),
+                    topic: state.name.clone(),
+                    payload: msg,
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
+                    published_by,
+                    published_instance,
+                    origin,
+                    delivery_id: None,
+                    refusal: None,
                 })
                 .ok();
         }
@@ -800,7 +993,7 @@ impl TopicAgent {
     async fn handle_unsubscribe_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
-        _state: &mut TopicAgentState,
+        state: &mut TopicAgentState,
         registration_id: String,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
@@ -809,8 +1002,67 @@ impl TopicAgent {
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
-        trace!("topic actor received unsubscribe request.");
-        // Original implementation had no logic here; we keep it empty.
+        state.holding.remove(&registration_id);
+        if state.subscribers.remove(&registration_id).is_some() {
+            trace!("Removed subscriber for registration {registration_id}");
+        } else {
+            trace!("No subscriber for registration {registration_id} on this topic (already gone)");
+        }
         Ok(())
+    }
+
+    /// Drop messages that have sat in this topic's zero-subscriber queue
+    /// for too long. Messages are pushed in arrival order, so the oldest
+    /// is always at the front -- once we hit one that isn't stale yet,
+    /// everything behind it is guaranteed not stale either.
+    ///
+    /// We deliberately don't persist these to disk; that's a real,
+    /// separate future capability, not something to improvise here. For
+    /// now: log clearly, then drop, so an abandoned topic doesn't hold
+    /// memory forever.
+    async fn handle_queue_expiry_tick(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut TopicAgentState,
+    ) -> Result<(), ActorProcessingErr> {
+        let threshold = std::time::Duration::from_secs(QUEUE_STALE_AFTER_SECS);
+        let mut dropped = 0usize;
+
+        while let Some((queued_at, _, _, _, _)) = state.queue.front() {
+            if queued_at.elapsed() < threshold {
+                break;
+            }
+            if let Some((_, payload, _, _, _)) = state.queue.pop_front() {
+                state.held.remove(payload.weight());
+            }
+            dropped += 1;
+        }
+
+        if dropped > 0 {
+            warn!(
+                "Dropped {dropped} stale message(s) on topic \"{0:?}\" -- no subscriber \
+                 appeared within {QUEUE_STALE_AFTER_SECS}s of the oldest message arriving",
+                state.name
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Tells the client, through its session (registered under its registration id), whether its subscription to `topic`
+/// was taken. A session that has gone has no client to tell.
+pub(crate) fn acknowledge_subscribe(
+    registration_id: &str,
+    topic: &str,
+    result: Result<(), String>,
+    trace_ctx: Option<opentelemetry::Context>,
+) {
+    if let Some(session) = ractor::registry::where_is(registration_id.to_string()) {
+        let _ = session.send_message(BrokerMessage::SubscribeAcknowledgment {
+            registration_id: registration_id.to_string(),
+            topic: topic.to_string(),
+            result,
+            trace_ctx,
+        });
     }
 }

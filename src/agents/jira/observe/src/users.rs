@@ -1,64 +1,165 @@
 /*
-   Polar (OSS)
+   ACE Tool
 
-   Copyright 2024 Carnegie Mellon University.
+   Copyright 2026 Carnegie Mellon University.
 
    NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
-   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
-   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
-   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
-   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
-   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 
-   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
-   full terms.
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
    distribution.  Please see Copyright notice for non-US Government use and distribution.
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
-   DM24-0470
+   DM26-0670
 */
 use crate::{
-    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff,
+    Command, JIRA_USER_OBSERVER, JiraDeployment, JiraError, JiraObserverArgs, JiraObserverMessage,
+    JiraObserverState, publish_data,
 };
-use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
-use cassini_types::WireTraceCtx;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraUser};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
-use rkyv::rancor::Error;
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use reqwest::Url;
+use std::collections::HashSet;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
+
+const USERS_OP: &str = "/rest/api/2/user/picker";
 
 pub struct JiraUserObserver;
 
 impl JiraUserObserver {
+    fn tick() -> JiraObserverMessage {
+        JiraObserverMessage::Tick(Command::GetUsers(USERS_OP.to_string()))
+    }
+
     fn observe(
-        myself: ActorRef<JiraObserverMessage>,
-        state: &mut JiraObserverState,
-        _duration: Duration,
-    ) {
-        info!(
-            "Observing every {} seconds",
-            state.backoff_interval.as_secs()
-        );
+        myself: &ActorRef<JiraObserverMessage>,
+        state: &JiraObserverState,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        let handle = myself
-            .send_interval(state.backoff_interval, || {
-                //build query
-                let op = "/rest/api/2/user/picker";
-                // pass query in message
-                JiraObserverMessage::Tick(Command::GetUsers(op.to_string()))
-            })
-            .abort_handle();
+        // Poll straight away rather than leaving the graph empty for a
+        // whole interval after every start. Each pull schedules the next
+        // (`JiraObserverState::settle`): an interval away after a success,
+        // sooner after a failure.
+        myself.cast(Self::tick())?;
+        Ok(())
+    }
 
-        state.task_handle = Some(handle);
+    /// Pulls every page of users and publishes them together.
+    ///
+    /// On a Data Center or Server, the user search (`/rest/api/2/user/search`), where `username=.` matches every
+    /// user, active and inactive, paged by `startAt`: the user picker it replaces takes no `startAt` and answers at
+    /// most its autocomplete limit, and `query=''` matches no one. On Cloud, which has no such search by name, the
+    /// picker as before. Either is read to an empty page, or one with no user not already read (a site that ignored
+    /// `startAt`).
+    ///
+    /// A page that fails leaves what was read in the observer's state ([`UserWalk`]), and the next attempt goes on
+    /// from that page.
+    async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
+        state.ensure_site().await?;
+        state.ensure_token().await?;
+
+        let mut walk = state.user_walk.take().unwrap_or_default();
+        if walk.start_at > 0 {
+            info!("going on from user {} of the walk", walk.start_at);
+        }
+        if let Err(e) = Self::walk(op, state, &mut walk).await {
+            state.user_walk = Some(walk);
+            return Err(e);
+        }
+
+        publish_data(
+            &state.tcp_client,
+            JIRA_USERS_CONSUMER_TOPIC,
+            &JiraData::Users(walk.users),
+        )
+        .await
+    }
+
+    async fn walk(
+        op: &str,
+        state: &JiraObserverState,
+        walk: &mut UserWalk,
+    ) -> Result<(), ActorProcessingErr> {
+        loop {
+            let (endpoint, mut params) = match state.deployment {
+                JiraDeployment::ServerOrDataCenter => (
+                    USER_SEARCH_OP,
+                    vec![
+                        ("username", ".".to_string()),
+                        ("includeActive", "true".to_string()),
+                        ("includeInactive", "true".to_string()),
+                    ],
+                ),
+                JiraDeployment::Cloud => (op, vec![("query", "''".to_string())]),
+            };
+            params.push(("startAt", walk.start_at.to_string()));
+            params.push(("maxResults", PAGE_SIZE.to_string()));
+            let url = Url::parse_with_params(&format!("{}{endpoint}", state.jira_url), params)?;
+            debug!("{url}");
+
+            let res: serde_json::Value = state.get_json(url.as_str()).await?;
+            // The search answers a list; the picker an object holding one.
+            let list = if res.is_array() {
+                res
+            } else {
+                res["users"].clone()
+            };
+            let users: Vec<JiraUser> = if list.is_null() {
+                Vec::new()
+            } else {
+                serde_json::from_value(list).map_err(|e| {
+                    JiraError::new(format!("could not decode the users from {endpoint}: {e}"))
+                })?
+            };
+            let fetched = users.len();
+
+            let mut new = 0usize;
+            for user in users {
+                // One the processor cannot key is passed on for it to say so, but it is not progress: a site that
+                // ignored `startAt` would otherwise be asked for ever.
+                match user.identity().map(str::to_string) {
+                    Some(identity) => {
+                        if walk.seen.insert(identity) {
+                            new += 1;
+                            walk.users.push(user);
+                        }
+                    }
+                    None => walk.users.push(user),
+                }
+            }
+            if fetched == 0 || new == 0 {
+                return Ok(());
+            }
+            walk.start_at += fetched;
+        }
     }
 }
+
+/// The users read so far by a walk that has not finished, and where it goes on from.
+#[derive(Default)]
+pub struct UserWalk {
+    users: Vec<JiraUser>,
+    seen: HashSet<String>,
+    start_at: usize,
+}
+
+/// A Data Center's and Server's search for users by name, paged by `startAt`.
+const USER_SEARCH_OP: &str = "/rest/api/2/user/search";
+
+/// How many users a page asks for.
+const PAGE_SIZE: usize = 50;
+
 #[async_trait]
 impl Actor for JiraUserObserver {
     type Msg = JiraObserverMessage;
@@ -72,16 +173,16 @@ impl Actor for JiraUserObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = JiraObserverState::new(
+        Ok(JiraObserverState::new(
             args.jira_url,
             args.auth,
             args.deployment,
             args.web_client,
-            args.registration_id,
+            args.tcp_client,
             Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-        Ok(state)
+        )
+        .with_retry(args.retry, args.clock)
+        .with_health(args.health))
     }
 
     async fn post_start(
@@ -89,8 +190,7 @@ impl Actor for JiraUserObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        JiraUserObserver::observe(myself, state, state.base_interval);
-        Ok(())
+        JiraUserObserver::observe(&myself, state)
     }
 
     async fn handle(
@@ -100,82 +200,11 @@ impl Actor for JiraUserObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            JiraObserverMessage::Resync => {}
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetUsers(op) = command {
-                    let mut all_users = Vec::new();
-                    let mut start_at = 0;
-                    let max_results = 50;
-                    let query_string = "''";
-
-                    loop {
-                        let url = format!(
-                            "{}{}?query={}&startAt={}&maxResults={}",
-                            state.jira_url, op, query_string, start_at, max_results
-                        );
-                        debug!("{}", url.to_string());
-                        let res = state
-                            .auth
-                            .apply(state.web_client.get(&url))
-                            .send()
-                            .await?
-                            .json::<serde_json::Value>()
-                            .await?;
-
-                        warn!("RAW user picker response: {}", res);  // TEMP diagnostic
-
-                        let users: Vec<JiraUser> = if res["users"].is_null() {
-                            Vec::new()
-                        } else {
-                            serde_json::from_value(res["users"].clone())?
-                        };
-                        let total = res["total"].as_u64().unwrap_or(0);
-                        let fetched = users.len();
-
-                        all_users.extend(users);
-
-                        if (start_at + fetched) >= total as usize {
-                            break;
-                        }
-
-                        start_at += fetched;
-                    }
-
-                    let tcp_client =
-                        where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
-
-                    let data = JiraData::Users(all_users.clone());
-
-                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                    let msg = ClientMessage::PublishRequest {
-                        topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
-                        payload: bytes.to_vec().into(),
-                        registration_id: state.registration_id.clone(),
-                        trace_ctx: None,
-                    };
-
-                    // serialize the inner message before sending
-                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                        .expect("Failed to serialize ClientMessage::PublishRequest");
-
-                    tcp_client.send_message(TcpClientMessage::Publish {
-                        topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
-                        payload: payload.into_vec(),
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    })?
-                }
-            }
-            JiraObserverMessage::Backoff(reason) => {
-                // cancel old event loop and start a new one with updated state, if observer hasn't stopped
-                if let Some(handle) = &state.task_handle {
-                    handle.abort();
-                    // start new loop
-                    match handle_backoff(state, reason) {
-                        Ok(duration) => {
-                            JiraUserObserver::observe(myself, state, duration);
-                        }
-                        Err(e) => myself.stop(Some(e.to_string())),
-                    }
+                    let pulled = JiraUserObserver::pull(&op, state).await;
+                    state.settle(&myself, JIRA_USER_OBSERVER, pulled, Self::tick)?;
                 }
             }
         }

@@ -1,3 +1,24 @@
+-- ACE Tool
+--
+-- Copyright 2026 Carnegie Mellon University.
+--
+-- NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+-- FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+-- EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+-- PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+-- MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+-- TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+--
+-- Licensed under a MIT (SEI)-style license, please see license.txt or contact
+-- permission@sei.cmu.edu for full terms.
+--
+-- [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+-- distribution.  Please see Copyright notice for non-US Government use and distribution.
+--
+-- This Software includes and/or makes use of Third-Party Software each subject to its own license.
+--
+-- DM26-0670
+
 {-
   types/build-orchestrator.dhall — build-orchestrator, the authoritative builder, and what it needs to run.
 
@@ -11,8 +32,9 @@
 
     the namespace jobs run in (`build-jobs`), and the Role that lets build-orchestrator make and watch them there
     and nowhere else
-    the ServiceAccounts jobs run under (`build-job-1` .. `build-job-N`, `buildSlots` of them), each a workload the
-    authority model names, since the broker allows one session per identity; and the cap on builds at once
+    the ServiceAccount jobs run under (`build-job`): one workload in the authority model, marked as having many
+    instances, so every build pod has a certificate and a session of its own (docs/architecture/authority-model.md,
+    "Multi-instance workloads"); and the cap on builds at once
     the object store the jobs' logs go to (the Versity S3 gateway over a volume, a `ServiceAgent`); on a cloud, an S3 bucket takes its place
     build-orchestrator's configuration (a ConfigMap), and the secret that opens the store, which the plan makes
 
@@ -44,12 +66,13 @@ let ns = C.polarNamespace
 --| The namespace build-orchestrator's jobs run in.
 let jobsNamespace = "build-jobs"
 
---| The label that marks a ServiceAccount as one a job runs under, which tooling reads from the rendered plan (the
---| authority model has to name each as a workload).
-let slotLabel = "polar.sei.cmu.edu/build-slot"
+--| The annotation that marks a workload as having many instances (the fork's catalog writes it, infra/rules.nu
+--| INSTANCES_ANNOTATION), which tooling reads from the rendered plan to write `instances: "many"` into the authority
+--| model.
+let instancesAnnotation = "polar.dev/instances"
 
---| The name of the n-th (from 1) ServiceAccount jobs run under.
-let slotName = λ(n : Natural) → "build-job-${Natural/show n}"
+--| The one ServiceAccount every build's job runs under. Each pod of it is an instance: its certificate names the pod.
+let jobAccount = "build-job"
 
 let storeName = "build-orchestrator-store"
 
@@ -64,7 +87,9 @@ let configDir = "/etc/build-orchestrator"
 let BuildOrchestratorValues =
       { Type =
           { platform : Builder.Platform.Type
-          , images : { buildOrchestrator : Text, objectStore : Text }
+          -- `clone`: the init container that clones a build's source (Polar's `cloneImage`), pinned by digest
+          -- (`name@sha256:...`); the orchestrator does not start with a tag here.
+          , images : { buildOrchestrator : Text, objectStore : Text, clone : Text }
           , storageClass : Optional Text
           , storeSize : Text
           -- What a job runs, when its repository's mapping gives no command of its own.
@@ -89,13 +114,9 @@ let BuildOrchestratorValues =
           -- The Secret the cluster's CA is kept in (the core's `caSecret`), which the plan copies the certificate of
           -- into the jobs' namespace for polar-init to verify against, when the platform pins one.
           , caSecret : Optional Text
-          -- The ServiceAccounts jobs run under, `build-job-1` .. `build-job-N`: each is a workload in the authority
-          -- model, and the broker allows one session per identity, so this many builds can have a certificate at
-          -- once. Until the catalog can mark one workload as having many instances (the pod's own identity on each
-          -- session), which would make this one account.
-          , buildSlots : Natural
           -- The most builds at once, which a build's pipeline makes costly (CPU, memory, disk on the node). Requests
-          -- over it wait their turn. No more run than there are slots.
+          -- over it wait their turn. Jobs all run under one ServiceAccount (`build-job`), a workload with many
+          -- instances, so nothing else limits them.
           , maxConcurrentBuilds : Natural
           -- How long a finished job (and its pod) stays in the cluster, by how it ended, in seconds. Its logs are in
           -- the object store and its provenance in the graph by then, so a success need stay only briefly; a failure
@@ -244,17 +265,12 @@ let configuration =
                                             }
                                             v.trustedCa
                                       , image_pull_policy = JSON.string (merge { Some = λ(p : Text) → p, None = "IfNotPresent" } v.platform.imagePullPolicy)
+                                      , clone_image = JSON.string v.images.clone
                                       -- A job's certificate: `polar-init`, no secret shared between builds, issued to
-                                      -- the ServiceAccount the job runs under (one of `accounts`).
+                                      -- the ServiceAccount the job runs under (`account`), whose pods are instances of
+                                      -- one workload, each with a certificate that names its pod.
                                       , identity = JSON.string (identityJson (Builder.makeJobIdentity v.platform v.initEnv))
-                                      , accounts =
-                                          JSON.array
-                                            ( Prelude.List.map
-                                                Natural
-                                                JSON.Type
-                                                (λ(n : Natural) → JSON.string (slotName (n + 1)))
-                                                (Prelude.Natural.enumerate v.buildSlots)
-                                            )
+                                      , account = JSON.string jobAccount
                                       }
                                   )
                             }
@@ -345,23 +361,17 @@ let buildOrchestrator
                 }
               }
 
-        let slotAccounts =
-              Prelude.List.map
-                Natural
-                kubernetes.Resource
-                ( λ(n : Natural) →
-                    kubernetes.Resource.ServiceAccount
-                      kubernetes.ServiceAccount::{
-                      , metadata = kubernetes.ObjectMeta::{
-                        , name = Some (slotName (n + 1))
-                        , namespace = Some jobsNamespace
-                        , labels = Some [ { mapKey = slotLabel, mapValue = "true" } ]
-                        }
-                      -- The only token a job's pod has is the one `polar-init` is given, projected.
-                      , automountServiceAccountToken = Some False
-                      }
-                )
-                (Prelude.Natural.enumerate v.buildSlots)
+        let jobServiceAccount =
+              kubernetes.Resource.ServiceAccount
+                kubernetes.ServiceAccount::{
+                , metadata = kubernetes.ObjectMeta::{
+                  , name = Some jobAccount
+                  , namespace = Some jobsNamespace
+                  , annotations = Some [ { mapKey = instancesAnnotation, mapValue = "many" } ]
+                  }
+                -- The only token a job's pod has is the one `polar-init` is given, projected.
+                , automountServiceAccountToken = Some False
+                }
 
         in  [ P.Stage::{
               , name = "build-orchestrator"
@@ -455,7 +465,7 @@ let buildOrchestrator
                           (Builder.makePvc ns "${storeName}-data" v.storeSize v.storageClass)
                       , kubernetes.Resource.Service (Builder.makeService ns storeName storePort)
                       ]
-                      # slotAccounts
+                      # [ jobServiceAccount ]
                       )
                   # P.agents
                       [ Service.makeServiceAgent store
@@ -465,4 +475,4 @@ let buildOrchestrator
               }
             ]
 
-in  { BuildOrchestratorValues, jobsNamespace, slotLabel, slotName, buildOrchestrator }
+in  { BuildOrchestratorValues, jobsNamespace, instancesAnnotation, jobAccount, buildOrchestrator }

@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # Polar CI Provenance Pipeline — System Design Reference
 
 ## 1. Purpose
@@ -36,18 +59,16 @@ Phase 1.5 cargo-audit scan          │           ▼
            purl index (never       │      (rkyv first, JSON fallback)
            reconstructs a purl)    │           │
          → events.nu emits         │           ▼
-           typed JSON/rkyv events  │      project::project(event)
-Phase 2  cargo build + link        │      one exhaustive match, pure
-         → BinaryLinked events ────┤      event → Vec<GraphOp>:
-Phase 3  container image build     │        execution  BuildJob, stages,
-         → purl cross-check        │                   state, ANALYZED
-           against Phase 1's       │        outputs    artifacts, SBOM,
-           recorded index          │                   Package, Binary, image
-         → ContainerImageCreated ──┘        findings   SecurityAdvisory,
-                                                       PackageStatus,
-                                                       AnalysisFinding
-                                            registry   resolved OCI*
-                                                         │
+           typed JSON/rkyv events  │      dispatch → routes by variant
+Phase 2  cargo build + link        │      ┌──────────────┬─────────────┐
+         → BinaryLinked events ────┤      lifecycle        artifact domain
+Phase 3  container image build     │      (BuildActor /   (ProvenanceLinker)
+         → purl cross-check        │       project_event)  SBOM, Binary,
+           against Phase 1's       │                       Package, Security-
+           recorded index          │                       Advisory, Package-
+         → ContainerImageCreated ──┘                       Status, OCI*
+                                                │               │
+                                                └───────┬───────┘
                                                          ▼
                                                   GraphController actor
                                                   (UpsertNode / EnsureEdge /
@@ -112,18 +133,15 @@ category needs the same treatment.
 
 ### 4.2 Node ownership
 
-The build processor owns writes to a specific subset of node types and only
-ever creates *edges* (never upserts properties) to node types owned
-elsewhere. That keeps it from clobbering data another agent is
-authoritative for. Within the processor, projections are grouped into
-modules by subject (`build-processor/src/project/`), not into actors:
+Each processor owns writes to a specific subset of node types and only ever
+creates *edges* (never upserts properties) to node types owned elsewhere —
+this avoids one processor clobbering data another processor is
+authoritative for.
 
-| Module | Owns (upserts freely) | References only (via EnsureEdge) |
+| Owner | Owns (upserts freely) | References only (via EnsureEdge) |
 |---|---|---|
-| `execution` | `BuildJob`, `BuildJobState`, `BuildStage` | `GitCommit`, backend job nodes, `Package` (ANALYZED) |
-| `outputs` | `BuildArtifact`, `Sbom`, `Package`, `Binary`, `OCILayerDiffId`; `OCIArtifact` for pushed images | — |
-| `findings` | `SecurityAdvisory`, `PackageStatus`, `AnalysisFinding` | `BuildJob`, `Package` |
-| `registry` | `OCIArtifact`, `OCILayer`, `OCIRegistry` (from resolved manifests) | — |
+| Lifecycle projector | `BuildJob`, `BuildStage`, `SecurityAdvisory`, `PackageStatus` | `GitCommit`, `BackendJob`, `Package` |
+| Artifact linker | `Sbom`, `Binary`, `Package`, `ContainerImage`, OCI* | — |
 
 ### 4.3 Domain inventory
 
@@ -285,13 +303,10 @@ through corrected, flat-parameter `RawQuery` handlers (no nested-map
 marshalling, no edge-timestamp-in-MERGE bug); the batched `UNWIND`-based SBOM
 projection; the `REPORTED` per-build fan-out behavior.
 
-**Built since:** the merged projection, though as pure functions behind a
-single dispatch (`project::project`) rather than a `ProvenanceProjector`
-actor. The SBOM batching above is unchanged. The edge-timestamp-in-MERGE fix
-is now actually applied: until then the advisory and package-status queries
-still MERGEd `REPORTED`/`AFFECTS`/`CONCERNS` with `{at}` in the pattern.
-
-**Designed, not yet built:** `ScanContext` (persisting scanner
+**Designed, not yet built:** a merged single projection actor
+(`ProvenanceProjector`) replacing the current `BuildActor`/`ProvenanceLinker`
+split — drafted, then explicitly paused to resolve the batching approach
+first, and not returned to since. `ScanContext` (persisting scanner
 version, advisory-database commit, and SBOM-tool flags as their own
 forensic fact) — proposed as an issue, not implemented. CycloneDX `scope`
 capture (distinguishing a package's runtime-vs-build-vs-dev relationship to
