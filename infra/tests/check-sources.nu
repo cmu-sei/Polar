@@ -105,8 +105,8 @@ const FLAKE_LOCK = '{
       "original": { "type": "file", "url": "file:///home/someone/data.json" }
     },
     "local-path": {
-      "locked": { "type": "path", "path": "./src/ace", "narHash": "sha256-w=" },
-      "original": { "type": "path", "path": "./src/ace" }
+      "locked": { "type": "path", "path": "./src/local", "narHash": "sha256-w=" },
+      "original": { "type": "path", "path": "./src/local" }
     },
     "local-git": {
       "locked": { "type": "git", "url": "file:///home/someone/repo", "rev": "4444444444444444444444444444444444444444" },

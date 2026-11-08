@@ -86,7 +86,7 @@ def main [] {
             assert equal (placement_problems $declared "writers" "kube-consumer") []
             # the open pool's, and any workload on a target that declares no placement: nothing
             assert equal (placement_of $declared null) null
-            assert equal (placement_problems $declared null "ace") []
+            assert equal (placement_problems $declared null "jaeger") []
             assert equal (placement_of null "writers") null
             assert equal (placement_problems null "writers" "kube-consumer") []
             # a pool the target does not declare

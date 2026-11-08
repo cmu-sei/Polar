@@ -55,22 +55,9 @@
     nix-scudo.url                                 = "github:daveman1010221/nix-scudo";
     nix-scudo.inputs.nixpkgs.follows              = "nixpkgs";
     nix-scudo.inputs.flake-utils.follows          = "flake-utils";
-
-    pyproject-nix.url = "github:pyproject-nix/pyproject.nix";
-    pyproject-nix.inputs.nixpkgs.follows = "nixpkgs";
-
-    uv2nix.url = "github:pyproject-nix/uv2nix";
-    uv2nix.inputs.nixpkgs.follows = "nixpkgs";
-    uv2nix.inputs.pyproject-nix.follows = "pyproject-nix";
-
-    pyproject-build-systems.url = "github:pyproject-nix/build-system-pkgs";
-    pyproject-build-systems.inputs.nixpkgs.follows = "nixpkgs";
-    pyproject-build-systems.inputs.pyproject-nix.follows = "pyproject-nix";
-    pyproject-build-systems.inputs.uv2nix.follows = "uv2nix";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-            myNeovimOverlay, staticanalysis, dotacat, nix-container-lib,
-            pyproject-nix, uv2nix, pyproject-build-systems, ... }@inputs:
+            myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }@inputs:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -137,9 +124,6 @@
             polar-tools = {
               packages.${system}.default = polarPkgs.polarTools.tools;
             };
-            ace-python-env = {
-              packages.${system}.default = acePkgs.venvNoCheck;
-            };
             polar-dhall-cache = {
               packages.${system}.default = dhallCache;
             };
@@ -185,16 +169,6 @@
         containerPkgs = import ./src/containers/workspace.nix {
           inherit pkgs lib inputs system;
           nix-container-lib = containerLib;
-        };
-
-        # ── ACE dashboard (Python, uv2nix, nix-container-lib) ──────────────────
-        acePkgs = import ./src/ace/package.nix {
-          inherit pkgs lib system pyproject-nix uv2nix pyproject-build-systems;
-          nix-container-lib = containerLib;
-          inputs = {
-            inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
-          };
-          healthcheckDrv = polarPkgs.healthcheck;
         };
 
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
@@ -287,9 +261,6 @@
           buildOrchestratorImage = polarPkgs.buildOrchestrator.image;
           buildOrchestratorObjectStoreImage = polarPkgs.buildOrchestrator.objectStoreImage;
           polarCustodyImage = polarPkgs.polarCustody.image;
-
-          # ── ACE dashboard ────────────────────────────────────────────────────
-          aceImage = acePkgs.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

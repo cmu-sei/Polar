@@ -27,7 +27,7 @@
 #   bin/polar-dev up        make or update the pod, clone the sources into it if they are not there, and log in
 #   bin/polar-dev attach    log in again
 #   bin/polar-dev cert [u]  copy your Polar certificate out and import it into Librewolf here (infra/user-cert-install.sh)
-#   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687) and ACE (8050)
+#   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687)
 #   bin/polar-dev sops      copy your personal sops files (infra/targets/*/user.sops.yaml, gitignored) into the pod's checkout;
 #                           `up` does this too, and what the pod has of its own stays
 #   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
@@ -561,8 +561,7 @@ case "${1:-}" in
         POLAR_CERT_NEXT="bin/polar-dev forward" bash "$script" "$u"; rm -f "$script" ;;
     forward)
         kubectl -n polar-graph port-forward svc/polar-db-svc 7473:7473 7687:7687 >/tmp/polar-dev-$U-neo4j.log 2>&1 &
-        kubectl -n polar port-forward svc/ace-svc 8050:8050 >/tmp/polar-dev-$U-ace.log 2>&1 &
-        echo "polar-dev: Neo4j at https://localhost:7473, ACE at http://localhost:8050 (logs in /tmp/polar-dev-$U-*.log)" ;;
+        echo "polar-dev: Neo4j at https://localhost:7473 (log in /tmp/polar-dev-$U-neo4j.log)" ;;
     sops) copy_user_sops ;;
     sync) copy_out polar-deploy; copy_out polar-admin; echo "polar-dev: copied polar-deploy and polar-admin to ~/.config" ;;
     down)

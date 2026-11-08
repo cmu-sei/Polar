@@ -71,7 +71,7 @@ src/deploy/local/conf/*.json
 src/deploy/local/conf/*.yaml
 src/deploy/local/conf/*.yml
 
-# Python (src/ace)
+# Python
 __pycache__/
 *.py[cod]
 *.pyo

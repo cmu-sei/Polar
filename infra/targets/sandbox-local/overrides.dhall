@@ -49,10 +49,6 @@ in
   { image       = registry ++ "jaeger:2.13.0"
   , serviceType = "NodePort"
   }
-, ace =
-  { image            = registry ++ "ace-viz:latest"
-  , imagePullSecrets = [] : List { name : Optional Text }
-  }
 , neo4j =
   { image              = registry ++ "neo4j:5.26.2"
   , certIssuerUrl      = "https://cert-issuer.polar.svc.cluster.local:8443"

@@ -21,45 +21,27 @@
   DM26-0670
 -->
 
-# ACE — Agile Capacity Estimator
+# Polar
 
-A team completion-projection dashboard for Agile/Scrum teams. ACE reads
-work-item data from a Neo4j graph, runs Monte Carlo simulation against
-each team's actual historical performance, and shows you — honestly,
-with real confidence bands, not a single optimistic line — when a
-Program Increment is actually going to finish.
+<p align="center">
+  <img width="300" height="300" src="docs/Polar-Logo.png">
+</p>
 
-## What ACE does
+Polar is a knowledge graph framework for DevSecOps observability. A set of agents observe source systems (Jira, GitLab,
+Kubernetes, git repositories, OpenAPI services, and others) and write what they see into Neo4j, over Cassini, a pub/sub
+broker where every connection is mutual TLS. Around the agents, Polar provides the certificate infrastructure
+(`cert-issuer`, the credentials agent, Keycloak for people), the agents' builder and lifecycle, and the
+Nix/Dhall/Kubernetes build and deployment pipeline these install steps use.
 
-- **Projection Chart** — pick a team and PI, and see a probability
-  distribution for the completion date: probability of finishing by the
-  committed date, projected completion date, and projected percent
-  complete at PI end.
-- **Realtime Alerts** — WIP-delay and completion-probability warnings
-  surfaced as soon as a team's actual pace diverges from what's needed
-  to hit the committed date.
-- **Team Impact Adjustment** — compare multiple teams side by side to
-  see where cross-team dependencies are putting a shared PI date at
-  risk.
-
-The projection engine is PERT-based Monte Carlo: it samples from each
-team's own historical velocity (not an assumed one), and — when
-per-issue data is available — models per-issue completion individually
-with team-size contention, rather than a single aggregate burn-down
-line. See [src/ace/ARCHITECTURE.md](src/ace/ARCHITECTURE.md) for the
-full technical detail.
-
-## Using ACE
-
-Once deployed (see Installation below), open the dashboard, select a
-team and PI increment, and click **Get Graph**. Advanced options let
-you adjust the projection start date and training window. See
-[src/ace/README.md](src/ace/README.md) for local development and
-direct container usage.
+"Polar" is a play on Mercator, the Lending Club agents that collected infrastructure data into a graph; Polar takes the
+idea further with pub/sub, mutual TLS, and external observation of services and infrastructure. See
+[DOCUMENTATION.md](DOCUMENTATION.md) for the documentation map and
+[Polar: Improving DevSecOps Observability](https://insights.sei.cmu.edu/blog/polar-improving-devsecops-observability/)
+for an overview.
 
 ## Installation
 
-ACE runs on Polar, which you deploy to a Kubernetes cluster you bring: one on your own machine or one somewhere else. This
+You deploy Polar to a Kubernetes cluster you bring: one on your own machine or one somewhere else. This
 section is the whole path, in the order you do it, from a cluster to a running deployment you can use and develop. Each
 step says what it does, what you should see, and where you have a choice. The commands are the ones for the setup the
 maintainers use (a local single-node cluster, the dev container in the cluster, building from source); the variations
@@ -80,7 +62,7 @@ bin/polar-dev up                                  # step 3: your dev container, 
 nu infra/up.nu local-minimal --dev --user <you> --email <your email>      # step 4: Polar
 # when it pauses at the browser step, on your machine:
 bin/polar-dev cert <you>                          # step 5: your certificate into the browser
-bin/polar-dev forward                             # step 6: then https://localhost:7473 and http://localhost:8050
+bin/polar-dev forward                             # step 6: then https://localhost:7473
 ```
 
 ### Decide first
@@ -92,8 +74,6 @@ bin/polar-dev forward                             # step 6: then https://localho
 | Images | **Built from source** (`up.nu --dev`; the way when you change code), or **published** ones copied in (`up.nu --import-from docker.io/<account>`; nothing is built) | built from source |
 | Target | **`local-minimal`**, applied by `up.nu` directly, for one node or many; or **`sandbox-local`**, published signed to a deployment git server in the cluster and applied by Flux, its workloads placed on node pools the cluster must have (**What Polar asks of the cluster**); or a target of your own (**Using your own target**) | `local-minimal` |
 | Registry | **In the cluster** (the shipped targets keep it there; nothing to run anywhere), or one you bring. See **Registries** | in the cluster |
-
-You also need data for ACE to show: a Neo4j populated with work items (**Data source**, below).
 
 ### 1. A cluster, with storage
 
@@ -253,11 +233,11 @@ while Flux applies them layer by layer. Signing needs `gpgsm` (in the dev contai
 signed record says so). `infra/INFRA.md` ("How a target works") explains what it does. The two targets use the same
 namespaces, so they do not share a cluster: rebuild the cluster between them (step 7).
 
-What `local-minimal` deploys: Neo4j, Cassini, `cert-issuer`, the credentials agent and its observer, ACE, the ingestion
+What `local-minimal` deploys: Neo4j, Cassini, `cert-issuer`, the credentials agent and its observer, the ingestion
 agents, a git server for the schedules repository, and Keycloak with its own Postgres (an optional identity-provider route
 for certificates for people). Each runs as a Deployment of one pod that restarts in place whenever it ends: its init
 container asks for its certificates again each time, which is how it rejuvenates and how it recovers when a certificate or
-its environment changes. ACE holds no other cluster permissions.
+its environment changes.
 
 The cluster CA is made once, by `polar-admin-grant bootstrap-ca` (the `cert-issuer-ca` Secret and the `polar-ca`
 ConfigMap), and refuses to be made again; replacing it means rebuilding the cluster. Everything else gets its certificates
@@ -290,7 +270,7 @@ the commands for the macOS Keychain (Safari, Chrome, Edge) and for Firefox.
 `up.nu` ends with `=== Target local-minimal is up ===` and the pods it runs. For a browser on your machine:
 
 ```bash
-bin/polar-dev forward              # Neo4j at https://localhost:7473, ACE at http://localhost:8050
+bin/polar-dev forward              # Neo4j at https://localhost:7473
 ```
 
 In the dev container, `just cluster-status` shows the nodes and every pod, and `kubectl -n polar get pods` Polar's own.
@@ -415,7 +395,7 @@ cluster. (General Docker Desktop guidance, not tried on a Mac for this guide.)
 6. **Open it** (step 6):
 
    ```bash
-   bin/polar-dev forward        # then https://localhost:7473 (Neo4j) and http://localhost:8050 (ACE)
+   bin/polar-dev forward        # then https://localhost:7473 (Neo4j)
    ```
 
    Step 6's checks are the same. Restart counts that grow, and `jira-observer` restarting when no Jira is set up, are
@@ -464,7 +444,7 @@ pod fetches nothing; the dev shell on your machine has the same cache (`POLAR_DH
 ```bash
 bin/polar-dev attach        # log in again
 bin/polar-dev cert [name]   # copy your certificate out and import it into Librewolf here
-bin/polar-dev forward       # Neo4j (https://localhost:7473) and ACE (http://localhost:8050) for a browser here
+bin/polar-dev forward       # Neo4j (https://localhost:7473) for a browser here
 bin/polar-dev sync          # copy ~/.config/polar-deploy and polar-admin back here
 bin/polar-dev down          # sync, then stop the pod; --purge removes the namespace and its volumes too
 bin/polar-dev build-image   # build the dev image in the pod and push it to the cluster's registry (below)
@@ -531,7 +511,7 @@ the registry in the cluster, `up.nu` (`--dev` builds included) runs entirely in 
 browser (step 5) is a host step.
 
 Inside the container, at `/workspace`, `direnv allow` enters the dev shell; the first time it builds the full workspace
-(every Rust agent, and ACE's Python environment), which takes a while. Keep the container (`podman stop`/`podman start`
+(every Rust agent), which takes a while. Keep the container (`podman stop`/`podman start`
 rather than `--rm`) so later shells skip the rebuild.
 
 **If your registry is on the host rather than in your cluster, and your cluster tooling lives on the host too**, get the
@@ -737,13 +717,13 @@ does not touch. Neo4j is unavailable while it runs.
 
 None of the in-cluster services are exposed outside the cluster by
 default. With the dev container in the cluster, `bin/polar-dev forward` on your machine
-forwards the two a browser needs (Neo4j and ACE); everything else is reached from inside
+forwards the one a browser needs (Neo4j); everything else is reached from inside
 the dev container, where `up.nu` has already started what it uses. On your own machine
 (or in a dev container there), a single recipe brings up detached, auto-restarting
 port-forwards for everything you'd normally want reachable:
 
 ```bash
-just port-forwards-up       # neo4j (7473/7687), keycloak (8080), ace (8050),
+just port-forwards-up       # neo4j (7473/7687), keycloak (8080),
                             # jaeger (4318/16686), credentials-agent observer (8081)
 just port-forwards-down     # stop them
 ```
@@ -752,7 +732,6 @@ These survive terminal closure and automatically retry on the
 occasional dropped connection — a normal one-time step per session,
 not something to leave running in a dedicated terminal.
 
-- ACE's dashboard: `http://localhost:8050`
 - Neo4j Browser: `https://localhost:7473` (requires your user
   certificate; see below)
 - Keycloak admin console: `http://localhost:8080`
@@ -1044,22 +1023,6 @@ encoded, naming its key and file (never the value).
 | `secrets.sops.yaml` (shared) | `.sops.yaml` (gitignored, multi-recipient; only needed to encrypt, not to decrypt) | `SOPS_AGE_SSH_PRIVATE_KEY_FILE=<path to your key>` |
 | `user.sops.yaml` (personal) | `.user.sops.yaml` (gitignored, your own single-recipient config, which you create) | `SOPS_CONFIG=.user.sops.yaml` |
 
-### Just the container
-
-To build and run ACE's container directly, without the full Kubernetes
-deployment:
-
-```bash
-cd src/ace
-nix build .#aceImage
-podman load -i result-ace
-podman run -p 8080:8080 \
-  -e GRAPH_ENDPOINT=bolt://<host>:7687 \
-  -e GRAPH_USER=neo4j \
-  -e GRAPH_PASSWORD=<password> \
-  ace-viz:latest
-```
-
 ### Iterating on an agent
 
 There is no static, offline-generated dev PKI any more: every certificate
@@ -1081,7 +1044,7 @@ certificate**, above.
 
 ## Validating Keycloak certificate issuance
 
-Kubernetes workloads (ACE, the ingestion agents) get their certificates
+Kubernetes workloads (the ingestion agents and services) get their certificates
 automatically, with no manual steps. People normally get theirs through
 the admin flow (see **Admin access and your user certificate**).
 Separately, `cert-issuer` can issue a certificate to a **human
@@ -1153,22 +1116,6 @@ confirming the deployment is actually working end to end.
    A successful response includes `certificate_pem` and `ca_chain_pem`.
    Decode the certificate (`openssl x509 -noout -text`) and confirm its
    Subject Alternative Name matches what you expected from step 3.
-
-## Data source
-
-ACE reads from Neo4j — it does not talk to Jira, GitLab, or any other
-source system directly. The graph it reads from is populated by
-**Polar**, the platform this repository is built on: a set of
-Cassini-connected ingestion agents (Jira, GitLab, Kubernetes, and
-others) that observe source systems and write structured work-item
-data into Neo4j. Polar also provides the certificate infrastructure
-(cert-issuer, Keycloak) ACE and its users authenticate through, and the
-Nix/Dhall/Kubernetes build and deployment pipeline this README's
-install steps use.
-
-If you're working on ACE itself, you'll mostly live in src/ace/. If
-you're working on the ingestion agents, certificate infrastructure, or
-deployment pipeline, see src/agents/ and infra/.
 
 ## License
 

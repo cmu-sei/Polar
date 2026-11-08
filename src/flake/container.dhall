@@ -71,11 +71,6 @@ let polarExtras =
     , Lib.nixpkgs "mermaid-cli"
     ]
 
-let pythonDev =
-  Lib.customLayer "python-dev"
-    [ Lib.flakePackage "ace-python-env" "default"
-    ]
-
 -- ---------------------------------------------------------------------------
 -- Project-specific environment variables.
 -- BuildTime: arch-independent, no store paths — safe for config.Env.
@@ -96,8 +91,7 @@ in defaults.devContainer //
   { name = "polar-dev"
 
   , packageLayers =
-      [ pythonDev
-      , Lib.PackageLayer.Micro
+      [ Lib.PackageLayer.Micro
       , Lib.PackageLayer.Core
       , Lib.PackageLayer.InteractiveDev
       , Lib.PackageLayer.RustToolchain

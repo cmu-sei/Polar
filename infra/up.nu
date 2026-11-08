@@ -601,7 +601,7 @@ def step_browser [username: string] {
     # machine, by the same script `just user-cert-install` runs.
     if ($env.POLAR_DEV_POD? | default "") == "1" {
         note "this is the in-cluster dev container: the browser is on your own machine"
-        pause $"On your machine, close Librewolf and run: bin/polar-dev cert ($username)   \(it copies the certificate out and imports it\), then bin/polar-dev forward   \(Neo4j and ACE for the browser there\)"
+        pause $"On your machine, close Librewolf and run: bin/polar-dev cert ($username)   \(it copies the certificate out and imports it\), then bin/polar-dev forward   \(Neo4j for the browser there\)"
     } else {
         let db = (nss_db)
         let browser_problems = if $db == null {
@@ -932,8 +932,8 @@ def main [
     ^kubectl -n $POLAR get pods
     report_egress $target
     if ($env.POLAR_DEV_POD? | default "") == "1" {
-        note "for a browser on your own machine: bin/polar-dev forward there (Neo4j and ACE); just port-forwards-up there has every service"
+        note "for a browser on your own machine: bin/polar-dev forward there (Neo4j); just port-forwards-up there has every service"
     } else {
-        note "other services (keycloak, ace, jaeger) are not forwarded here; run: just port-forwards-up"
+        note "other services (keycloak, jaeger) are not forwarded here; run: just port-forwards-up"
     }
 }

@@ -53,7 +53,7 @@ def main [] {
             name: "a render may name only the images prepared before it"
             body: {
                 assert equal (unprepared ["cassini" "neo4j"] ["cassini" "neo4j" "postgres"]) []
-                assert equal (unprepared ["cassini" "ace-viz"] ["cassini"]) ["ace-viz"]
+                assert equal (unprepared ["cassini" "keycloak"] ["cassini"]) ["keycloak"]
             }
         }
         {

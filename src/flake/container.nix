@@ -56,11 +56,6 @@
   };
   packageLayers = [
     (u:
-      u.Custom {
-        name = "python-dev";
-        packages = [ { attrPath = "default"; flakeInput = "ace-python-env"; } ];
-      })
-    (u:
       u.Micro)
     (u:
       u.Core)

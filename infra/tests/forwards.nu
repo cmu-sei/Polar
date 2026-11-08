@@ -84,7 +84,7 @@ def main [] {
                 let seen = ($bin | path join "seen")
                 $"#!/bin/sh\necho \"$PPID $$\" > ($seen)\nexec sleep 30\n" | save ($bin | path join "kubectl")
                 ^chmod +x ($bin | path join "kubectl")
-                let r = (with-env { PATH: [$bin] } { do { cd $root; ^$just port-forwards-up ace } | complete })
+                let r = (with-env { PATH: [$bin] } { do { cd $root; ^$just port-forwards-up jaeger } | complete })
                 let started = (with_retries 20 250ms {|n| { ok: ($seen | path exists), final: false, detail: "no kubectl was run" } })
                 # The loop and its kubectl, by the pids the kubectl wrote: nothing else is stopped.
                 if ($seen | path exists) { ^kill ...(open --raw $seen | str trim | split row " ") }

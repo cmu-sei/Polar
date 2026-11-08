@@ -55,7 +55,6 @@
   {image: "polar-custody",  tag: "latest", kind: "nix", attr: "polarCustodyImage"}
   {image: "polar-tools",    tag: "latest", kind: "nix", attr: "polarPkgs.polarTools.image"}
   {image: "polar-nu-init",  tag: "latest", kind: "nix", attr: "nuInitImage"}
-  {image: "ace-viz",        tag: "latest", kind: "nix", attr: "aceImage"}
 
   # ── Agents ──────────────────────────────────────────────────────────────
   {image: "credentials-agent-observer", tag: "latest", kind: "nix", attr: "polarPkgs.credentialsAgent.observerImage"}

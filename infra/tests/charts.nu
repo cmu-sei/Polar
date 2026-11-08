@@ -23,9 +23,9 @@
 
 # infra/tests/charts.nu
 #
-# What the hand-written service charts tell their pods: Neo4j's server certificate and the ACE job's
-# client certificate come from the credentials agent, not from cert-issuer. Neither is a bootstrap identity,
-# so cert-issuer will not sign either on its token alone once the floor is enforced
+# What the hand-written service charts tell their pods: Neo4j's server certificate comes from the credentials
+# agent, not from cert-issuer. It is not a bootstrap identity, so cert-issuer will not sign it on its token
+# alone once the floor is enforced
 # (docs/architecture/cert-issuer-isolation.md). And cert-issuer's own chart gives it what the agent builder
 # needs: its declared settings, its own token, the probe. Rendered the way render.nu renders them.
 #
@@ -165,9 +165,9 @@ def main [] {
             let issuer = (catalog_pod cert-issuer | get containers.0)
             assert equal ($issuer.terminationMessagePolicy? | default null) $policy $issuer.name
             # polar-init in a hand chart
-            let ace = (pod_of ((render ace {}) | path join "ace.yaml"))
-            let init = ($ace.initContainers | where name == "polar-init" | first)
-            assert equal ($init.terminationMessagePolicy? | default null) $policy "ace's polar-init"
+            let neo4j = (pod_of ((render neo4j {}) | path join "neo4j-statefulset.yaml"))
+            let init = ($neo4j.initContainers | where name == "polar-init" | first)
+            assert equal ($init.terminationMessagePolicy? | default null) $policy "Neo4j's polar-init"
         }
 
         # docs/architecture/authority-model.md, "Multi-instance workloads": the template marks a multi-instance workload's
@@ -195,20 +195,6 @@ def main [] {
                 assert (not (is_multi_instance $one)) $"($case.1) one"
                 assert ($one.metadata.annotations | get -o $INSTANCES_ANNOTATION | is-empty) "one is unmarked"
             }
-        }
-
-        # docs/architecture/deployments.md, step 4: ace, a pod with polar-init, restarts in place, one pod at a time.
-        "the ACE job is a Deployment that restarts in place": {
-            use ../rules.nu [in_place_problems]
-            let out = (render ace {})
-            let docs = (open --raw ($out | path join "ace.yaml") | split row "\n---\n" | each {|d| $d | from yaml })
-            let ace = ($docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first)
-            assert equal $ace.kind "Deployment"
-            assert equal (in_place_problems [$ace]) []
-            # the Service still selects its pod
-            let svc = ($docs | where kind == "Service" | first)
-            assert equal $svc.spec.selector { name: $ace.metadata.name }
-            assert equal ($ace.spec.template.metadata.labels | get name) $ace.metadata.name
         }
 
         "Neo4j's server certificate is requested from the credentials agent": {
@@ -341,18 +327,8 @@ def main [] {
             assert equal (value_of $container.env "POLAR_CAPABILITIES") "cassini"
         }
 
-        "Neo4j's and the ACE job's polar-init trust cert-issuer's CA as a mounted file": {
+        "Neo4j's polar-init trusts cert-issuer's CA as a mounted file": {
             pins_the_ca ((render neo4j {}) | path join "neo4j-statefulset.yaml")
-            pins_the_ca ((render ace {}) | path join "ace.yaml")
-        }
-
-        "the ACE job's client certificate is requested from the credentials agent": {
-            let out = (render ace {})
-            let vars = (init_env ($out | path join "ace.yaml"))
-            assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
-            assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
-            assert equal (value_of $vars "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") $CREDENTIALS_AGENT
-            assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
         }
     }
 

@@ -76,7 +76,7 @@
         ] }
         { name: "CERT_ISSUER_SERVER_LIFETIME_SECS", value: "43200" }
         # A year, for the identities whose certificates are not renewed by rejuvenation.
-        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000, "ace.polar.serviceaccount.cluster.local": 31536000 } }
+        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000 } }
       ]
     }
     # The git server's administrators are this cluster's first account, an identity that only exists once the admin flow has run on the

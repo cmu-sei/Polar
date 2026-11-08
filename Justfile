@@ -571,7 +571,7 @@ cluster-status:
     kubectl get pods -A
 
 # Start detached, auto-restarting port-forwards for local dev (neo4j
-# browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI,
+# browser/bolt, keycloak admin console, jaeger traces/UI,
 # credentials-agent observer). Fully detached via setsid (nohup without it, on macOS) -- survives
 # terminal close, does not appear in `jobs`. Logs go to /tmp/pf-*.log; stop
 # with `just port-forwards-down`.
@@ -588,7 +588,7 @@ port-forwards-up *only:
     #!/usr/bin/env bash
     set -euo pipefail
     # No arguments: start every forward. Otherwise only the named ones
-    # (neo4j keycloak ace jaeger observer git).
+    # (neo4j keycloak jaeger observer git).
     ONLY=" {{only}} "
     want() { [ "$ONLY" = "  " ] || [[ "$ONLY" == *" $1 "* ]]; }
     start_pf() {
@@ -606,7 +606,6 @@ port-forwards-up *only:
     }
     start_pf neo4j    polar-graph polar-db-svc                 "7473:7473 7687:7687"   /tmp/pf-neo4j.log
     start_pf keycloak polar-auth  keycloak-svc                 "8080:8080"             /tmp/pf-keycloak.log
-    start_pf ace      polar       ace-svc                      "8050:8050"             /tmp/pf-ace.log
     start_pf jaeger   polar       jaeger-svc                   "4318:4318 16686:16686" /tmp/pf-jaeger.log
     start_pf observer polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
     start_pf git      polar       polar-git-server             "8443:8443"             /tmp/pf-polar-git-server.log
@@ -695,7 +694,6 @@ port-forwards-down:
     #!/usr/bin/env bash
     pkill -f "port-forward -n polar-graph svc/polar-db-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
-    pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/polar-git-server" 2>/dev/null || true

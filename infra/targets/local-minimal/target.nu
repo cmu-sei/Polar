@@ -99,15 +99,13 @@ def main [] {
                 "credentials-agent-observer.yaml"
             ]
         }
-        # everything else: tracing, ACE and the agents
+        # everything else: tracing and the agents
         {
             name: "agents"
             depends_on: ["identity"]
             wait_for: []
             files: [
                 "jaeger.yaml"
-                "ace-rbac.yaml"
-                "ace.yaml"
                 "kube-observer-resources.yaml"
                 "kube-observer.yaml"
                 "kube-consumer-resources.yaml"
@@ -151,7 +149,6 @@ def main [] {
             ($layers | path join "1-platform/infra/namespaces/main.nu")
             ($layers | path join "1-platform/infra/storage/main.nu")
             ($layers | path join "2-services/jaeger/main.nu")
-            ($layers | path join "2-services/ace/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "2-services/postgres/main.nu")
             ($layers | path join "2-services/keycloak/main.nu")
@@ -175,7 +172,6 @@ def main [] {
         polar_init_image      : $"(node_registry local-minimal)/polar-init:latest"
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
-            { identity: "ace.polar.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]
     } | to nuon
 }
